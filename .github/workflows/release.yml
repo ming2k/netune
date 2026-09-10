@@ -1,0 +1,40 @@
+name: Release
+
+# Publish all four crates in lockstep when a release tag is pushed.
+# Requires the CARGO_REGISTRY_TOKEN repository secret (crates.io token with
+# publish scope for the netune-* crates).
+#
+#   git tag -a v0.1.0 -m "netune 0.1.0"
+#   git push origin v0.1.0
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish lockstep ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Dependency order: trace → http1 → netune → probe. Each upload waits
+      # for its predecessor to become resolvable on crates.io.
+      - run: |
+          cargo publish -p netune-trace
+          sleep 10
+          cargo publish -p netune-http1
+          sleep 10
+          cargo publish -p netune
+          sleep 10
+          cargo publish -p netune-probe
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

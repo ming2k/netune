@@ -1,0 +1,23 @@
+[package]
+name = "netune-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# `inject` adds the frame-transmission path (`Capture::send_frame`). It is
+# opt-in and must stay out of every default build: the same privilege rule
+# that keeps the daemon from holding CAP_NET_RAW keeps this crate's default
+# artifact receive-only, and injection is the stronger capability — it
+# changes the network instead of measuring it. Builders ([`packet::build_*`])
+# are pure and always present; only the socket path is gated.
+[features]
+inject = []
+
+[dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

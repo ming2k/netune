@@ -1,0 +1,3 @@
+# Keep clippy's suggestions inside the declared MSRV so we don't get
+# recommended APIs that would break the 1.95 build.
+msrv = "1.95"

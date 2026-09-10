@@ -1,0 +1,13 @@
+[package]
+name = "netune-http2"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "HTTP/2 wire protocol for the netune stack (reserved: not yet implemented)"
+repository = "https://github.com/ming2k/netune"
+
+[dependencies]
+
+[lints]
+workspace = true

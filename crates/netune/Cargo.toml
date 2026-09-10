@@ -12,8 +12,8 @@ bytes = { workspace = true }
 flate2 = { workspace = true }
 http = { workspace = true }
 libc = { workspace = true }
-netune-http1 = { path = "../netune-http1" }
-netune-trace = { path = "../netune-trace" }
+netune-http1 = { path = "../netune-http1", version = "0.1.0" }
+netune-trace = { path = "../netune-trace", version = "0.1.0" }
 rustls = { workspace = true }
 rustls-platform-verifier = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt"] }
@@ -24,7 +24,7 @@ base64 = { workspace = true }
 brotli = { workspace = true }
 flate2 = { workspace = true }
 http = { workspace = true }
-netune-trace = { path = "../netune-trace" }
+netune-trace = { path = "../netune-trace", version = "0.1.0" }
 rcgen = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
 

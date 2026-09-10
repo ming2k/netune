@@ -3,6 +3,8 @@ name = "netune-trace"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Request trace model, pure timing derivations, and TLS ClientHello JA3/JA4 fingerprints"
+repository = "https://github.com/ming2k/netune"
 license.workspace = true
 
 [dependencies]

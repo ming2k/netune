@@ -3,6 +3,8 @@ name = "netune"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "An owned, observable, intervention-capable network stack: DNS/TCP/TLS transport with a syscall tap, proxies, connection pool, and fault injection"
+repository = "https://github.com/ming2k/netune"
 license.workspace = true
 
 [dependencies]

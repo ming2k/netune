@@ -3,6 +3,8 @@ name = "netune-probe"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "L2 Ethernet/IPv4/TCP packet parse and build (forge) with an opt-in AF_PACKET capture and transmit path"
+repository = "https://github.com/ming2k/netune"
 license.workspace = true
 
 # `inject` adds the frame-transmission path (`Capture::send_frame`). It is

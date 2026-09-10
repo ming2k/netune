@@ -3,6 +3,8 @@ name = "netune-http1"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "HTTP/1.1 codec: owned request/response framing, differential-tested against hyper"
+repository = "https://github.com/ming2k/netune"
 license.workspace = true
 
 [dependencies]

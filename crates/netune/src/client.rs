@@ -70,19 +70,34 @@ impl<C: Connector> Client<C> {
     /// zero connection overhead (instant warm-pool hit). Returns `true` if a fresh
     /// connection was opened, or `false` if an idle connection was already available.
     pub async fn prewarm(&self, target: &Target) -> Result<bool, NetError> {
-        if self.pool.idle_count(&target.authority) > 0 {
+        if self.pool.idle_count(&Self::pool_key(target)) > 0 {
             return Ok(false);
         }
         let recorder = Arc::new(Mutex::new(Recorder::start(crate::DEFAULT_TRACE_CAPACITY)));
         let established = self.connector.connect(target, &recorder).await?;
         self.pool.put(
-            &target.authority,
+            &Self::pool_key(target),
             established.stream,
             BytesMut::new(),
             established.local_port,
             established.socket,
         );
         Ok(true)
+    }
+
+    /// The pool key for a target: authority plus the requested TLS identity.
+    ///
+    /// A connection handshook under one fingerprint must never serve a request
+    /// that asked for another — the hello is already on the wire, and any
+    /// resumption ticket belongs to that identity. Keying on both keeps each
+    /// identity's connections in their own slice of the pool. Requests without
+    /// a selection keep the bare-authority key and never collide with
+    /// profiled ones.
+    fn pool_key(target: &Target) -> String {
+        match &target.tls_profile {
+            Some(profile) => format!("{}#{}", target.authority, profile),
+            None => target.authority.clone(),
+        }
     }
 
     /// Send one request without installing a trace consumer.
@@ -182,7 +197,8 @@ impl<C: Connector> Client<C> {
             head.headers.insert(http::header::HOST, value);
         }
 
-        let (stream, buffered, local_port, socket) = match self.pool.take(&target.authority) {
+        let pool_key = Self::pool_key(target);
+        let (stream, buffered, local_port, socket) = match self.pool.take(&pool_key) {
             Some(idle) => {
                 let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
                 recorder.reused_connection();
@@ -240,6 +256,7 @@ impl<C: Connector> Client<C> {
                 reader: Some(reader),
                 recorder,
                 pool: self.pool.clone(),
+                pool_key,
                 authority: target.authority.clone(),
                 local_port,
                 reusable,
@@ -379,6 +396,7 @@ pub struct BodyStream {
     reader: Option<Http1Reader<TimedIo<Box<dyn crate::connect::Transport>>>>,
     recorder: Arc<Mutex<Recorder>>,
     pool: Pool,
+    pool_key: String,
     authority: String,
     local_port: Option<u16>,
     reusable: bool,
@@ -504,7 +522,7 @@ impl BodyStream {
         drop(self.sampler.take());
         if self.finished && self.reusable {
             self.pool.put(
-                &self.authority,
+                &self.pool_key,
                 stream,
                 buffered,
                 self.local_port,

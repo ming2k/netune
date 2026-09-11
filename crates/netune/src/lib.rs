@@ -30,6 +30,7 @@ mod pool;
 mod proxy;
 mod tcp_info;
 mod tls;
+mod tls_profile;
 
 /// Capacity of the throwaway trace ring a [`Client::request`] uses.
 pub const DEFAULT_TRACE_CAPACITY: usize = 1024;
@@ -47,4 +48,5 @@ pub use netune_http1::{BodyKind, RequestHead, ResponseHead};
 pub use pool::{IdleConnection, Pool, PoolConfig};
 pub use proxy::{Proxy, ProxyConnector};
 pub use tcp_info::{SAMPLE_INTERVAL, Sampler, TcpSample, sample as sample_tcp_info};
-pub use tls::{TlsConnector, platform_client_config};
+pub use tls::{TlsConnector, TlsRouterConnector, platform_client_config};
+pub use tls_profile::{Preset, TlsProfile, Verifier};

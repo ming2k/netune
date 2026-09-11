@@ -26,6 +26,16 @@ pub struct Target {
     pub authority: String,
     /// Server name for TLS; `None` means plaintext.
     pub tls_server_name: Option<String>,
+    /// Which TLS fingerprint identity to present on this target, by profile
+    /// name (`"codex-reqwest"`, …). `None` selects the connector's default —
+    /// for `TlsRouterConnector` that is [`crate::tls_profile::TlsProfile::
+    /// netune_default`], and a plain [`crate::tls::TlsConnector`] ignores the
+    /// name entirely (it has only one identity to offer).
+    ///
+    /// The pool keys on this: a connection handshook under one identity is
+    /// never handed to a request that asked for another, because the pooled
+    /// session's hello is already on the wire and cannot be changed.
+    pub tls_profile: Option<String>,
 }
 
 impl Target {
@@ -34,6 +44,7 @@ impl Target {
         Self {
             authority: authority.into(),
             tls_server_name: None,
+            tls_profile: None,
         }
     }
 
@@ -43,7 +54,15 @@ impl Target {
         Self {
             authority: authority.into(),
             tls_server_name: Some(server_name.into()),
+            tls_profile: None,
         }
+    }
+
+    /// This target with an explicit TLS profile selection. A plaintext target
+    /// ignores the name (there is no hello to shape).
+    pub fn with_tls_profile(mut self, profile: impl Into<String>) -> Self {
+        self.tls_profile = Some(profile.into());
+        self
     }
 
     /// Split an absolute URL into a target and an origin-form path.

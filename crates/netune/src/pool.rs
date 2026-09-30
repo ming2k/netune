@@ -30,7 +30,17 @@ impl Default for PoolConfig {
             max_idle_per_authority: 4,
             // Long enough that human-paced agent turns (read, think, send) keep
             // their connection, short enough that a dead one is not reused.
-            idle_timeout: Duration::from_secs(300),
+            //
+            // The previous 300 s was measured against the wrong party: a
+            // long-horizon agent waits minutes between turns, and mainstream
+            // LLM relays/gateways close idle keep-alive sockets on their own
+            // schedule — commonly 30–60 s, and not necessarily announced with a
+            // `close_notify`. Every such socket stayed "fresh" here, was handed
+            // out, and surfaced to the user as a provider failure. Retaining a
+            // connection is only worth anything if it is still alive, so the
+            // bound now sits inside the shortest idle cull observed from the
+            // peers this client actually talks to.
+            idle_timeout: Duration::from_secs(20),
         }
     }
 }

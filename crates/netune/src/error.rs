@@ -55,6 +55,56 @@ impl NetError {
             | Self::Security(_) => false,
         }
     }
+
+    /// Whether this failure is the signature of a connection that was already
+    /// dead when the request was written to it — the fate of a pooled socket the
+    /// peer discarded while it sat idle.
+    ///
+    /// The predicate is deliberately about *where* the failure happened, not
+    /// merely which error type surfaced, because one physical event (a peer
+    /// closing an idle socket) reaches this crate through several shapes
+    /// depending on how politely the peer closed:
+    ///
+    /// - a bare `FIN` makes rustls report `UnexpectedEof`, which arrives as
+    ///   [`NetError::Io`];
+    /// - a courteous `close_notify` makes the codec see a clean end-of-stream,
+    ///   which arrives as [`NetError::Http`] with [`HttpError::Incomplete`];
+    /// - a `RST` makes the first write fail with `BrokenPipe` or
+    ///   `ConnectionReset`.
+    ///
+    /// All three mean "this socket was gone before the request reached the
+    /// peer", so a fresh connection can be tried without the caller ever
+    /// observing a failure. Callers must only treat this as safe *before a
+    /// response head has been parsed*: past that point the request provably
+    /// reached the origin, and re-sending is a policy decision, not a transport
+    /// one.
+    pub fn is_stale_connection(&self) -> bool {
+        fn transient_io(kind: std::io::ErrorKind) -> bool {
+            use std::io::ErrorKind::*;
+            matches!(
+                kind,
+                ConnectionReset
+                    | ConnectionAborted
+                    | ConnectionRefused
+                    | BrokenPipe
+                    | UnexpectedEof
+                    | NotConnected
+                    | TimedOut
+            )
+        }
+        match self {
+            Self::Io(error) => transient_io(error.kind()),
+            Self::Http(HttpError::Io(error)) => transient_io(error.kind()),
+            // A stream that ended before a single response byte arrived. The
+            // codec reports this the same way whether the peer was courteous
+            // (`close_notify`, a clean end-of-stream) or abrupt (`FIN`/`RST`,
+            // which rustls turns into `UnexpectedEof`) — both are handled here
+            // so one physical event cannot be treated differently depending on
+            // which shape it surfaced as.
+            Self::Http(HttpError::Incomplete(_)) => true,
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Display for NetError {

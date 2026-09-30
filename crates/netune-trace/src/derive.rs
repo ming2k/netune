@@ -107,6 +107,12 @@ pub fn derive(trace: &RequestTrace) -> DerivedTimings {
         let at = event.at_ns;
         match event.kind {
             EventKind::ConnectReused => reused = true,
+            // The reuse claim is revocable: if the socket turned out to be dead
+            // and the attempt reconnected, its phases were really paid. Leaving
+            // `reused` set would report a handshake this attempt did pay as
+            // `ConnectionReused` — the same class of fabrication as claiming a
+            // handshake that never happened.
+            EventKind::ConnectStaleDiscarded => reused = false,
             EventKind::DnsStart => dns.0 = dns.0.or(Some(at)),
             EventKind::DnsEnd => dns.1 = dns.1.or(Some(at)),
             EventKind::TcpStart => tcp.0 = tcp.0.or(Some(at)),

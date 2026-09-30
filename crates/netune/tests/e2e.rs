@@ -120,6 +120,114 @@ fn client() -> Client<TcpConnector> {
     )
 }
 
+/// A peer that answers the first request on a connection, then closes the
+/// socket without a `close_notify` — exactly what a load balancer or gateway
+/// does to an idle keep-alive connection. The next request on that connection
+/// finds a dead socket.
+///
+/// This is the production shape that surfaced to users as
+/// `transport error: peer closed connection without sending TLS close_notify`,
+/// in long runs of retries that only a model re-selection (which built a fresh
+/// pool) cleared.
+async fn serve_then_drop_idle(listener: TcpListener) {
+    let (mut socket, _) = listener.accept().await.expect("accept");
+    // First request: answer it completely so the client pools the connection.
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = socket.read(&mut buffer).await.expect("read request");
+        if read == 0 {
+            return;
+        }
+        request.extend_from_slice(&buffer[..read]);
+    }
+    socket
+        .write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+        )
+        .await
+        .expect("head");
+    let frame = b"data: 0\n";
+    socket
+        .write_all(format!("{:x}\r\n", frame.len()).as_bytes())
+        .await
+        .expect("chunk size");
+    socket.write_all(frame).await.expect("chunk");
+    socket.write_all(b"\r\n0\r\n\r\n").await.expect("end");
+    socket.flush().await.expect("flush");
+    // Now behave like an idle-culling gateway: hard-close with no alert. The
+    // socket sits in the client's pool in this state.
+    drop(socket);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pooled_socket_the_peer_dropped_is_replaced_transparently() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    // One server lifetime that answers a request and then hard-closes, followed
+    // by a fresh listener on the same port serving the replacement connection.
+    let server = tokio::spawn(serve_then_drop_idle(listener));
+
+    let client = client();
+    let target = Target::plain(address.to_string());
+
+    // First request populates the pool with a connection the peer then kills.
+    let first = request_once(
+        &client,
+        &target,
+        Arc::new(Mutex::new(Recorder::start(4096))),
+    )
+    .await;
+    assert_eq!(first, 1, "the first response is served in full");
+    server.await.expect("join");
+    assert_eq!(
+        client.pool().idle_count(&address.to_string()),
+        1,
+        "the answered connection is pooled"
+    );
+
+    // The pooled socket is now dead. A second request must not fail: the
+    // transport discards it, reconnects, and answers — all invisible to the
+    // caller. Rebind the same port so the reconnect has somewhere to land.
+    let listener = TcpListener::bind(address).await.expect("rebind");
+    let server = tokio::spawn(serve(listener, 1));
+    let recorder = Arc::new(Mutex::new(Recorder::start(4096)));
+    let frames = request_once(&client, &target, Arc::clone(&recorder)).await;
+    assert_eq!(
+        frames, CHUNKS,
+        "the request succeeds on a fresh connection after the stale socket is discarded"
+    );
+    server.await.expect("join");
+
+    let log = recorder.lock().expect("recorder").log().clone();
+    assert_eq!(
+        log.iter()
+            .filter(|event| event.kind == EventKind::ConnectReused)
+            .count(),
+        1,
+        "exactly one reuse event, carrying the idle age"
+    );
+    assert!(
+        log.iter()
+            .any(|event| event.kind == EventKind::ConnectStaleDiscarded),
+        "the stale socket is recorded as discarded"
+    );
+    assert!(
+        log.iter().any(|event| event.kind == EventKind::TcpStart),
+        "a replacement connection was established"
+    );
+
+    // The revocation must reach the derivation: this attempt paid for a
+    // handshake, so it may not be reported as having ridden a pooled socket.
+    let trace = trace_of(log, &address.to_string());
+    let derived = derive(&trace);
+    assert!(
+        derived.tcp_us.is_measured(),
+        "the reconnected attempt measures TCP, not ConnectionReused: {:?}",
+        derived.tcp_us.validity()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_streaming_attempt_produces_a_derivable_trace() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

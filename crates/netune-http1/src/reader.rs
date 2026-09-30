@@ -227,7 +227,7 @@ impl<R: AsyncRead + Unpin> Http1Reader<R> {
                     }
                     if self.buf.is_empty() {
                         if self.fill().await? == 0 {
-                            return Err(HttpError::Protocol("body truncated"));
+                            return Err(HttpError::Incomplete("body truncated"));
                         }
                         continue;
                     }
@@ -274,7 +274,7 @@ impl<R: AsyncRead + Unpin> Http1Reader<R> {
                     }
                     if self.buf.is_empty() {
                         if self.fill().await? == 0 {
-                            return Err(HttpError::Protocol("chunk truncated"));
+                            return Err(HttpError::Incomplete("chunk truncated"));
                         }
                         continue;
                     }
@@ -370,7 +370,7 @@ impl<R: AsyncRead + Unpin> Http1Reader<R> {
                 return Err(HttpError::LimitExceeded("max_head_bytes"));
             }
             if self.fill().await? == 0 {
-                return Err(HttpError::Protocol("connection closed inside head"));
+                return Err(HttpError::Incomplete("connection closed inside head"));
             }
         }
     }

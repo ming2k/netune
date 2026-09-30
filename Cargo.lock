@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "netune"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "brotli",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http1"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "http",
@@ -544,14 +544,14 @@ version = "0.0.1"
 
 [[package]]
 name = "netune-probe"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "netune-trace"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",

@@ -84,6 +84,12 @@ impl Recorder {
     /// Record that the attempt used a pooled connection: no DNS/TCP/TLS phases
     /// happened, which is what makes those scopes `NotApplicable` rather than
     /// zero.
+    ///
+    /// This is a zero-payload shorthand. A caller that also knows *how long* the
+    /// socket sat idle should use [`Recorder::mark`] with
+    /// [`EventKind::ConnectReused`] directly and pass the age in `a`; calling
+    /// both would push two reuse events, and a reader taking the first
+    /// (`EventLog::first_of`) would find the one without the age.
     pub fn reused_connection(&mut self) {
         self.mark(EventKind::ConnectReused, 0, 0);
     }

@@ -70,6 +70,15 @@ pub enum EventKind {
     Redirect = 26,
     /// The connection reaches its target through a proxy tunnel.
     ProxyTunnel = 27,
+    /// A pooled connection was found dead and abandoned before the request was
+    /// answered; a fresh connection was established for the same attempt.
+    ///
+    /// This is the one event that revokes a preceding
+    /// [`EventKind::ConnectReused`]: the attempt did *not* ultimately ride a
+    /// pooled socket, so its connection phases were really paid and must be
+    /// measured rather than reported not-applicable. `a` = the idle age in ms of
+    /// the socket that was discarded.
+    ConnectStaleDiscarded = 28,
 }
 
 impl EventKind {
@@ -110,6 +119,7 @@ impl EventKind {
             25 => Self::TlsInfo,
             26 => Self::Redirect,
             27 => Self::ProxyTunnel,
+            28 => Self::ConnectStaleDiscarded,
             _ => return None,
         })
     }

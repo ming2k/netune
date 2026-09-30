@@ -122,12 +122,16 @@ async fn conflicting_content_lengths_are_rejected() {
 }
 
 #[tokio::test]
-async fn a_truncated_body_is_a_protocol_error() {
+async fn a_truncated_body_is_an_incomplete_stream_not_a_protocol_error() {
+    // The peer stopped speaking rather than speaking wrongly. The distinction
+    // decides the retry verdict: a truncated body on a fresh connection is
+    // transient, so it must not be classified as a syntax judgement.
     let data = b"HTTP/1.1 200 OK\r\ncontent-length: 11\r\n\r\nhello";
     let error = read_all(data, 8, Method::GET)
         .await
         .expect_err("must reject");
-    assert_eq!(error.class(), "protocol");
+    assert_eq!(error.class(), "incomplete");
+    assert!(error.is_retryable());
 }
 
 #[tokio::test]

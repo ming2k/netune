@@ -181,9 +181,51 @@ impl<C: Connector> Client<C> {
         &self,
         target: &Target,
         recorder: Arc<Mutex<Recorder>>,
-        mut head: RequestHead,
+        head: RequestHead,
         body: Option<Bytes>,
     ) -> Result<Response, NetError> {
+        // A pooled socket may have been discarded by the peer while it sat idle,
+        // and virtually every HTTP peer does this without a `close_notify`. That
+        // is a normal way for a connection to end, not a failure of the request,
+        // so the transport absorbs it instead of asking the user to re-select a
+        // model to get a fresh pool. The retry is only ever taken *before* a
+        // response head was parsed, on a connection this attempt took from the
+        // pool: the request provably had not reached the origin, so re-sending
+        // it cannot duplicate a side effect.
+        let mut recycled = self.pool.take(&Self::pool_key(target));
+        loop {
+            let reused = recycled.is_some();
+            let attempt = self
+                .send_on_connection(target, Arc::clone(&recorder), &head, &body, recycled.take())
+                .await;
+            match attempt {
+                Err(error) if reused && error.is_stale_connection() => {
+                    // The socket died before the peer answered. Record the
+                    // revocation so the trace explains both the decision and the
+                    // cost: the reuse claim is withdrawn and the handshake this
+                    // attempt is about to pay is measured rather than reported
+                    // as `ConnectionReused`.
+                    let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
+                    recorder.mark(EventKind::ConnectStaleDiscarded, 0, 0);
+                    drop(recorder);
+                    continue;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// Write `head`/`body` on `recycled` (or a fresh connection) and return the
+    /// response, with no recovery of its own.
+    async fn send_on_connection(
+        &self,
+        target: &Target,
+        recorder: Arc<Mutex<Recorder>>,
+        head: &RequestHead,
+        body: &Option<Bytes>,
+        recycled: Option<crate::pool::IdleConnection>,
+    ) -> Result<Response, NetError> {
+        let mut head = head.clone();
         if !head.headers.contains_key(http::header::USER_AGENT) {
             head.headers.insert(
                 http::header::USER_AGENT,
@@ -198,10 +240,12 @@ impl<C: Connector> Client<C> {
         }
 
         let pool_key = Self::pool_key(target);
-        let (stream, buffered, local_port, socket) = match self.pool.take(&pool_key) {
+        let (stream, buffered, local_port, socket) = match recycled {
             Some(idle) => {
                 let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-                recorder.reused_connection();
+                // One event, carrying the idle age: `derive` and every surface
+                // read reuse through `first_of(ConnectReused)`, so a preceding
+                // age-less duplicate would make the age recorded here unreadable.
                 recorder.mark(EventKind::ConnectReused, idle.age.as_millis() as u32, 0);
                 (idle.stream, idle.buffered, idle.local_port, idle.socket)
             }

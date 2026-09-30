@@ -40,6 +40,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.95.0"
+      # `cargo nextest` is not part of the toolchain; without this step the
+      # suite does not run at all and the job fails on the missing subcommand.
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
       # The default build must not contain the transmit path; the inject
       # build must compile and pass. Both are asserted by running the suite

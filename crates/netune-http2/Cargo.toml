@@ -1,0 +1,25 @@
+[package]
+name = "netune-http2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "HTTP/2 wire protocol and Akamai fingerprint impersonation for the netune stack"
+repository = "https://github.com/ming2k/netune"
+license.workspace = true
+readme.workspace = true
+keywords = ["http2", "hpack", "fingerprint", "codec", "akamai"]
+categories = ["network-programming", "web-programming::http-client", "parser-implementations"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+bytes = { workspace = true }
+http = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "sync", "time", "macros", "rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
+
+[lints]
+workspace = true

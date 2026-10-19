@@ -1,0 +1,99 @@
+name: Release
+
+# A release is defined by this repository: an annotated tag that matches the
+# workspace version, plus the GitHub Release this workflow creates from the
+# matching CHANGELOG.md section. Distribution is by git tag:
+#
+#   netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.1" }
+#
+# No registry account, token, or upload participates in making a release.
+# See docs/dev/release-and-versioning.md.
+#
+#   git tag -a v0.0.2 -m "netune 0.0.2: <one-line summary>"
+#   git push origin main --follow-tags
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Tag matches workspace version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # A tag whose version disagrees with Cargo.toml would ship a mislabelled
+      # release. Fail before the GitHub Release is created.
+      - name: Compare tag with [workspace.package] version
+        run: |
+          version="$(awk '/^\[workspace\.package\]/{seen=1} seen && /^version *=/{gsub(/[" ]/,"",$3); print $3; exit}' Cargo.toml)"
+          echo "tag=${GITHUB_REF_NAME} workspace_version=${version}"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match workspace version ${version}"
+            exit 1
+          fi
+
+  release:
+    name: GitHub Release ${{ github.ref_name }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble the release body from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes="$RUNNER_TEMP/notes.md"
+          body="$RUNNER_TEMP/body.md"
+          awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { found = 1 }
+            found && index($0, "## [") == 1 && index($0, "## [" v "]") != 1 { exit }
+            found { print }
+          ' CHANGELOG.md > "$notes"
+          if [ ! -s "$notes" ]; then
+            echo "::error::CHANGELOG.md has no '## [$version]' section"
+            exit 1
+          fi
+          {
+            echo "Crates in this tag:"
+            echo
+            echo "| crate | version |"
+            echo "| :--- | :--- |"
+            workspace="$(awk '/^\[workspace\.package\]/{seen=1} seen && /^version *=/{gsub(/[" ]/,"",$3); print $3; exit}' Cargo.toml)"
+            for manifest in crates/*/Cargo.toml; do
+              name="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$manifest" | head -1)"
+              member_version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$manifest" | head -1)"
+              printf '| `%s` | %s |\n' "$name" "${member_version:-$workspace}"
+            done
+            echo
+            echo "Consume from this tag:"
+            echo
+            echo '```toml'
+            echo "netune = { git = \"https://github.com/${GITHUB_REPOSITORY}\", tag = \"${GITHUB_REF_NAME}\" }"
+            echo '```'
+            echo
+            echo "---"
+            echo
+            cat "$notes"
+          } > "$body"
+          mv "$body" "$notes"
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "netune ${GITHUB_REF_NAME#v}" \
+              --notes-file "$RUNNER_TEMP/notes.md"
+          fi

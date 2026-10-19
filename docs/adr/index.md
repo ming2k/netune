@@ -1,0 +1,13 @@
+# Architectural Decision Records
+
+Binding decisions for this repository. `Scope` tags identify the subsystems a record governs; the summary column carries the primary invariant family where one exists. Authoring rules are in [`docs/dev/standards/adr.md`](../dev/standards/adr.md).
+
+| ID | Title | Status | Scope | Decision Summary & Primary Invariant | Date |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| [0001](0001-owned-transport-trace-model.md) | Owned Transport Substrate and Protocol-Neutral Trace Model | accepted | transport/owned-stack, trace/model | Transport ownership from DNS to HTTP/1.1 with zero third-party HTTP runtime; timings are pure derivations of recorded events (`INV-TRACE-01..02`, `INV-TRANSPORT-00`) | 2026-09-08 |
+| [0002](0002-egress-confinement-policy.md) | Egress Confinement Policy and Public Network Boundary | accepted | security/egress, transport/connect | `StrictPublic` confinement rejecting loopback, RFC 1918 private, link-local, cloud-metadata, and SSRF ranges before connect (`INV-EGRESS-01..03`) | 2026-09-09 |
+| [0003](0003-workspace-decomposition-privilege-boundaries.md) | Workspace Decomposition and Structural Privilege Separation | accepted | workspace/topology, security/privilege, probe/inject | Decouple trace, codec, transport, and probe; compile wire transmission only behind the opt-in `inject` feature requiring Linux `CAP_NET_RAW` (`INV-HTTP2-01`, `INV-PROBE-01..02`) | 2026-09-10 |
+| [0004](0004-tls-fingerprint-profiles-pool-isolation.md) | TLS Fingerprint Profiles and Connection Pool Isolation | accepted | tls/fingerprint, pool/isolation | Pure data `TlsProfile` with named presets, per-request routing, and `authority#profile` connection pool isolation (`INV-TLS-01..03`) | 2026-09-11 |
+| [0005](0005-keepalive-socket-culling-absorption.md) | Keep-Alive Socket Culling Absorption and Stale Socket Recovery | accepted | transport/pool, resilience/keepalive | 20 s idle pool bound, pre-head replay-safe retry, distinct `HttpError::Incomplete` (`INV-TRANSPORT-01..04`) | 2026-09-30 |
+| [0006](0006-transport-customizability-wire-evasion.md) | Transport Customizability, DNS and Wire Evasion Architecture | accepted | transport/customizability, dns/resolver, security/evasion | Pluggable `DnsResolver`, L3/L4 `SocketConfig`, `SegmentingIo` for SNI slicing, and raw header casing preservation (`INV-CUSTOM-01..03`) | 2026-10-15 |
+| [0007](0007-owned-client-websocket-codec.md) | Owned Client-Side WebSocket Codec and Egress Stream | accepted | websocket/codec, transport/egress, protocol/rfc6455 | Pure RFC 6455 codec (`netune-ws`) with client-only egress transport, masking-direction enforcement, bounded reassembly, and no WS pooling (`INV-WS-01..08`) | 2026-10-20 |

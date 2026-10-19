@@ -1,0 +1,26 @@
+[package]
+name = "netune-ws"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Pure RFC 6455 WebSocket codec: zero-allocation framing, SIMD-accelerated masking, and client handshake"
+repository = "https://github.com/ming2k/netune"
+license.workspace = true
+readme.workspace = true
+keywords = ["websocket", "rfc6455", "codec", "client", "protocol"]
+categories = ["network-programming", "web-programming::websocket"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+base64 = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "time", "net"] }
+tokio-tungstenite = { version = "0.28", default-features = false }
+
+[lints]
+workspace = true

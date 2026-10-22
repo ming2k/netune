@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::runtime::Id as RuntimeId;
+
 use bytes::BytesMut;
 
 use crate::connect::Transport;
@@ -62,6 +64,29 @@ struct Idle {
     local_port: Option<u16>,
     socket: Option<std::net::TcpStream>,
     since: Instant,
+    /// The tokio runtime whose reactor registered this socket.
+    ///
+    /// A socket is not a portable resource: it is registered with the reactor
+    /// that created it, and when that runtime is dropped the registration is
+    /// marked shut down. A pool that is process-scoped — one `Client` shared by
+    /// every task, as `nuo` does — can therefore hand a dead registration to a
+    /// different runtime, which surfaces to the caller as
+    /// `RUNTIME_SHUTTING_DOWN_ERROR` ("A Tokio 1.x context was found, but it is
+    /// being shutdown"). Recording the owner turns that silent, unattributable
+    /// transport failure into a discarded candidate, and the caller pays a
+    /// handshake instead of reporting a network error that is not one.
+    runtime: Option<RuntimeId>,
+}
+
+/// The id of the runtime the caller is currently running on, if any.
+///
+/// `None` outside a runtime: a connection released from synchronous context
+/// carries no affinity claim, and `take` treats `None == None` as a match so a
+/// pool driven entirely from synchronous code keeps working.
+fn current_runtime_id() -> Option<RuntimeId> {
+    tokio::runtime::Handle::try_current()
+        .ok()
+        .map(|handle| handle.id())
 }
 
 #[derive(Default)]
@@ -90,23 +115,31 @@ impl Pool {
         self.inner.config
     }
 
-    /// Take a live idle connection for `authority`, if one is fresh enough.
+    /// Take a live idle connection for `authority`, if one is fresh enough and
+    /// still belongs to the calling runtime.
     pub fn take(&self, authority: &str) -> Option<IdleConnection> {
+        let current = current_runtime_id();
         let mut idle = self.inner.idle.lock().unwrap_or_else(|e| e.into_inner());
         let entries = idle.get_mut(authority)?;
         let now = Instant::now();
         while let Some(candidate) = entries.pop() {
             let age = now.saturating_duration_since(candidate.since);
-            if age <= self.inner.config.idle_timeout {
-                return Some(IdleConnection {
-                    stream: candidate.stream,
-                    buffered: candidate.buffered,
-                    local_port: candidate.local_port,
-                    socket: candidate.socket,
-                    age,
-                });
+            if age > self.inner.config.idle_timeout {
+                // Idle past the keep-alive window: drop it and try the next.
+                continue;
             }
-            // Stale: drop it and try the next candidate.
+            // A connection dialled by another (now possibly dead) runtime cannot
+            // be read on this one: its I/O registration belongs to that reactor.
+            if candidate.runtime != current {
+                continue;
+            }
+            return Some(IdleConnection {
+                stream: candidate.stream,
+                buffered: candidate.buffered,
+                local_port: candidate.local_port,
+                socket: candidate.socket,
+                age,
+            });
         }
         None
     }
@@ -134,6 +167,7 @@ impl Pool {
             local_port,
             socket,
             since: Instant::now(),
+            runtime: current_runtime_id(),
         });
     }
 
@@ -254,6 +288,35 @@ mod tests {
         assert!(
             pool.take("example:443").is_none(),
             "an expired connection must not be handed out"
+        );
+    }
+
+    /// Same authority, same pool, two runtimes: the second runtime must not
+    /// receive the first one's socket, whose I/O registration died with it.
+    #[test]
+    fn a_connection_is_never_handed_to_a_different_runtime() {
+        let pool = pool(2, Duration::from_secs(60));
+        let first = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("first runtime");
+        first.block_on(async {
+            pool.put("example:443", idle_stream(), BytesMut::new(), None, None);
+            assert_eq!(pool.idle_count("example:443"), 1);
+        });
+
+        let second = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("second runtime");
+        let taken = second.block_on(async { pool.take("example:443").is_some() });
+        assert!(!taken, "a foreign runtime must not inherit this socket");
+        assert_eq!(
+            pool.idle_count("example:443"),
+            0,
+            "the discarded candidate must leave the pool"
         );
     }
 

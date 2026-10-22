@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.3] - 2026-10-23
+
+### Fixed
+
+- **A pooled connection is no longer handed to a different runtime.** The pool is
+  process-scoped by design — one `Client` is shared by every task, so a keep-alive
+  socket can outlive the code path that dialled it. But a socket is a *tokio I/O
+  resource*: it is registered with the reactor that created it, and when that
+  runtime is dropped tokio marks the registration shut down. The pool kept the
+  socket anyway and handed it to the next caller, whose first read then failed
+  with `RUNTIME_SHUTTING_DOWN_ERROR` — "A Tokio 1.x context was found, but it is
+  being shutdown." The caller saw an unattributable transport failure for a
+  request that had not been sent yet, and retrying the *provider* could not fix
+  it.
+
+  `Idle` now records the id of the runtime that dialled the connection
+  (`Handle::try_current().id()`), and `Pool::take` discards a candidate whose
+  owner is not the current runtime. The caller pays one handshake instead of
+  receiving an error, and the stale registration never leaves the pool. `None`
+  (synchronous context) matches `None`, so a pool driven entirely from
+  synchronous code is unaffected.
+
+  In `nuo` this surfaced as an intermittent transport error from a provider
+  request that ran while another test's runtime was being torn down: the
+  process-global `shared_client()` holds sockets across every runtime in the
+  process, so concurrent test binaries could take each other's dead
+  registrations.
+
+### Added
+
+- `crates/netune/tests/pool_runtime_affinity.rs`: a two-runtime regression test
+  that dials under runtime A, drops it with a keep-alive socket still pooled, and
+  requires runtime B to succeed. Verified to fail with the exact shutdown error
+  when the ownership check is removed.
+
 ## [0.0.2] - 2026-10-22
 
 ### Added

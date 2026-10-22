@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `netune` feature flags `http2` and `ws` (both enabled in `default`): allow
+  HTTP/1.1-only consumers like Estuary to compile out unused protocol codecs
+  (`netune-http2` and `netune-ws`) and minimize credential-egress attack surface.
+- Fail-closed handling when attempting to negotiate `http2` or connect WebSocket
+  without the corresponding feature compiled in.
+- CI supply-chain checking (`deny.toml`) and `cargo check --no-default-features`.
+
 ## [0.0.1] - 2026-10-19
 
 ### Added

@@ -12,6 +12,28 @@ categories = ["network-programming", "web-programming::http-client", "asynchrono
 
 [package.metadata.docs.rs]
 all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+# Both protocol codecs are opt-in so that a consumer which speaks neither can
+# compile them out entirely.
+#
+# The motivating case is Estuary (the reference consumer): it speaks HTTP/1.1
+# only and never opens a WebSocket, yet it previously linked ~2,975 lines of
+# HTTP/2 (HPACK, Huffman) and RFC 6455 framing — parsers that sit on the
+# credential-egress path and are never executed. Dead protocol parsers are pure
+# attack surface.
+#
+# `default` keeps both on so the workspace's own tests and existing consumers
+# are unaffected. Turning them off does NOT silently degrade behaviour: asking
+# the client to negotiate HTTP/2 or open a WebSocket without the corresponding
+# feature returns an error rather than quietly falling back to HTTP/1.1, because
+# that fallback would change the wire signature the caller asked for.
+default = ["http2", "ws"]
+http2 = ["dep:netune-http2"]
+# `ws_session` drives `tokio::select!`, so the macro support must travel with
+# the feature rather than being assumed from the default feature set.
+ws = ["dep:netune-ws", "tokio/macros"]
 
 [dependencies]
 base64 = { workspace = true }
@@ -21,9 +43,9 @@ flate2 = { workspace = true }
 http = { workspace = true }
 libc = { workspace = true }
 netune-http1 = { path = "../netune-http1", version = "0.0.1" }
-netune-http2 = { path = "../netune-http2", version = "0.0.1" }
+netune-http2 = { path = "../netune-http2", version = "0.0.1", optional = true }
 netune-trace = { path = "../netune-trace", version = "0.0.1" }
-netune-ws = { path = "../netune-ws", version = "0.0.1" }
+netune-ws = { path = "../netune-ws", version = "0.0.1", optional = true }
 rustls = { workspace = true }
 rustls-platform-verifier = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt"] }

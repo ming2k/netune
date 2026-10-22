@@ -52,6 +52,16 @@ jobs:
       - run: cargo nextest run -p netune-probe --features inject
         if: matrix.features == 'netune-probe/inject'
 
+  supply-chain:
+    name: Supply chain (advisories, licences, bans)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses sources bans
+
   lint:
     name: Clippy + fmt
     runs-on: ubuntu-latest
@@ -64,6 +74,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo check --all-targets --no-default-features
       - run: cargo fmt --check
 
   doc:

@@ -1,3 +1,4 @@
+#![cfg(feature = "ws")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::sync::{Arc, Mutex};

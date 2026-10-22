@@ -13,8 +13,11 @@
 use std::sync::{Arc, Mutex};
 
 use bytes::{Bytes, BytesMut};
-use http::{HeaderMap, Method, StatusCode};
+#[cfg(feature = "http2")]
+use http::HeaderMap;
+use http::{Method, StatusCode};
 use netune_http1::{BodyKind, Http1Reader, Limits, RequestHead, ResponseHead, write_request};
+#[cfg(feature = "http2")]
 use netune_http2::{H2Connection, H2Fingerprint};
 use netune_trace::{Alpn, EventKind, Recorder};
 
@@ -124,6 +127,7 @@ impl<C: Connector> Client<C> {
     /// The attempt's trace lives in the returned stream's `Recorder`; pass a
     /// recorder explicitly via [`Client::connect_ws_traced`] when the caller
     /// wants to derive timings afterwards.
+    #[cfg(feature = "ws")]
     pub async fn connect_ws(
         &self,
         target: &Target,
@@ -134,10 +138,23 @@ impl<C: Connector> Client<C> {
             .await
     }
 
+    /// WebSocket support was compiled out.
+    ///
+    /// Returns an error rather than a silent fallback: a caller that asked for
+    /// an upgraded stream must be told the capability is absent, not handed a
+    /// plain HTTP response it will misread.
+    #[cfg(not(feature = "ws"))]
+    pub async fn connect_ws(&self, _target: &Target, _path: &str) -> Result<(), NetError> {
+        Err(NetError::Protocol(
+            "WebSocket support was not compiled in: enable the `ws` feature".into(),
+        ))
+    }
+
     /// Establish an upgraded client WebSocket stream with explicit trace recorder and limits.
     ///
     /// `handshake` carries the optional negotiation knobs (`Sec-WebSocket-Protocol`
     /// selection, extra request headers, size limits).
+    #[cfg(feature = "ws")]
     pub async fn connect_ws_traced(
         &self,
         target: &Target,
@@ -301,6 +318,20 @@ impl<C: Connector> Client<C> {
         ))
     }
 
+    /// WebSocket support was compiled out.
+    #[cfg(not(feature = "ws"))]
+    pub async fn connect_ws_traced(
+        &self,
+        _target: &Target,
+        _path: &str,
+        _recorder: Arc<Mutex<Recorder>>,
+        _handshake: (),
+    ) -> Result<(), NetError> {
+        Err(NetError::Protocol(
+            "WebSocket support was not compiled in: enable the `ws` feature".into(),
+        ))
+    }
+
     /// Send one request, following redirects, and return the final response.
     pub async fn send(
         &self,
@@ -453,7 +484,19 @@ impl<C: Connector> Client<C> {
             }
         };
 
-        // If target mandated H2 or ALPN negotiated h2 and auto-upgrade is enabled
+        // If target mandated H2 or ALPN negotiated h2 and auto-upgrade is enabled.
+        //
+        // Without the `http2` feature this branch fails closed instead of falling
+        // back to HTTP/1.1: a caller that mandated H2, or an upstream that only
+        // negotiated `h2` over ALPN, must not be handed a downgraded request.
+        #[cfg(not(feature = "http2"))]
+        if target.force_h2 || alpn == Some(Alpn::H2) {
+            return Err(NetError::Protocol(
+                "HTTP/2 was requested but the `http2` feature is not compiled in".into(),
+            ));
+        }
+
+        #[cfg(feature = "http2")]
         if target.force_h2 || (self.config.enable_http2 && alpn == Some(Alpn::H2)) {
             let fp = match target.tls_profile.as_deref() {
                 Some("safari-current") => H2Fingerprint::safari(),

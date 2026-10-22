@@ -1,3 +1,4 @@
+#![cfg(feature = "ws")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Compile-and-run guard for the how-to guide's examples.
 //!

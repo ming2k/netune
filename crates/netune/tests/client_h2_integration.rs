@@ -1,3 +1,4 @@
+#![cfg(feature = "http2")]
 //! End-to-end integration test: Client natively executes HTTP/2 requests with full tracing (ADR-0006).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

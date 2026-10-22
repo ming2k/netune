@@ -142,6 +142,7 @@ async fn get(client: &Client<TlsRouterConnector<TcpConnector>>, target: &Target)
 /// The default identity (h1-only offer) negotiates `http/1.1`; the codex
 /// preset (h2-first offer, per hyper-rustls) negotiates `h2` — same server,
 /// same client, two requests, two identities.
+#[cfg(feature = "http2")]
 #[tokio::test]
 async fn the_profile_selection_reaches_the_wire_per_request() {
     let fixture = fixture().await;
@@ -156,6 +157,34 @@ async fn the_profile_selection_reaches_the_wire_per_request() {
         .with_tls_profile(Preset::CodexReqwest.name());
     let codex_body = get(&client, &codex_target).await;
     assert_eq!(codex_body, "alpn=h2", "the codex preset presents h2");
+}
+
+/// When HTTP/2 support is compiled out, attempting to negotiate H2 via an ALPN
+/// preset fails closed with a clear protocol error instead of silently
+/// degrading the connection to HTTP/1.1.
+#[cfg(not(feature = "http2"))]
+#[tokio::test]
+async fn the_profile_selection_fails_closed_when_h2_feature_is_disabled() {
+    let fixture = fixture().await;
+    let client = pinned_client(&fixture);
+
+    let default_body = get(&client, &fixture.target).await;
+    assert_eq!(default_body, "alpn=http/1.1");
+
+    let codex_target = fixture
+        .target
+        .clone()
+        .with_tls_profile(Preset::CodexReqwest.name());
+    let head = RequestHead::new(Method::GET, "/");
+    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
+    let err = match client
+        .send(&codex_target, recorder, head, None::<Bytes>)
+        .await
+    {
+        Err(e) => e,
+        Ok(_) => panic!("negotiating h2 without http2 feature must fail closed"),
+    };
+    assert!(err.to_string().contains("HTTP/2 was requested"));
 }
 
 /// A name nobody registered is a loud connect error listing the known

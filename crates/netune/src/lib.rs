@@ -28,6 +28,7 @@ mod dns;
 mod error;
 mod evasion;
 mod fault;
+#[cfg(feature = "http2")]
 mod h2_client;
 mod io;
 mod pool;
@@ -36,7 +37,9 @@ mod socket;
 mod tcp_info;
 mod tls;
 mod tls_profile;
+#[cfg(feature = "ws")]
 mod ws;
+#[cfg(feature = "ws")]
 mod ws_session;
 
 /// Capacity of the throwaway trace ring a [`Client::request`] uses.
@@ -51,11 +54,14 @@ pub use dns::{DnsResolver, StaticResolver, SystemResolver};
 pub use error::NetError;
 pub use evasion::SegmentingIo;
 pub use fault::{Fault, FaultIo, FaultScript};
+#[cfg(feature = "http2")]
 pub use h2_client::H2Client;
 pub use http::{HeaderMap, Method};
 pub use io::TimedIo;
 pub use netune_http1::{BodyKind, RequestHead, ResponseHead};
+#[cfg(feature = "http2")]
 pub use netune_http2::{H2Connection, H2Fingerprint, H2Response, PseudoHeaderOrder};
+#[cfg(feature = "ws")]
 pub use netune_ws::{CloseCode, CloseReason, Message as WsMessage, Opcode as WsOpcode};
 pub use pool::{IdleConnection, Pool, PoolConfig};
 pub use proxy::{Proxy, ProxyConnector};
@@ -63,5 +69,7 @@ pub use socket::SocketConfig;
 pub use tcp_info::{SAMPLE_INTERVAL, Sampler, TcpSample, sample as sample_tcp_info};
 pub use tls::{TlsConnector, TlsRouterConnector, platform_client_config};
 pub use tls_profile::{Preset, TlsProfile, Verifier};
+#[cfg(feature = "ws")]
 pub use ws::{WsHandshake, WsLimits, WsStream};
+#[cfg(feature = "ws")]
 pub use ws_session::{WsSession, WsSessionConfig};

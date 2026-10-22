@@ -8,12 +8,12 @@ This document provides a factual overview of all crates comprising the `netune` 
 
 | Crate | Directory | Current Version | Primary Responsibility |
 | :--- | :--- | :--- | :--- |
-| `netune-trace` | `crates/netune-trace` | `0.0.1` | Zero-allocation trace ring buffer, pure timing derivations, JA3/JA4 TLS ClientHello parser |
-| `netune-http1` | `crates/netune-http1` | `0.0.1` | HTTP/1.1 line protocol parser and serializer, differential-tested against `hyper` |
-| `netune-http2` | `crates/netune-http2` | `0.0.1` | HTTP/2 wire protocol (RFC 9113), HPACK header compression (RFC 7541), and Akamai fingerprint impersonation |
-| `netune-ws` | `crates/netune-ws` | `0.0.1` | Pure RFC 6455 WebSocket codec: frame encoder/decoder, role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys |
-| `netune` | `crates/netune` | `0.0.1` | Core transport: DNS, TCP, TLS, pool, proxy, fault injection, and client request orchestration |
-| `netune-probe` | `crates/netune-probe` | `0.0.1` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
+| `netune-trace` | `crates/netune-trace` | `0.0.2` | Zero-allocation trace ring buffer, pure timing derivations, JA3/JA4 TLS ClientHello parser |
+| `netune-http1` | `crates/netune-http1` | `0.0.2` | HTTP/1.1 line protocol parser and serializer, differential-tested against `hyper` |
+| `netune-http2` | `crates/netune-http2` | `0.0.2` | HTTP/2 wire protocol (RFC 9113), HPACK header compression (RFC 7541), and Akamai fingerprint impersonation |
+| `netune-ws` | `crates/netune-ws` | `0.0.2` | Pure RFC 6455 WebSocket codec: frame encoder/decoder, role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys |
+| `netune` | `crates/netune` | `0.0.2` | Core transport: DNS, TCP, TLS, pool, proxy, fault injection, and client request orchestration |
+| `netune-probe` | `crates/netune-probe` | `0.0.2` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
 
 ---
 

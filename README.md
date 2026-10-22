@@ -60,8 +60,8 @@ The crates are consumed from this repository by tag:
 
 ```toml
 [dependencies]
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.1" }
-netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.1" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.2" }
+netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.2" }
 ```
 
 Pin a `tag` (or a `rev` for the strictest reproducibility) and upgrade
@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Status
 
-Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.1`.
+Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.2`.
 
 MSRV: 1.95. License: MIT.
 

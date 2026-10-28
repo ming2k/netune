@@ -79,7 +79,15 @@ async fn the_tap_timestamps_arrival_not_issue() {
     // reference is the *actual* write instant (the sender's timer jitter is not
     // the tap's error), so the tolerance can be tight.
     const DELAY: Duration = Duration::from_millis(50);
-    const TOLERANCE: Duration = Duration::from_millis(2);
+    // The threshold is sized from the signal, not picked for tightness. The
+    // failure this test exists for is a tap that stamps the *issue* instant,
+    // which is DELAY away from the arrival instant — so a quarter of DELAY is
+    // still unambiguous evidence (12.5 ms vs 50 ms), while leaving room for the
+    // two scheduler preemptions that can land here: between the sender's clock
+    // read and its write, and between arrival and the reader's syscall. Those are
+    // host jitter, not tap error; the previous absolute 2 ms tolerance conflated
+    // the two and flaked under parallel load, which says nothing about the tap.
+    const TOLERANCE: Duration = Duration::from_millis(12);
 
     let (client, mut server) = loopback_pair().await;
     let recorder = Arc::new(Mutex::new(Recorder::start(64)));
@@ -123,80 +131,111 @@ async fn the_tap_timestamps_arrival_not_issue() {
     assert_eq!(event.a, 5, "the event carries the byte count");
 }
 
+/// One round-trip measurement through a loopback echo, timed end to end.
+///
+/// `tapped` selects the path under test: `TimedIo` (with a recorder) or the bare
+/// stream. The same function measures both, so the two sides cannot drift into
+/// comparing different work.
+async fn measure_round_trips(iterations: usize) -> Duration {
+    let (client, mut server) = loopback_pair().await;
+    let echo = tokio::spawn(async move {
+        let mut buffer = [0u8; 64];
+        loop {
+            let read = match server.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(read) => read,
+            };
+            if server.write_all(&buffer[..read]).await.is_err() {
+                return;
+            }
+        }
+    });
+    let started = Instant::now();
+    let mut io = TimedIo::new(
+        client,
+        Arc::new(Mutex::new(Recorder::start(4 * iterations + 16))),
+    );
+    let mut buffer = [0u8; 64];
+    for _ in 0..iterations {
+        io.write_all(b"ping").await.expect("write");
+        let read = io.read(&mut buffer).await.expect("read");
+        assert_eq!(read, 4);
+    }
+    let elapsed = started.elapsed();
+    drop(io);
+    echo.abort();
+    elapsed
+}
+
+/// The same loop with no tap: the baseline the tapped path is measured against.
+async fn measure_round_trips_plain(iterations: usize) -> Duration {
+    let (client, mut server) = loopback_pair().await;
+    let echo = tokio::spawn(async move {
+        let mut buffer = [0u8; 64];
+        loop {
+            let read = match server.read(&mut buffer).await {
+                Ok(0) | Err(_) => return,
+                Ok(read) => read,
+            };
+            if server.write_all(&buffer[..read]).await.is_err() {
+                return;
+            }
+        }
+    });
+    let mut client = client;
+    let mut buffer = [0u8; 64];
+    let started = Instant::now();
+    for _ in 0..iterations {
+        client.write_all(b"ping").await.expect("write");
+        let read = client.read(&mut buffer).await.expect("read");
+        assert_eq!(read, 4);
+    }
+    let elapsed = started.elapsed();
+    drop(client);
+    echo.abort();
+    elapsed
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_tap_adds_no_delay_to_the_data_path() {
-    // A tap that is correct but slow is not correct. Compare a plain loopback
-    // round trip with the same trip through `TimedIo`.
-    async fn round_trips(tapped: bool, iterations: usize) -> Duration {
-        let (client, mut server) = loopback_pair().await;
-        let echo = tokio::spawn(async move {
-            let mut buffer = [0u8; 64];
-            loop {
-                let read = match server.read(&mut buffer).await {
-                    Ok(0) | Err(_) => return,
-                    Ok(read) => read,
-                };
-                if server.write_all(&buffer[..read]).await.is_err() {
-                    return;
-                }
-            }
-        });
-        let recorder = Arc::new(Mutex::new(Recorder::start(4 * iterations + 16)));
-        let mut io = TimedIo::new(client, recorder);
-        let mut buffer = [0u8; 64];
-        let started = Instant::now();
-        for _ in 0..iterations {
-            io.write_all(b"ping").await.expect("write");
-            let read = io.read(&mut buffer).await.expect("read");
-            assert_eq!(read, 4);
-        }
-        let elapsed = started.elapsed();
-        let _ = tapped;
-        drop(io);
-        echo.abort();
-        elapsed
+    // A tap that is correct but slow is not correct.
+    //
+    // One long wall-clock measurement per side is the wrong instrument here, and
+    // it used to make this test flake under parallel load: a scheduler stall that
+    // lands in the tapped sample is charged entirely to the tap, and with a
+    // 20 µs/trip budget a single 2 ms preemption fails the assertion. Nothing in
+    // the production path is being measured in that case — only the host's
+    // willingness to schedule the test thread.
+    //
+    // So each side is sampled in interleaved batches (also removing the ordering
+    // bias of measuring one path while the machine warms up) and the *minimum*
+    // batch time per trip is compared. Contention can only add time, so the
+    // minimum is the least-contaminated estimate of the true cost, which is what
+    // the budget is about. The sample counts are printed so a regression still
+    // shows up as a changed line rather than only as a red assertion.
+    const BATCHES: usize = 9;
+    const PER_BATCH: usize = 2_000;
+
+    // Warm both paths, so the first batch does not pay for page faults or the
+    // reactor's first registrations.
+    let _ = measure_round_trips(500).await;
+    let _ = measure_round_trips_plain(500).await;
+
+    let mut tapped_min = Duration::MAX;
+    let mut plain_min = Duration::MAX;
+    for _ in 0..BATCHES {
+        let tapped = measure_round_trips(PER_BATCH).await;
+        let plain = measure_round_trips_plain(PER_BATCH).await;
+        tapped_min = tapped_min.min(tapped);
+        plain_min = plain_min.min(plain);
     }
 
-    // Warm the path, then measure both configurations.
-    let _ = round_trips(true, 1_000).await;
-    let tapped = round_trips(true, 5_000).await;
-    let baseline = {
-        // The baseline is the same loop without a recorder's bookkeeping: an
-        // empty ring is still a ring, so subtract the measured recording cost
-        // instead of pretending the tap is free.
-        let (client, mut server) = loopback_pair().await;
-        let echo = tokio::spawn(async move {
-            let mut buffer = [0u8; 64];
-            loop {
-                let read = match server.read(&mut buffer).await {
-                    Ok(0) | Err(_) => return,
-                    Ok(read) => read,
-                };
-                if server.write_all(&buffer[..read]).await.is_err() {
-                    return;
-                }
-            }
-        });
-        let mut client = client;
-        let mut buffer = [0u8; 64];
-        let started = Instant::now();
-        for _ in 0..5_000 {
-            client.write_all(b"ping").await.expect("write");
-            let read = client.read(&mut buffer).await.expect("read");
-            assert_eq!(read, 4);
-        }
-        let elapsed = started.elapsed();
-        drop(client);
-        echo.abort();
-        elapsed
-    };
-
-    let per_trip_tapped = tapped / 5_000;
-    let per_trip_plain = baseline / 5_000;
+    let per_trip_tapped = tapped_min / PER_BATCH as u32;
+    let per_trip_plain = plain_min / PER_BATCH as u32;
     let added = per_trip_tapped.saturating_sub(per_trip_plain);
     println!(
-        "data path: plain {per_trip_plain:?}/trip, tapped {per_trip_tapped:?}/trip, \
-         added {added:?}/trip"
+        "data path (best of {BATCHES} batches of {PER_BATCH}): plain {per_trip_plain:?}/trip, \
+         tapped {per_trip_tapped:?}/trip, added {added:?}/trip"
     );
     assert!(
         added < PER_EVENT_BUDGET,

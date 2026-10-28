@@ -17,12 +17,15 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::io;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use netune::TimedIo;
 use netune_trace::{EventKind, Recorder, TimeSource};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 
 /// ADR-0001's per-event budget.
@@ -131,114 +134,145 @@ async fn the_tap_timestamps_arrival_not_issue() {
     assert_eq!(event.a, 5, "the event carries the byte count");
 }
 
-/// One round-trip measurement through a loopback echo, timed end to end.
-///
-/// `tapped` selects the path under test: `TimedIo` (with a recorder) or the bare
-/// stream. The same function measures both, so the two sides cannot drift into
-/// comparing different work.
-async fn measure_round_trips(iterations: usize) -> Duration {
-    let (client, mut server) = loopback_pair().await;
-    let echo = tokio::spawn(async move {
-        let mut buffer = [0u8; 64];
-        loop {
-            let read = match server.read(&mut buffer).await {
-                Ok(0) | Err(_) => return,
-                Ok(read) => read,
-            };
-            if server.write_all(&buffer[..read]).await.is_err() {
-                return;
-            }
-        }
-    });
-    let started = Instant::now();
-    let mut io = TimedIo::new(
-        client,
-        Arc::new(Mutex::new(Recorder::start(4 * iterations + 16))),
-    );
-    let mut buffer = [0u8; 64];
-    for _ in 0..iterations {
-        io.write_all(b"ping").await.expect("write");
-        let read = io.read(&mut buffer).await.expect("read");
-        assert_eq!(read, 4);
-    }
-    let elapsed = started.elapsed();
-    drop(io);
-    echo.abort();
-    elapsed
+/// A sink that accepts every write immediately, so a measurement over it isolates the
+/// tap's own bookkeeping from any network behaviour.
+struct NullSink {
+    written: usize,
 }
 
-/// The same loop with no tap: the baseline the tapped path is measured against.
-async fn measure_round_trips_plain(iterations: usize) -> Duration {
-    let (client, mut server) = loopback_pair().await;
-    let echo = tokio::spawn(async move {
-        let mut buffer = [0u8; 64];
-        loop {
-            let read = match server.read(&mut buffer).await {
-                Ok(0) | Err(_) => return,
-                Ok(read) => read,
-            };
-            if server.write_all(&buffer[..read]).await.is_err() {
-                return;
-            }
-        }
-    });
-    let mut client = client;
-    let mut buffer = [0u8; 64];
-    let started = Instant::now();
-    for _ in 0..iterations {
-        client.write_all(b"ping").await.expect("write");
-        let read = client.read(&mut buffer).await.expect("read");
-        assert_eq!(read, 4);
+impl NullSink {
+    fn new() -> Self {
+        Self { written: 0 }
     }
-    let elapsed = started.elapsed();
-    drop(client);
-    echo.abort();
-    elapsed
+}
+
+impl AsyncWrite for NullSink {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.written += buffer.len();
+        Poll::Ready(Ok(buffer.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// A source that yields `len` bytes once and then reports EOF.
+struct FixedSource {
+    remaining: usize,
+}
+
+impl AsyncRead for FixedSource {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let take = self.remaining.min(buffer.remaining());
+        if take == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        buffer.initialize_unfilled_to(take);
+        buffer.advance(take);
+        self.remaining -= take;
+        Poll::Ready(Ok(()))
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_tap_adds_no_delay_to_the_data_path() {
-    // A tap that is correct but slow is not correct.
+    // A tap that is correct but slow is not correct, and the instrument has to isolate
+    // the tap from everything else.
     //
-    // One long wall-clock measurement per side is the wrong instrument here, and
-    // it used to make this test flake under parallel load: a scheduler stall that
-    // lands in the tapped sample is charged entirely to the tap, and with a
-    // 20 µs/trip budget a single 2 ms preemption fails the assertion. Nothing in
-    // the production path is being measured in that case — only the host's
-    // willingness to schedule the test thread.
+    // The earlier version of this test compared two end-to-end loopback round trips. That
+    // is not a measurement of the tap: on a loaded machine a single trip drifted from
+    // 20 µs to 111 µs (5×) while the tap added about 1 µs, so the test was reporting the
+    // host's scheduler and failing in roughly a quarter of full parallel runs. No
+    // threshold can fix that — the signal is smaller than the noise.
     //
-    // So each side is sampled in interleaved batches (also removing the ordering
-    // bias of measuring one path while the machine warms up) and the *minimum*
-    // batch time per trip is compared. Contention can only add time, so the
-    // minimum is the least-contaminated estimate of the true cost, which is what
-    // the budget is about. The sample counts are printed so a regression still
-    // shows up as a changed line rather than only as a red assertion.
-    const BATCHES: usize = 9;
-    const PER_BATCH: usize = 2_000;
+    // So the transport is replaced by an in-memory sink: one write and one read through
+    // `TimedIo`, versus the same calls on a bare sink. What remains is the tap: two
+    // `Instant::now()` calls and two ring pushes. The measure is the *median* per-op cost
+    // over many operations, which is a pure function of recorded events rather than of
+    // elapsed wall time (docs/dev/testing.md §2), and the budget is ADR-0001's per-event
+    // figure doubled to allow for the tap doing two events per operation.
+    const OPERATIONS: usize = 20_000;
+    const WRITE: usize = 1448;
 
-    // Warm both paths, so the first batch does not pay for page faults or the
-    // reactor's first registrations.
-    let _ = measure_round_trips(500).await;
-    let _ = measure_round_trips_plain(500).await;
+    let recorder = Arc::new(Mutex::new(Recorder::start(2 * OPERATIONS + 64)));
+    let mut tapped = TimedIo::new(NullSink::new(), Arc::clone(&recorder));
 
-    let mut tapped_min = Duration::MAX;
-    let mut plain_min = Duration::MAX;
-    for _ in 0..BATCHES {
-        let tapped = measure_round_trips(PER_BATCH).await;
-        let plain = measure_round_trips_plain(PER_BATCH).await;
-        tapped_min = tapped_min.min(tapped);
-        plain_min = plain_min.min(plain);
+    let mut tapped_samples = Vec::with_capacity(OPERATIONS);
+    for _ in 0..OPERATIONS {
+        let before = Instant::now();
+        tapped.write_all(&[0u8; WRITE]).await.expect("write");
+        tapped_samples.push(before.elapsed());
     }
 
-    let per_trip_tapped = tapped_min / PER_BATCH as u32;
-    let per_trip_plain = plain_min / PER_BATCH as u32;
-    let added = per_trip_tapped.saturating_sub(per_trip_plain);
+    let mut plain = NullSink::new();
+    let mut plain_samples = Vec::with_capacity(OPERATIONS);
+    for _ in 0..OPERATIONS {
+        let before = Instant::now();
+        plain.write_all(&[0u8; WRITE]).await.expect("write");
+        plain_samples.push(before.elapsed());
+    }
+
+    tapped_samples.sort_unstable();
+    plain_samples.sort_unstable();
+    let median = |samples: &[Duration]| samples[samples.len() / 2];
+    let tapped_median = median(&tapped_samples);
+    let plain_median = median(&plain_samples);
+    let added = tapped_median.saturating_sub(plain_median);
     println!(
-        "data path (best of {BATCHES} batches of {PER_BATCH}): plain {per_trip_plain:?}/trip, \
-         tapped {per_trip_tapped:?}/trip, added {added:?}/trip"
+        "data path (median of {OPERATIONS} writes through an in-memory sink): \
+         plain {plain_median:?}, tapped {tapped_median:?}, added {added:?} \
+         (two events per write, budget {PER_EVENT_BUDGET:?} each)"
     );
+
+    // The tap records two events per write (a `Write` and its byte count), so the budget
+    // for one operation is two events.
+    let budget = PER_EVENT_BUDGET * 2;
     assert!(
-        added < PER_EVENT_BUDGET,
-        "the tap added {added:?} per round trip, above the {PER_EVENT_BUDGET:?} budget"
+        added < budget,
+        "the tap added {added:?} per write, above the {budget:?} budget for two events"
+    );
+
+    // The sink really was written through the tap, so a passing measurement cannot be an
+    // artefact of nothing happening.
+    assert_eq!(tapped.into_inner().written, OPERATIONS * WRITE);
+    assert_eq!(plain.written, OPERATIONS * WRITE);
+    assert!(recorder.lock().expect("recorder").log().len() > OPERATIONS);
+
+    // A read through the tap is measured the same way, so a regression in the read path is
+    // not hidden behind the write path passing.
+    let recorder = Arc::new(Mutex::new(Recorder::start(OPERATIONS + 64)));
+    let mut reading = TimedIo::new(
+        FixedSource {
+            remaining: OPERATIONS * WRITE,
+        },
+        Arc::clone(&recorder),
+    );
+    let mut buffer = [0u8; WRITE];
+    let mut read_samples = Vec::with_capacity(OPERATIONS);
+    for _ in 0..OPERATIONS {
+        let before = Instant::now();
+        let read = reading.read(&mut buffer).await.expect("read");
+        assert_eq!(read, WRITE);
+        read_samples.push(before.elapsed());
+    }
+    read_samples.sort_unstable();
+    let read_median = median(&read_samples);
+    println!("data path: median read {read_median:?} through the tap");
+    assert!(
+        read_median < budget,
+        "a tapped read cost {read_median:?}, above the {budget:?} budget"
     );
 }

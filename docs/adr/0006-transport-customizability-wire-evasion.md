@@ -37,7 +37,8 @@ We need an architectural substrate that decouples transport configuration, DNS r
 
 - Option 1: Wrap an external C/Go library (e.g. `curl-impersonate` / `uTLS` via CGo/FFI).
 - Option 2: Pluggable transport and protocol layering with declarative customization:
-  - Extensible `SocketConfig` at L3/L4 (TTL, buffer sizes, MSS, TCP_NODELAY).
+  - Extensible `SocketConfig` at L3/L4 (TTL, buffer sizes, MSS, TCP_NODELAY),
+    including pre-connect options such as `SO_MARK` that must precede `connect(2)`.
   - Asynchronous, injectable `DnsResolver` trait (`SystemResolver`, `StaticResolver`).
   - Wire write slicing via `SegmentingIo` for SNI segmentation.
   - Raw header casing and duplication preservation via `RequestHead::with_raw_header`.

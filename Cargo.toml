@@ -26,6 +26,7 @@ base64 = "0.22"
 brotli = "8"
 flate2 = { version = "1.1", features = ["zlib-rs"] }
 rcgen = "0.14"
+socket2 = { version = "0.6", features = ["all"] }
 
 # Workspace-wide lint policy (inherited by every member via `lints.workspace =
 # true`). `unwrap_used` / `expect_used` are *warnings*, not denies: keeping them

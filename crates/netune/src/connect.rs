@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use netune_trace::{EventKind, Recorder};
-use tokio::net::TcpStream;
 
 use crate::dns::{DnsResolver, SystemResolver};
 use crate::error::NetError;
@@ -364,7 +363,7 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
             let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
             recorder.mark(EventKind::TcpStart, 0, 0);
         }
-        let dial = TcpStream::connect(address);
+        let dial = crate::socket::connect(address, &self.socket_config);
         let stream = match self.connect_timeout {
             Some(timeout) => tokio::time::timeout(timeout, dial).await.map_err(|_| {
                 NetError::Connect(format!(

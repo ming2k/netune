@@ -60,7 +60,8 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `TlsProfile` & `TlsRouterConnector`: Configures and lazily compiles TLS identities.
   - `FaultIo`: In-process fault injection engine.
   - `DnsResolver` & `StaticResolver`: Asynchronous, mockable DNS resolution.
-  - `SocketConfig`: L3/L4 transport tuning (TTL, buffer sizing, MSS).
+  - `SocketConfig`: L3/L4 transport tuning (TTL, buffer sizing, MSS), including a
+    pre-connect `SO_MARK` on Linux that must be applied before `connect(2)`.
   - `SegmentingIo`: Early flight wire segmentation for SNI middlebox evasion.
 
 ### `netune-probe`

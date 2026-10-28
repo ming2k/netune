@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`SocketConfig::mark` applies `SO_MARK` before `connect(2)`.** The mark is
+  consulted when the kernel picks the route for the SYN, so a post-handshake
+  `setsockopt` cannot influence it. When a mark is configured, `TcpConnector`
+  now creates the socket itself (non-blocking, marked) and drives the connect to
+  completion instead of delegating to `TcpStream::connect`; without a mark the
+  original path is used unchanged. Linux only (`CAP_NET_ADMIN` or
+  `CAP_NET_RAW`); other platforms report `ErrorKind::Unsupported` rather than
+  silently ignoring the request. This is what a transparent proxy needs so its
+  own outbound connections are not captured by its own routing rules.
+- **Datagram transport: `DatagramConnector`, `DatagramTransport`, `UdpConnector`
+  and `Socks5DatagramConnector`** ([ADR-0008](../docs/adr/0008-datagram-transport-and-socks5-udp-association.md)).
+  netune can now open and drive UDP sockets for the first time. Sessions are
+  **connected to one peer**, decided when the session opens, so
+  `EgressConfinement` remains a precondition of opening a socket
+  (`INV-UDP-01..02`) instead of a per-datagram filter. `UdpConnector` is the
+  datagram twin of `TcpConnector`: same `DnsResolver`, same `EgressConfinement`,
+  same `SocketConfig`, with `SO_MARK` applied before `connect` because the mark
+  is consulted when the first datagram's route is chosen. `max_datagram_size`
+  derives from `SO_SNDBUF` and is capped at the IP ceiling, so a caller sizing a
+  buffer from it cannot build a payload guaranteed to fail. A SOCKS5 UDP
+  associate is available for the one case where the *proxy* names the peer;
+  association lasts as long as its TCP control connection, datagrams whose
+  wrapper claims a foreign source are dropped (`INV-UDP-03`), and fragments are
+  refused (`INV-UDP-04`). Only a SOCKS5 proxy can construct that connector — an
+  HTTP proxy has no UDP associate and is refused at construction rather than at
+  the first datagram.
+- **`EventKind::UdpOpen` (30) and `EventKind::UdpDatagram` (31).** A datagram
+  session is now visible in the trace, and `Event::is_send` reads the direction.
+  New codes are appended; no existing code is renumbered, so an older reader
+  degrades to "unknown kind" instead of misreading an event.
+
 ## [0.0.3] - 2026-10-23
 
 ### Fixed

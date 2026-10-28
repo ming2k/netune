@@ -7,6 +7,9 @@
 //! so the client can align its TCP stack characteristics with the claimed user agent.
 
 use std::io;
+use std::net::SocketAddr;
+
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpStream;
 
 /// L3/L4 transport tuning parameters.
@@ -27,6 +30,12 @@ pub struct SocketConfig {
     pub send_buffer_size: Option<usize>,
     /// Maximum Segment Size (`TCP_MAXSEG`), where supported.
     pub mss: Option<u32>,
+    /// Socket mark (`SO_MARK`), applied **before** `connect(2)`.
+    ///
+    /// A mark set after the handshake cannot affect the SYN, so this one option
+    /// runs on the pre-connect path: the socket is created, marked, and then
+    /// connected. Linux only; requires `CAP_NET_ADMIN` or `CAP_NET_RAW`.
+    pub mark: Option<u32>,
 }
 
 impl Default for SocketConfig {
@@ -37,6 +46,7 @@ impl Default for SocketConfig {
             recv_buffer_size: None,
             send_buffer_size: None,
             mss: None,
+            mark: None,
         }
     }
 }
@@ -55,6 +65,7 @@ impl SocketConfig {
             recv_buffer_size: Some(65_536),
             send_buffer_size: Some(65_536),
             mss: None,
+            mark: None,
         }
     }
 
@@ -66,6 +77,7 @@ impl SocketConfig {
             recv_buffer_size: Some(131_072),
             send_buffer_size: Some(131_072),
             mss: None,
+            mark: None,
         }
     }
 
@@ -96,6 +108,14 @@ impl SocketConfig {
     /// Set Maximum Segment Size (`TCP_MAXSEG`).
     pub fn with_mss(mut self, mss: u32) -> Self {
         self.mss = Some(mss);
+        self
+    }
+
+    /// Set the socket mark (`SO_MARK`) applied before `connect(2)`.
+    ///
+    /// Linux only; setting a mark requires `CAP_NET_ADMIN` or `CAP_NET_RAW`.
+    pub fn with_mark(mut self, mark: u32) -> Self {
+        self.mark = Some(mark);
         self
     }
 
@@ -158,6 +178,61 @@ impl SocketConfig {
 
         Ok(())
     }
+}
+
+/// Connects `address`, applying pre-connect options when any are configured.
+///
+/// Without pre-connect options this is exactly [`TcpStream::connect`]. With a
+/// mark, the socket must be created by hand: `SO_MARK` is consulted when the
+/// route for the SYN is chosen, so applying it after the handshake would be
+/// too late.
+pub(crate) async fn connect(address: SocketAddr, config: &SocketConfig) -> io::Result<TcpStream> {
+    if config.mark.is_none() {
+        return TcpStream::connect(address).await;
+    }
+
+    let domain = if address.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_nonblocking(true)?;
+    apply_pre_connect_options(&socket, config)?;
+
+    match socket.connect(&address.into()) {
+        // Connected immediately, or the connection is in progress.
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EINPROGRESS) => {}
+        Err(error) => return Err(error),
+    }
+
+    let stream = TcpStream::from_std(socket.into())?;
+    stream.writable().await?;
+    // `writable` also fires for a failed connection; the pending error is only
+    // visible through `take_error`.
+    if let Some(error) = stream.take_error()? {
+        return Err(error);
+    }
+    Ok(stream)
+}
+
+#[allow(unused_variables)]
+fn apply_pre_connect_options(socket: &Socket, config: &SocketConfig) -> io::Result<()> {
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    if let Some(mark) = config.mark {
+        socket.set_mark(mark)?;
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "fuchsia", target_os = "linux")))]
+    if config.mark.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SO_MARK is only supported on Linux",
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

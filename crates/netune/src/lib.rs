@@ -16,6 +16,17 @@
 //! redirect following with credential rules, streaming `Content-Encoding` decoding,
 //! in-process chaos testing ([`FaultIo`]), and [`Client::send`] driving the codec end to end.
 //!
+//! Datagrams are a second, parallel path rather than a mode of the first
+//! ([`DatagramConnector`], [`DatagramTransport`], [`UdpConnector`],
+//! [`Socks5DatagramConnector`]). A session is connected to one peer, decided when it
+//! opens, so egress confinement stays a precondition of opening a socket instead of a
+//! per-datagram filter. See `docs/adr/0008`.
+//!
+//! REALITY client authentication is deliberately absent: it needs a caller-chosen
+//! ClientHello `legacy_session_id` and a verifier that accepts a certificate without a
+//! CA chain, and neither is expressible through `rustls`' public API. See
+//! `docs/adr/0009` for the evidence and for what would reopen the question.
+//!
 //! L2 frame parsing, forging, and optional injection are housed in the companion
 //! crate `netune-probe`. HTTP/2 framing is reserved in `netune-http2`.
 
@@ -37,6 +48,7 @@ mod socket;
 mod tcp_info;
 mod tls;
 mod tls_profile;
+mod udp;
 #[cfg(feature = "ws")]
 mod ws;
 #[cfg(feature = "ws")]
@@ -69,6 +81,10 @@ pub use socket::SocketConfig;
 pub use tcp_info::{SAMPLE_INTERVAL, Sampler, TcpSample, sample as sample_tcp_info};
 pub use tls::{TlsConnector, TlsRouterConnector, platform_client_config};
 pub use tls_profile::{Preset, TlsProfile, Verifier};
+pub use udp::{
+    DatagramConnector, DatagramTransport, EstablishedDatagrams, Socks5DatagramConnector,
+    UdpConnector,
+};
 #[cfg(feature = "ws")]
 pub use ws::{WsHandshake, WsLimits, WsStream};
 #[cfg(feature = "ws")]

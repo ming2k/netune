@@ -68,7 +68,7 @@ impl Proxy {
         }
     }
 
-    fn authority(&self) -> &str {
+    pub(crate) fn authority(&self) -> &str {
         match self {
             Self::Http { authority, .. } | Self::Socks5 { authority, .. } => authority,
         }

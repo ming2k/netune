@@ -12,7 +12,7 @@ This document provides a factual overview of all crates comprising the `netune` 
 | `netune-http1` | `crates/netune-http1` | `0.0.2` | HTTP/1.1 line protocol parser and serializer, differential-tested against `hyper` |
 | `netune-http2` | `crates/netune-http2` | `0.0.2` | HTTP/2 wire protocol (RFC 9113), HPACK header compression (RFC 7541), and Akamai fingerprint impersonation |
 | `netune-ws` | `crates/netune-ws` | `0.0.2` | Pure RFC 6455 WebSocket codec: frame encoder/decoder, role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys |
-| `netune` | `crates/netune` | `0.0.2` | Core transport: DNS, TCP, TLS, pool, proxy, fault injection, and client request orchestration |
+| `netune` | `crates/netune` | `0.0.2` | Core transport: DNS, TCP, TLS, **UDP datagrams**, pool, proxy (incl. SOCKS5 UDP associate), fault injection, and client request orchestration |
 | `netune-probe` | `crates/netune-probe` | `0.0.2` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
 
 ---
@@ -60,9 +60,20 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `TlsProfile` & `TlsRouterConnector`: Configures and lazily compiles TLS identities.
   - `FaultIo`: In-process fault injection engine.
   - `DnsResolver` & `StaticResolver`: Asynchronous, mockable DNS resolution.
-  - `SocketConfig`: L3/L4 transport tuning (TTL, buffer sizing, MSS), including a
-    pre-connect `SO_MARK` on Linux that must be applied before `connect(2)`.
+  - `SocketConfig`: L3/L4 transport tuning (TTL, buffer sizing, MSS, and a
+    pre-connect `SO_MARK` on Linux). Applies to both TCP and datagram sockets.
   - `SegmentingIo`: Early flight wire segmentation for SNI middlebox evasion.
+  - `DatagramConnector` / `DatagramTransport`: Per-peer datagram sessions whose
+    peer is fixed at open time, so egress confinement precedes the socket
+    ([ADR-0008](../adr/0008-datagram-transport-and-socks5-udp-association.md)).
+  - `UdpConnector`: The datagram twin of `TcpConnector` — same resolver,
+    confinement and `SocketConfig`, with `SO_MARK` before `connect`.
+  - `Socks5DatagramConnector`: SOCKS5 UDP associate; destinations are literal IP
+    addresses, foreign-source datagrams are dropped, fragments are refused.
+  - **Not implemented, by decision**: REALITY client authentication. It needs a
+    caller-chosen `legacy_session_id` and a CA-bypassing verifier, neither of
+    which `rustls` 0.23 exposes; see
+    [ADR-0009](../adr/0009-reality-client-authentication-not-a-netune-capability.md).
 
 ### `netune-probe`
 - **Privilege Separation**:

@@ -89,6 +89,17 @@ pub enum EventKind {
     /// frames from two arrivals. Message-level accounting is a derivation over
     /// these (`ProtocolFrame` remains the message-completion event).
     WsFrame = 29,
+    /// A datagram session was opened (association established, or a connected
+    /// socket bound). `a` = 1 when the session is connected to a single peer, 0
+    /// when it is an association that may address several.
+    ///
+    /// Datagrams have no connection to hand off, so the session — not a socket
+    /// accept — is the unit that is traced. An association that the peer
+    /// refuses records [`EventKind::Error`] instead and never this event.
+    UdpOpen = 30,
+    /// One datagram crossed the socket boundary, in either direction. `a` =
+    /// payload bytes carried, `b` = direction (0 sent, 1 received).
+    UdpDatagram = 31,
 }
 
 impl EventKind {
@@ -131,6 +142,8 @@ impl EventKind {
             27 => Self::ProxyTunnel,
             28 => Self::ConnectStaleDiscarded,
             29 => Self::WsFrame,
+            30 => Self::UdpOpen,
+            31 => Self::UdpDatagram,
             _ => return None,
         })
     }
@@ -276,7 +289,8 @@ impl Event {
             | EventKind::Write
             | EventKind::Segment
             | EventKind::RequestWriteEnd
-            | EventKind::ChunkBoundary => Some(self.a),
+            | EventKind::ChunkBoundary
+            | EventKind::UdpDatagram => Some(self.a),
             _ => None,
         }
     }
@@ -304,6 +318,18 @@ impl Event {
             _ => None,
         }
     }
+
+    /// Whether a [`EventKind::UdpDatagram`] was sent by us (`true`) rather than
+    /// received (`false`).
+    ///
+    /// `None` for every other kind, so a caller cannot read a direction out of
+    /// an event that has none.
+    pub const fn is_send(self) -> Option<bool> {
+        match self.kind {
+            EventKind::UdpDatagram => Some(self.b == 0),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -320,6 +346,9 @@ mod tests {
             (19, EventKind::OutputToken),
             (20, EventKind::Validated),
             (23, EventKind::TimeJump),
+            (29, EventKind::WsFrame),
+            (30, EventKind::UdpOpen),
+            (31, EventKind::UdpDatagram),
         ] {
             assert_eq!(kind.code(), code);
             assert_eq!(EventKind::from_code(code), Some(kind));
@@ -371,5 +400,23 @@ mod tests {
             b: 0,
         };
         assert_eq!(frame.frame_class(), Some(FrameClass::Open));
+
+        let sent = Event {
+            at_ns: 12,
+            kind: EventKind::UdpDatagram,
+            a: 1200,
+            b: 0,
+        };
+        assert_eq!(sent.bytes(), Some(1200));
+        assert_eq!(sent.is_send(), Some(true));
+        let received = Event {
+            at_ns: 13,
+            kind: EventKind::UdpDatagram,
+            a: 40,
+            b: 1,
+        };
+        assert_eq!(received.is_send(), Some(false));
+        // A kind with no direction must not answer the question at all.
+        assert_eq!(read.is_send(), None);
     }
 }

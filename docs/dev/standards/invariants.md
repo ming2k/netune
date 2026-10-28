@@ -45,6 +45,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-WS-01..08]` | Client-role exclusivity, masking direction, bounded reassembly, frame-level observability, no pooling, proven liveness, incremental UTF-8, differential parity. | ADR-0007 |
 | `[INV-HTTP2-01]` | HTTP/2 framing and HPACK live in `netune-http2`, never behind a feature flag of `netune-http1`. | ADR-0003 |
 | `[INV-PROBE-01..02]` | Zero transmission in default builds; transmission requires `CAP_NET_RAW`. | ADR-0003 |
+| `[INV-UDP-01..05]` | Confinement precedes the datagram socket; a session is one peer; a relayed datagram must carry the session's source; fragments are refused; a session records `UdpOpen` and never a handshake. | ADR-0008 |
 
 The authoritative wording of each invariant lives in its ADR. This table is an index, not a second source of truth; if the two disagree, the ADR wins and this table is corrected.
 

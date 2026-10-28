@@ -306,21 +306,30 @@ impl<R: DnsResolver> TcpConnector<R> {
     }
 }
 
+/// Splits an `authority` into host and port, defaulting the port when absent.
+///
+/// Shared by the TCP and datagram paths so both read a node authority the same
+/// way; a disagreement here would make `host:port` mean two things depending on
+/// which transport a caller happened to use.
+pub(crate) fn split_target_authority(authority: &str) -> Result<(&str, u16), NetError> {
+    match authority.rsplit_once(':') {
+        Some((host, port)) => {
+            let port = port.parse::<u16>().map_err(|error| {
+                NetError::Resolve(format!("invalid port in authority: {error}"))
+            })?;
+            Ok((host, port))
+        }
+        None => Ok((authority, 80)),
+    }
+}
+
 impl<R: DnsResolver> Connector for TcpConnector<R> {
     async fn connect(
         &self,
         target: &Target,
         recorder: &Arc<Mutex<Recorder>>,
     ) -> Result<Established, NetError> {
-        let (host, port) = match target.authority.rsplit_once(':') {
-            Some((h, p)) => {
-                let p = p.parse::<u16>().map_err(|error| {
-                    NetError::Resolve(format!("invalid port in authority: {error}"))
-                })?;
-                (h, p)
-            }
-            None => (target.authority.as_str(), 80),
-        };
+        let (host, port) = split_target_authority(&target.authority)?;
 
         {
             let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());

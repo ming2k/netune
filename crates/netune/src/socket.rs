@@ -217,6 +217,74 @@ pub(crate) async fn connect(address: SocketAddr, config: &SocketConfig) -> io::R
     Ok(stream)
 }
 
+/// The payload a UDP socket carries when the kernel will not report its limit.
+///
+/// 65 507 = 65 535 − 20 (IPv4 header) − 8 (UDP header). It is the IPv4 maximum,
+/// used only as a ceiling when the socket refuses `SO_SNDBUF`.
+pub(crate) const UDP_MAX_PAYLOAD: usize = 65_507;
+
+/// Creates an unconnected UDP socket with the pre-connect options applied.
+///
+/// The datagram twin of [`connect`]: the callers differ (a UDP socket is
+/// connected by a synchronous syscall, a TCP one has a handshake to await) but
+/// the option ordering is the same, and duplicating it would let one path drift.
+pub(crate) fn udp_socket(
+    address: SocketAddr,
+    config: &SocketConfig,
+) -> io::Result<tokio::net::UdpSocket> {
+    let domain = if address.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_nonblocking(true)?;
+    apply_pre_connect_options(&socket, config)?;
+    tokio::net::UdpSocket::from_std(socket.into())
+}
+
+/// The largest payload a connected UDP socket will carry in one datagram.
+///
+/// Derived from the socket's send buffer: the kernel refuses a datagram larger
+/// than `SO_SNDBUF`, so a caller sizing a buffer from this cannot build a
+/// payload that is guaranteed to fail. Never exceeds [`UDP_MAX_PAYLOAD`], which
+/// is the IP-imposed ceiling no buffer setting can raise.
+pub(crate) fn udp_max_datagram_size(socket: &tokio::net::UdpSocket) -> io::Result<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = socket.as_raw_fd();
+        let mut size: libc::c_int = 0;
+        let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: valid UDP socket fd, and `size`/`length` describe the buffer
+        // `setsockopt`/`getsockopt` write into.
+        let result = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                std::ptr::from_mut(&mut size).cast(),
+                &mut length,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Linux reports double the usable value for bookkeeping overhead.
+        let usable = (size.max(0) as usize) / 2;
+        if usable == 0 {
+            return Ok(UDP_MAX_PAYLOAD);
+        }
+        Ok(usable.min(UDP_MAX_PAYLOAD))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = socket;
+        Ok(UDP_MAX_PAYLOAD)
+    }
+}
+
 #[allow(unused_variables)]
 fn apply_pre_connect_options(socket: &Socket, config: &SocketConfig) -> io::Result<()> {
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]

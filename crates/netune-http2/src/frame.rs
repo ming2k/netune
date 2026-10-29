@@ -116,6 +116,20 @@ pub enum Frame {
         stream_dependency: u32,
         weight: u8,
     },
+    /// A continuation of the header block started by the preceding `HEADERS` or
+    /// `PUSH_PROMISE` frame (RFC 9113 §6.10).
+    Continuation {
+        stream_id: u32,
+        end_headers: bool,
+        header_block: Bytes,
+    },
+    /// A server push the client did not ask for (RFC 9113 §6.6).
+    PushPromise {
+        stream_id: u32,
+        promised_stream_id: u32,
+        end_headers: bool,
+        header_block: Bytes,
+    },
 }
 
 impl Frame {
@@ -248,6 +262,38 @@ impl Frame {
                 buf.put_u32(dep);
                 buf.put_u8(*weight);
             }
+            Self::Continuation {
+                stream_id,
+                end_headers,
+                header_block,
+            } => {
+                let flags = if *end_headers { FLAG_END_HEADERS } else { 0 };
+                let header = FrameHeader {
+                    length: header_block.len() as u32,
+                    frame_type: FRAME_CONTINUATION,
+                    flags,
+                    stream_id: *stream_id,
+                };
+                buf.extend_from_slice(&header.encode());
+                buf.extend_from_slice(header_block);
+            }
+            Self::PushPromise {
+                stream_id,
+                promised_stream_id,
+                end_headers,
+                header_block,
+            } => {
+                let flags = if *end_headers { FLAG_END_HEADERS } else { 0 };
+                let header = FrameHeader {
+                    length: (4 + header_block.len()) as u32,
+                    frame_type: FRAME_PUSH_PROMISE,
+                    flags,
+                    stream_id: *stream_id,
+                };
+                buf.extend_from_slice(&header.encode());
+                buf.put_u32(*promised_stream_id & 0x7FFFFFFF);
+                buf.extend_from_slice(header_block);
+            }
         }
         buf.freeze()
     }
@@ -345,6 +391,26 @@ impl Frame {
                     last_stream_id,
                     error_code,
                     debug_data,
+                })
+            }
+            FRAME_CONTINUATION => Ok(Self::Continuation {
+                stream_id: header.stream_id,
+                end_headers: (header.flags & FLAG_END_HEADERS) != 0,
+                header_block: payload,
+            }),
+            FRAME_PUSH_PROMISE => {
+                if header.length < 4 {
+                    return Err(H2Error::FrameSize(
+                        "PUSH_PROMISE must be at least 4 bytes".into(),
+                    ));
+                }
+                let promised_stream_id =
+                    u32::from_be_bytes([payload[0] & 0x7F, payload[1], payload[2], payload[3]]);
+                Ok(Self::PushPromise {
+                    stream_id: header.stream_id,
+                    promised_stream_id,
+                    end_headers: (header.flags & FLAG_END_HEADERS) != 0,
+                    header_block: payload.slice(4..),
                 })
             }
             other => Err(H2Error::Protocol(format!("unhandled frame type {other}"))),

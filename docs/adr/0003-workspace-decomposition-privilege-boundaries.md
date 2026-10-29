@@ -30,14 +30,15 @@ Furthermore, line-protocol parsing (`HTTP/1.1`) and planned binary multiplexed s
 ## Considered Options
 
 - Option 1: Monolithic single-crate workspace with Cargo feature flags controlling capabilities.
-- Option 2: Multi-crate workspace with discrete crates for trace, HTTP/1.1, transport, probe, and a reserved HTTP/2 placeholder, enforcing compilation boundaries for privileged paths.
+- Option 2: Multi-crate workspace with discrete crates for trace, HTTP/1.1, transport, probe, and a separate HTTP/2 crate, enforcing compilation boundaries for privileged paths.
 
 ## Decision Outcome
 
 Chosen option: "Option 2: Multi-crate workspace with discrete crates", splitting the project into:
 1. `netune-trace`: zero-allocation trace ring buffer and pure timing derivations.
 2. `netune-http1`: HTTP/1.1 codec, differential-tested against `hyper`.
-3. `netune-http2`: reserved 0.0.1 crate preserving namespace and architecture plan.
+3. `netune-http2`: the RFC 9113 client (frames, HPACK with dynamic table, Huffman, flow
+   control, fingerprinting). Reserved at 0.0.1 and since implemented; see ADR-0006.
 4. `netune`: owned transport substrate, TLS router, pool, proxies, and in-process fault injection.
 5. `netune-probe`: pure Ethernet/IPv4/TCP frame builder; socket transmission gated strictly behind `--features inject` and requiring Linux `CAP_NET_RAW`.
 
@@ -52,7 +53,7 @@ Chosen option: "Option 2: Multi-crate workspace with discrete crates", splitting
 - **Positive**:
   - The default build of every crate is completely safe and unprivileged.
   - Consumers can depend on `netune-trace` or `netune-http1` in isolation without pulling in networking or raw socket dependencies.
-  - Architectural contracts for HTTP/2 are pinned before implementation commences.
+  - HTTP/2 has its own crate, so its binary framing and HPACK lifecycle cannot leak into the line-protocol codec.
 - **Negative & Trade-offs**:
   - Requires maintaining workspace-wide version synchronization and release automation across multiple crates.
 

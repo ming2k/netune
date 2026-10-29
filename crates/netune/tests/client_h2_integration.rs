@@ -6,7 +6,9 @@
 use bytes::Bytes;
 use http::Method;
 use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector};
-use netune_http2::frame::{FRAME_HEADER_LEN, Frame, FrameHeader, SETTING_MAX_CONCURRENT_STREAMS};
+use netune_http2::frame::{
+    FRAME_HEADER_LEN, FRAME_WINDOW_UPDATE, Frame, FrameHeader, SETTING_MAX_CONCURRENT_STREAMS,
+};
 use netune_http2::hpack::{HpackDecoder, HpackEncoder};
 use netune_trace::Recorder;
 use std::sync::{Arc, Mutex};
@@ -54,8 +56,21 @@ async fn unified_client_transparently_executes_http2_request() {
             .await
             .expect("send settings");
 
-        // Read client ACK
+        // Read client ACK of our SETTINGS.
         socket.read_exact(&mut h_buf).await.expect("read ack");
+
+        // Acknowledge the client's SETTINGS too: the client waits for this before it
+        // treats the handshake as complete, which is what a real server does.
+        socket
+            .write_all(
+                &Frame::Settings {
+                    ack: true,
+                    settings: Vec::new(),
+                }
+                .encode(),
+            )
+            .await
+            .expect("send ack");
 
         // Read request HEADERS
         socket.read_exact(&mut h_buf).await.expect("req header");
@@ -66,12 +81,12 @@ async fn unified_client_transparently_executes_http2_request() {
             .await
             .expect("req payload");
 
-        let decoder = HpackDecoder::new();
+        let mut decoder = HpackDecoder::new();
         let headers = decoder.decode(&req_payload).expect("decode");
         assert!(headers.iter().any(|(k, v)| k == ":method" && v == "GET"));
 
         // Reply 200 OK
-        let encoder = HpackEncoder::new();
+        let mut encoder = HpackEncoder::new();
         let resp_headers = Frame::Headers {
             stream_id: req_h.stream_id,
             end_stream: false,
@@ -92,6 +107,11 @@ async fn unified_client_transparently_executes_http2_request() {
             .write_all(&resp_data.encode())
             .await
             .expect("write data");
+
+        // Consume the client's flow-control credit so the socket outlives its read.
+        socket.read_exact(&mut h_buf).await.expect("window update");
+        let wu = FrameHeader::parse(&h_buf).expect("wu header");
+        assert_eq!(wu.frame_type, FRAME_WINDOW_UPDATE);
     });
 
     let target = Target::plain(format!("127.0.0.1:{port}")).with_force_h2(true);

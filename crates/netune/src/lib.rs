@@ -27,8 +27,9 @@
 //! CA chain, and neither is expressible through `rustls`' public API. See
 //! `docs/adr/0009` for the evidence and for what would reopen the question.
 //!
-//! L2 frame parsing, forging, and optional injection are housed in the companion
-//! crate `netune-probe`. HTTP/2 framing is reserved in `netune-http2`.
+//! L2 frame parsing, capture, forging and optional injection are housed in the companion
+//! crate `netune-probe`; nothing there is linked by default. HTTP/2 is implemented in
+//! `netune-http2` and driven through [`H2Client`] when the `http2` feature is on.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 

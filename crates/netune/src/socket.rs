@@ -120,11 +120,20 @@ impl SocketConfig {
     }
 
     /// Apply these configuration knobs to a connected [`TcpStream`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the first `setsockopt` or `set_*` failure. Every knob this method applies was
+    /// asked for by the caller, so a silent failure would leave the session behaving
+    /// differently from how it was configured with nothing to point at. A knob that cannot
+    /// work on this platform is reported with `ErrorKind::Unsupported` rather than ignored.
     pub fn apply(&self, stream: &TcpStream) -> Result<(), io::Error> {
-        let _ = stream.set_nodelay(self.nodelay);
+        // `TCP_NODELAY` is the default-on knob: report a failure rather than let a caller
+        // believe Nagle was disabled when it was not.
+        stream.set_nodelay(self.nodelay)?;
 
         if let Some(ttl) = self.ttl {
-            let _ = stream.set_ttl(ttl);
+            stream.set_ttl(ttl)?;
         }
 
         #[cfg(unix)]
@@ -135,28 +144,34 @@ impl SocketConfig {
             if let Some(rcv) = self.recv_buffer_size {
                 let size = rcv as libc::c_int;
                 // SAFETY: valid socket fd and standard SOL_SOCKET option.
-                unsafe {
+                let result = unsafe {
                     libc::setsockopt(
                         fd,
                         libc::SOL_SOCKET,
                         libc::SO_RCVBUF,
                         std::ptr::from_ref(&size).cast(),
                         std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                    );
+                    )
+                };
+                if result != 0 {
+                    return Err(io::Error::last_os_error());
                 }
             }
 
             if let Some(snd) = self.send_buffer_size {
                 let size = snd as libc::c_int;
                 // SAFETY: valid socket fd and standard SOL_SOCKET option.
-                unsafe {
+                let result = unsafe {
                     libc::setsockopt(
                         fd,
                         libc::SOL_SOCKET,
                         libc::SO_SNDBUF,
                         std::ptr::from_ref(&size).cast(),
                         std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                    );
+                    )
+                };
+                if result != 0 {
+                    return Err(io::Error::last_os_error());
                 }
             }
 
@@ -164,14 +179,17 @@ impl SocketConfig {
             if let Some(mss) = self.mss {
                 let val = mss as libc::c_int;
                 // SAFETY: valid socket fd and IPPROTO_TCP option.
-                unsafe {
+                let result = unsafe {
                     libc::setsockopt(
                         fd,
                         libc::IPPROTO_TCP,
                         libc::TCP_MAXSEG,
                         std::ptr::from_ref(&val).cast(),
                         std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                    );
+                    )
+                };
+                if result != 0 {
+                    return Err(io::Error::last_os_error());
                 }
             }
         }

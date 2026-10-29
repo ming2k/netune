@@ -119,12 +119,16 @@ pub fn encode_string(s: &str, huffman: bool, dst: &mut Vec<u8>) {
     if huffman {
         let mut encoded = Vec::new();
         huffman::encode(s.as_bytes(), &mut encoded);
-        encode_integer(encoded.len(), 7, 0x80, dst);
-        dst.extend_from_slice(&encoded);
-    } else {
-        encode_integer(s.len(), 7, 0x00, dst);
-        dst.extend_from_slice(s.as_bytes());
+        // Huffman is only a win when it is actually shorter. An already-random token (a
+        // nonce, a base64 signature) would otherwise grow the block.
+        if encoded.len() < s.len() {
+            encode_integer(encoded.len(), 7, 0x80, dst);
+            dst.extend_from_slice(&encoded);
+            return;
+        }
     }
+    encode_integer(s.len(), 7, 0x00, dst);
+    dst.extend_from_slice(s.as_bytes());
 }
 
 /// Decode a string literal.
@@ -150,145 +154,348 @@ pub fn decode_string(src: &mut &[u8]) -> Result<String, H2Error> {
 }
 
 fn decode_huffman_string(raw: &[u8]) -> Result<String, H2Error> {
-    let mut out = Vec::new();
-    let mut current = 0u64;
-    let mut bits = 0;
-
-    for &b in raw {
-        current = (current << 8) | (b as u64);
-        bits += 8;
-
-        'match_symbol: loop {
-            for (sym, &(code, len)) in huffman::HUFFMAN_CODES.iter().enumerate() {
-                if len as usize <= bits {
-                    let shift = bits - len as usize;
-                    let candidate = (current >> shift) & ((1 << len) - 1);
-                    if candidate == code as u64 {
-                        if sym == 256 {
-                            return Err(H2Error::Hpack("unexpected EOS symbol".into()));
-                        }
-                        out.push(sym as u8);
-                        bits -= len as usize;
-                        continue 'match_symbol;
-                    }
-                }
-            }
-            break;
-        }
-    }
-    String::from_utf8(out).map_err(|e| H2Error::Hpack(format!("invalid utf-8 in huffman: {e}")))
+    // The tree walk lives in `huffman::decode`: one branch per input bit rather than a scan
+    // of all 257 symbols per emitted byte, which made a large block quadratic.
+    let bytes = huffman::decode(raw).map_err(H2Error::Hpack)?;
+    String::from_utf8(bytes)
+        .map_err(|error| H2Error::Hpack(format!("invalid utf-8 in huffman: {error}")))
 }
 
-/// An HPACK header compressor.
-#[derive(Debug, Default)]
+/// The dynamic table (RFC 7541 §2.3.2).
+///
+/// Entries are newest-first, so index 62 is the most recent insertion: that makes eviction
+/// a pop from the back and a lookup an offset from the front.
+#[derive(Debug)]
+pub struct DynamicTable {
+    entries: std::collections::VecDeque<(String, String)>,
+    /// Current size in the RFC's accounting: `sum(name.len() + value.len() + 32)`.
+    size: usize,
+    /// The peer's declared maximum.
+    max_size: usize,
+}
+
+/// The entry-overhead constant (RFC 7541 §4.1).
+const ENTRY_OVERHEAD: usize = 32;
+
+/// The dynamic table's initial maximum (RFC 7541 §4.2).
+pub const DEFAULT_TABLE_SIZE: usize = 4096;
+
+impl Default for DynamicTable {
+    fn default() -> Self {
+        Self::new(DEFAULT_TABLE_SIZE)
+    }
+}
+
+impl DynamicTable {
+    #[must_use]
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            entries: std::collections::VecDeque::new(),
+            size: 0,
+            max_size,
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[must_use]
+    pub const fn size(&self) -> usize {
+        self.size
+    }
+
+    #[must_use]
+    pub const fn max_size(&self) -> usize {
+        self.max_size
+    }
+
+    /// Inserts `(name, value)` as the newest entry, evicting oldest-first (§4.4).
+    ///
+    /// An entry larger than the table clears it and is not stored, which is what the RFC
+    /// requires rather than an error.
+    pub fn insert(&mut self, name: String, value: String) {
+        let cost = name.len() + value.len() + ENTRY_OVERHEAD;
+        if cost > self.max_size {
+            self.entries.clear();
+            self.size = 0;
+            return;
+        }
+        while self.size + cost > self.max_size {
+            match self.entries.pop_back() {
+                Some((old_name, old_value)) => {
+                    self.size -= old_name.len() + old_value.len() + ENTRY_OVERHEAD;
+                }
+                None => break,
+            }
+        }
+        self.size += cost;
+        self.entries.push_front((name, value));
+    }
+
+    /// Resizes the table, evicting as needed (§4.3).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `max_size` exceeds what the decoder advertised: a peer may
+    /// shrink its encoder's table, never grow it past what the decoder allowed.
+    pub fn set_max_size(&mut self, max_size: usize) -> Result<(), H2Error> {
+        if max_size > self.max_size {
+            return Err(H2Error::Hpack(format!(
+                "dynamic table size update to {max_size} exceeds the advertised {}",
+                self.max_size
+            )));
+        }
+        self.max_size = max_size;
+        while self.size > self.max_size {
+            match self.entries.pop_back() {
+                Some((name, value)) => {
+                    self.size -= name.len() + value.len() + ENTRY_OVERHEAD;
+                }
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// The entry at a dynamic index (1-based, newest first).
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&(String, String)> {
+        index
+            .checked_sub(1)
+            .and_then(|offset| self.entries.get(offset))
+    }
+
+    fn find(&self, name: &str, value: &str) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|(n, v)| n == name && v == value)
+            .map(|offset| offset + 1)
+    }
+
+    fn find_name(&self, name: &str) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|(n, _)| n == name)
+            .map(|offset| offset + 1)
+    }
+}
+
+/// An HPACK header compressor over a dynamic table.
+#[derive(Debug)]
 pub struct HpackEncoder {
     pub use_huffman: bool,
+    table: DynamicTable,
+}
+
+impl Default for HpackEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HpackEncoder {
+    #[must_use]
     pub fn new() -> Self {
-        Self { use_huffman: true }
+        Self {
+            use_huffman: true,
+            table: DynamicTable::default(),
+        }
     }
 
-    /// Encode a list of headers in the exact provided order.
-    pub fn encode<'a, I>(&self, headers: I) -> Bytes
+    /// Encode headers in the exact order given.
+    ///
+    /// Order is preserved because a fingerprint declares it; reordering would defeat the
+    /// point of impersonation even though the wire permits any order.
+    pub fn encode<'a, I>(&mut self, headers: I) -> Bytes
     where
         I: IntoIterator<Item = (&'a str, &'a str)>,
     {
         let mut out = Vec::new();
-
         for (name, value) in headers {
-            // Find in static table
-            let mut match_full = None;
-            let mut match_name = None;
+            if let Some(index) = static_full_match(name, value) {
+                encode_integer(index, 7, 0x80, &mut out);
+                continue;
+            }
+            if let Some(offset) = self.table.find(name, value) {
+                encode_integer(STATIC_TABLE.len() + offset, 7, 0x80, &mut out);
+                continue;
+            }
+            let name_index = static_name_match(name).or_else(|| {
+                self.table
+                    .find_name(name)
+                    .map(|offset| STATIC_TABLE.len() + offset)
+            });
 
-            for (idx, &(s_name, s_val)) in STATIC_TABLE.iter().enumerate() {
-                let static_idx = idx + 1;
-                if s_name.eq_ignore_ascii_case(name) {
-                    if s_val == value {
-                        match_full = Some(static_idx);
-                        break;
-                    } else if match_name.is_none() {
-                        match_name = Some(static_idx);
-                    }
+            // Literal with incremental indexing (`01`): the value is worth remembering,
+            // which is the normal case for a repeated header like `:authority`.
+            match name_index {
+                Some(index) => encode_integer(index, 6, 0x40, &mut out),
+                None => {
+                    out.push(0x40);
+                    encode_string(name, self.use_huffman, &mut out);
                 }
             }
-
-            if let Some(idx) = match_full {
-                // Indexed Header Field: 1xxxxxxx
-                encode_integer(idx, 7, 0x80, &mut out);
-            } else if let Some(idx) = match_name {
-                // Literal with indexing / without indexing: 0000xxxx with indexed name
-                encode_integer(idx, 4, 0x00, &mut out);
-                encode_string(value, self.use_huffman, &mut out);
-            } else {
-                // Literal Header Field with Literal Name: 00000000
-                out.push(0x00);
-                encode_string(name, self.use_huffman, &mut out);
-                encode_string(value, self.use_huffman, &mut out);
-            }
+            encode_string(value, self.use_huffman, &mut out);
+            self.table.insert(name.to_owned(), value.to_owned());
         }
-
         Bytes::from(out)
+    }
+
+    /// The encoder's dynamic table, for tests and diagnostics.
+    #[must_use]
+    pub const fn table(&self) -> &DynamicTable {
+        &self.table
+    }
+
+    /// Resizes the encoder's table, emitting the required size update.
+    ///
+    /// # Errors
+    ///
+    /// Returns the table's error when the new size is not permitted.
+    pub fn set_max_size(&mut self, max_size: usize, out: &mut Vec<u8>) -> Result<(), H2Error> {
+        self.table.set_max_size(max_size)?;
+        encode_integer(max_size, 5, 0x20, out);
+        Ok(())
     }
 }
 
-/// An HPACK header decompressor.
-#[derive(Debug, Default)]
-pub struct HpackDecoder;
+fn static_full_match(name: &str, value: &str) -> Option<usize> {
+    STATIC_TABLE
+        .iter()
+        .position(|(n, v)| n.eq_ignore_ascii_case(name) && *v == value)
+        .map(|index| index + 1)
+}
+
+fn static_name_match(name: &str) -> Option<usize> {
+    STATIC_TABLE
+        .iter()
+        .position(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|index| index + 1)
+}
+
+/// An HPACK header decompressor over a dynamic table.
+#[derive(Debug)]
+pub struct HpackDecoder {
+    table: DynamicTable,
+    /// Size updates seen in the current block; RFC 7541 §4.2 allows at most two.
+    size_updates: u8,
+}
+
+impl Default for HpackDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl HpackDecoder {
+    #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            table: DynamicTable::default(),
+            size_updates: 0,
+        }
     }
 
-    /// Decode an HPACK header block into header key-value pairs.
-    pub fn decode(&self, mut payload: &[u8]) -> Result<Vec<(String, String)>, H2Error> {
+    /// A decoder whose table is capped at `max_size`.
+    #[must_use]
+    pub fn with_max_table_size(max_size: usize) -> Self {
+        Self {
+            table: DynamicTable::new(max_size),
+            size_updates: 0,
+        }
+    }
+
+    /// Decode one header block.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an index beyond both tables, a malformed literal, a size update
+    /// exceeding the advertised cap, or a size update after the first field.
+    pub fn decode(&mut self, mut payload: &[u8]) -> Result<Vec<(String, String)>, H2Error> {
         let mut headers = Vec::new();
+        let mut saw_field = false;
+        self.size_updates = 0;
 
         while !payload.is_empty() {
             let first = payload[0];
-
-            if (first & 0x80) != 0 {
-                // Indexed Header Field (1xxxxxxx)
-                let idx = decode_integer(7, &mut payload)?;
-                if idx >= 1 && idx <= STATIC_TABLE.len() {
-                    let (k, v) = STATIC_TABLE[idx - 1];
-                    headers.push((k.to_string(), v.to_string()));
-                } else {
-                    return Err(H2Error::Hpack(format!("unsupported dynamic index {idx}")));
+            if first & 0x80 != 0 {
+                // Indexed Header Field.
+                let index = decode_integer(7, &mut payload)?;
+                headers.push(self.lookup(index)?);
+                saw_field = true;
+            } else if first & 0x40 != 0 {
+                // Literal with incremental indexing: the entry enters the dynamic table.
+                let index = decode_integer(6, &mut payload)?;
+                let name = self.resolve_name(index, &mut payload)?;
+                let value = decode_string(&mut payload)?;
+                self.table.insert(name.clone(), value.clone());
+                headers.push((name, value));
+                saw_field = true;
+            } else if first & 0x20 != 0 {
+                // Dynamic Table Size Update.
+                if saw_field {
+                    return Err(H2Error::Hpack(
+                        "dynamic table size update after a header field".into(),
+                    ));
                 }
-            } else if (first & 0x40) != 0 {
-                // Literal with incremental indexing (01xxxxxx)
-                let idx = decode_integer(6, &mut payload)?;
-                let name = if idx > 0 && idx <= STATIC_TABLE.len() {
-                    STATIC_TABLE[idx - 1].0.to_string()
-                } else if idx == 0 {
-                    decode_string(&mut payload)?
-                } else {
-                    return Err(H2Error::Hpack(format!("index out of bounds: {idx}")));
-                };
-                let value = decode_string(&mut payload)?;
-                headers.push((name, value));
-            } else if (first & 0x20) != 0 {
-                // Dynamic table size update (001xxxxx)
-                let _new_size = decode_integer(5, &mut payload)?;
+                if self.size_updates >= 2 {
+                    return Err(H2Error::Hpack(
+                        "more than two size updates in one block".into(),
+                    ));
+                }
+                self.size_updates += 1;
+                let max_size = decode_integer(5, &mut payload)?;
+                self.table.set_max_size(max_size)?;
             } else {
-                // Literal without indexing (0000xxxx or 0001xxxx)
-                let idx = decode_integer(4, &mut payload)?;
-                let name = if idx > 0 && idx <= STATIC_TABLE.len() {
-                    STATIC_TABLE[idx - 1].0.to_string()
-                } else if idx == 0 {
-                    decode_string(&mut payload)?
-                } else {
-                    return Err(H2Error::Hpack(format!("index out of bounds: {idx}")));
-                };
+                // Literal without indexing (`0000`) or never indexed (`0001`): neither
+                // changes the table.
+                let index = decode_integer(4, &mut payload)?;
+                let name = self.resolve_name(index, &mut payload)?;
                 let value = decode_string(&mut payload)?;
                 headers.push((name, value));
+                saw_field = true;
             }
         }
-
         Ok(headers)
+    }
+
+    /// Resolve a literal's name from an index (static, dynamic, or inline).
+    fn resolve_name(&self, index: usize, payload: &mut &[u8]) -> Result<String, H2Error> {
+        if index == 0 {
+            return decode_string(payload);
+        }
+        self.lookup(index).map(|(name, _)| name)
+    }
+
+    fn lookup(&self, index: usize) -> Result<(String, String), H2Error> {
+        if index == 0 {
+            return Err(H2Error::Hpack("index 0 is not a valid header index".into()));
+        }
+        if index <= STATIC_TABLE.len() {
+            let (name, value) = STATIC_TABLE[index - 1];
+            return Ok((name.to_owned(), value.to_owned()));
+        }
+        let dynamic_index = index - STATIC_TABLE.len();
+        self.table.get(dynamic_index).cloned().ok_or_else(|| {
+            H2Error::Hpack(format!(
+                "index {index} is beyond both tables (static {}, dynamic {})",
+                STATIC_TABLE.len(),
+                self.table.len()
+            ))
+        })
+    }
+
+    /// The decoder's dynamic table, for tests and diagnostics.
+    #[must_use]
+    pub const fn table(&self) -> &DynamicTable {
+        &self.table
     }
 }
 
@@ -298,21 +505,29 @@ mod tests {
 
     #[test]
     fn integer_encoding_and_decoding_round_trip() {
-        for val in [0, 1, 10, 127, 128, 255, 1337, 65535, 1_000_000] {
+        for value in [0, 1, 10, 127, 128, 255, 1337, 65535, 1_000_000] {
             let mut buf = Vec::new();
-            encode_integer(val, 5, 0x20, &mut buf);
+            encode_integer(value, 5, 0x20, &mut buf);
             let mut slice = &buf[..];
             let decoded = decode_integer(5, &mut slice).expect("decode integer");
-            assert_eq!(val, decoded);
+            assert_eq!(value, decoded);
             assert!(slice.is_empty());
         }
     }
 
     #[test]
-    fn hpack_header_block_round_trip() {
-        let encoder = HpackEncoder::new();
-        let decoder = HpackDecoder::new();
+    fn an_integer_with_endless_continuation_is_refused() {
+        let mut bytes = vec![0xffu8];
+        bytes.extend_from_slice(&[0xff; 8]);
+        let mut slice = &bytes[..];
+        let error = decode_integer(7, &mut slice).expect_err("must refuse");
+        assert!(error.to_string().contains("overflow"), "{error}");
+    }
 
+    #[test]
+    fn header_block_round_trip() {
+        let mut encoder = HpackEncoder::new();
+        let mut decoder = HpackDecoder::new();
         let original = [
             (":method", "GET"),
             (":scheme", "https"),
@@ -321,14 +536,139 @@ mod tests {
             ("user-agent", "netune-h2/0.1"),
             ("accept", "application/json"),
         ];
-
         let block = encoder.encode(original.iter().copied());
         let decoded = decoder.decode(&block).expect("decode headers");
-
         assert_eq!(original.len(), decoded.len());
-        for ((k1, v1), (k2, v2)) in original.iter().zip(decoded.iter()) {
-            assert_eq!(*k1, k2.as_str());
-            assert_eq!(*v1, v2.as_str());
+        for ((expected_name, expected_value), (name, value)) in original.iter().zip(decoded.iter())
+        {
+            assert_eq!(*expected_name, name.as_str());
+            assert_eq!(*expected_value, value.as_str());
         }
+    }
+
+    #[test]
+    fn a_second_block_indexes_into_the_dynamic_table() {
+        // The property that made the old decoder unusable against a real server: the second
+        // block refers to entries the first block inserted.
+        let mut encoder = HpackEncoder::new();
+        let mut decoder = HpackDecoder::new();
+        let pair = [("x-custom", "a-value-not-in-the-static-table")];
+
+        let block = encoder.encode(pair.iter().copied());
+        let first = decoder.decode(&block).expect("first block");
+        assert_eq!(
+            first,
+            vec![(
+                "x-custom".to_owned(),
+                "a-value-not-in-the-static-table".to_owned()
+            )]
+        );
+        assert_eq!(decoder.table().len(), 1, "the entry was indexed");
+
+        let block = encoder.encode(pair.iter().copied());
+        assert_eq!(block.len(), 1, "a repeated pair costs one octet");
+        assert_eq!(decoder.decode(&block).expect("second block"), first);
+    }
+
+    #[test]
+    fn the_dynamic_table_evicts_oldest_first() {
+        // Each entry costs name + value + 32. With a 120-byte table, two 56-byte entries fit
+        // and a third does not.
+        let mut table = DynamicTable::new(120);
+        table.insert("a".repeat(16), "b".repeat(8));
+        table.insert("c".repeat(16), "d".repeat(8));
+        assert_eq!(table.len(), 2, "two entries fit in 120 bytes");
+        table.insert("e".repeat(16), "f".repeat(8));
+        assert_eq!(table.len(), 2, "the third evicts the oldest");
+        assert_eq!(table.get(1).expect("newest").0, "e".repeat(16));
+        assert_eq!(table.get(2).expect("older").0, "c".repeat(16));
+        assert_eq!(table.size(), 112);
+    }
+
+    #[test]
+    fn an_entry_that_exactly_fits_is_kept() {
+        let mut table = DynamicTable::new(56);
+        table.insert("a".repeat(16), "b".repeat(8));
+        assert_eq!(
+            table.len(),
+            1,
+            "cost == max_size must be stored, not dropped"
+        );
+        assert_eq!(table.size(), 56);
+    }
+
+    #[test]
+    fn an_entry_larger_than_the_table_clears_it() {
+        let mut table = DynamicTable::new(64);
+        table.insert("a".to_owned(), "b".to_owned());
+        assert_eq!(table.len(), 1);
+        table.insert("x".repeat(100), "y".repeat(100));
+        assert!(table.is_empty(), "an oversized entry empties the table");
+    }
+
+    #[test]
+    fn a_size_update_beyond_the_advertised_cap_is_refused() {
+        let mut decoder = HpackDecoder::with_max_table_size(2048);
+        let mut block = Vec::new();
+        encode_integer(8192, 5, 0x20, &mut block);
+        let error = decoder.decode(&block).expect_err("must refuse");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+
+    #[test]
+    fn a_size_update_after_a_field_is_refused() {
+        let mut decoder = HpackDecoder::new();
+        let mut block = Vec::new();
+        encode_integer(2, 7, 0x80, &mut block);
+        encode_integer(1024, 5, 0x20, &mut block);
+        let error = decoder.decode(&block).expect_err("must refuse");
+        assert!(
+            error.to_string().contains("after a header field"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_index_beyond_both_tables_is_refused() {
+        let mut decoder = HpackDecoder::new();
+        let mut block = Vec::new();
+        encode_integer(200, 7, 0x80, &mut block);
+        let error = decoder.decode(&block).expect_err("must refuse");
+        assert!(error.to_string().contains("beyond both tables"), "{error}");
+    }
+
+    #[test]
+    fn index_zero_is_refused() {
+        let mut decoder = HpackDecoder::new();
+        let error = decoder.decode(&[0x80u8]).expect_err("must refuse");
+        assert!(error.to_string().contains("index 0"), "{error}");
+    }
+
+    #[test]
+    fn a_truncated_string_is_refused_rather_than_read_past() {
+        let mut slice = &[0x05u8, b'a'][..];
+        let error = decode_string(&mut slice).expect_err("must refuse");
+        assert!(error.to_string().contains("truncated"), "{error}");
+    }
+
+    #[test]
+    fn huffman_is_skipped_when_it_does_not_shrink() {
+        // "ab" Huffman-encodes to the same number of bytes as the raw form, so the encoder
+        // must choose the plain literal (high bit clear on the length prefix).
+        let mut dst = Vec::new();
+        encode_string("ab", true, &mut dst);
+        assert_eq!(dst[0] & 0x80, 0, "fell back to a plain literal");
+    }
+
+    #[test]
+    fn huffman_is_used_when_it_shrinks() {
+        // A repeated character compresses well, so the Huffman form must be chosen.
+        let mut dst = Vec::new();
+        encode_string(&"a".repeat(64), true, &mut dst);
+        assert_eq!(
+            dst[0] & 0x80,
+            0x80,
+            "a long repeated value must be Huffman-coded"
+        );
     }
 }

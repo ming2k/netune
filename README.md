@@ -10,10 +10,10 @@ itself an object you can inspect, fingerprint, and change:
 |---|---|
 | [`netune-trace`] | The trace model and pure derivations. Every timing a surface shows is a pure function of a recorded trace. Also: TLS ClientHello parsing and JA3/JA4 fingerprints. |
 | [`netune-http1`] | The HTTP/1.1 codec. Differential-tested against hyper (dev-dependency only) over recorded byte streams. |
-| [`netune-http2`] | HTTP/2 wire protocol placeholder and design reservation (ADR-0003). Reserved at 0.0.1; no I/O implementation. |
+| [`netune-http2`] | RFC 9113 client: frame codec, HPACK with a full dynamic table (RFC 7541), Huffman coding, flow control, `CONTINUATION` reassembly, `PUSH_PROMISE` refusal, and declarative Akamai fingerprint impersonation (ADR-0006). The `http2` feature of `netune` drives it. |
 | [`netune-ws`] | Pure RFC 6455 WebSocket codec: role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys. No I/O runtime. |
 | [`netune`] | The transport: DNS, TCP, TLS (rustls), the syscall tap (`TimedIo`), connection pool (`Pool`), TLS fingerprint presets and routing (`TlsProfile`, `Preset`), proxies (HTTP CONNECT & SOCKS5), redirects, decompression, client WebSocket upgrade (`connect_ws`), stale-socket absorption — and `FaultIo`, the chaos twin that injects delays, splits, truncations, and resets. |
-| [`netune-probe`] | The L2 probe: pure Ethernet/IPv4/TCP parse **and build** (forge) plus an opt-in `inject` feature for frame transmission. |
+| [`netune-probe`] | The L2 probe: `AF_PACKET` capture of one TCP flow, pure Ethernet/IPv4/TCP parse **and build** (forge), plus an opt-in `inject` feature for frame transmission. |
 
 ## Capability surface
 
@@ -21,7 +21,12 @@ itself an object you can inspect, fingerprint, and change:
 
 - **L0** protocol events, portable, always on
 - **L1** syscall boundaries (`TimedIo`) + `TCP_INFO` sampling (RTT, retransmits, cwnd)
-- **L2** per-segment capture (Linux, `CAP_NET_RAW`, opt-in)
+- **L2** per-segment capture (Linux, `CAP_NET_RAW`, opt-in) — a **separate binary**,
+  `netune-probe`. It captures one 4-tuple for a bounded window and prints one JSON object
+  per segment; the daemon never links it. `TimeSource::PacketCapture` in `netune-trace` is
+  reserved for a segment timestamp and is **not yet emitted**: nothing today feeds an L2
+  arrival time into a `Recorder`. What exists is the capture and the timeline; joining the
+  two is unstarted.
 
 **Fingerprint** — inspect and configure TLS identity:
 

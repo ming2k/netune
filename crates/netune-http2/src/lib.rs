@@ -12,6 +12,7 @@ pub mod fingerprint;
 pub mod frame;
 pub mod hpack;
 pub mod huffman;
+mod huffman_table;
 
 pub use connection::{CLIENT_PREFACE, H2Connection, H2Response};
 pub use error::H2Error;

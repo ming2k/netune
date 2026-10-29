@@ -88,7 +88,8 @@ mod tests {
     use super::*;
     use crate::connect::TcpConnector;
     use netune_http2::frame::{
-        FRAME_HEADER_LEN, Frame, FrameHeader, SETTING_MAX_CONCURRENT_STREAMS,
+        FLAG_ACK, FRAME_HEADER_LEN, FRAME_SETTINGS, FRAME_WINDOW_UPDATE, Frame, FrameHeader,
+        SETTING_MAX_CONCURRENT_STREAMS,
     };
     use netune_http2::hpack::{HpackDecoder, HpackEncoder};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -129,8 +130,22 @@ mod tests {
                 .await
                 .expect("send settings");
 
-            // Read client ACK
+            // Read client ACK of our SETTINGS.
             socket.read_exact(&mut h_buf).await.expect("read ack");
+            let ack_h = FrameHeader::parse(&h_buf).expect("ack header");
+            assert_eq!(ack_h.frame_type, FRAME_SETTINGS);
+            assert_eq!(ack_h.flags & FLAG_ACK, FLAG_ACK);
+
+            // A real server acknowledges the client's SETTINGS too, which the client waits
+            // for before it considers the handshake complete.
+            let server_ack = Frame::Settings {
+                ack: true,
+                settings: Vec::new(),
+            };
+            socket
+                .write_all(&server_ack.encode())
+                .await
+                .expect("send ack");
 
             // Read request HEADERS
             socket.read_exact(&mut h_buf).await.expect("headers");
@@ -138,7 +153,7 @@ mod tests {
             let mut req_payload = vec![0u8; req_h.length as usize];
             socket.read_exact(&mut req_payload).await.expect("payload");
 
-            let decoder = HpackDecoder::new();
+            let mut decoder = HpackDecoder::new();
             let headers = decoder.decode(&req_payload).expect("decode");
             assert!(
                 headers
@@ -147,7 +162,7 @@ mod tests {
             );
 
             // Reply 200 OK
-            let encoder = HpackEncoder::new();
+            let mut encoder = HpackEncoder::new();
             let resp_headers = Frame::Headers {
                 stream_id: req_h.stream_id,
                 end_stream: false,
@@ -168,6 +183,14 @@ mod tests {
                 .write_all(&resp_data.encode())
                 .await
                 .expect("write data");
+
+            // The client returns flow-control credit for the body it just read; consume it
+            // so the socket is not closed while the client is still reading. A server that
+            // vanished here would look like a transport failure rather than the success it
+            // is.
+            socket.read_exact(&mut h_buf).await.expect("window update");
+            let wu = FrameHeader::parse(&h_buf).expect("wu header");
+            assert_eq!(wu.frame_type, FRAME_WINDOW_UPDATE);
         });
 
         let target = Target::plain(format!("127.0.0.1:{port}"));

@@ -25,6 +25,7 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `RequestTrace`: Envelope storing attempt identifiers, connection provenance, and event logs.
   - `EventLog`: Ring buffer supporting delta-encoded microsecond timestamps with loss tracking.
   - `DerivedTimings`: Pure derived metrics (`connect_us`, `tcp_us`, `tls_us`, `ttfb_us`, `stream_us`, `e2e_us`).
+  - `TraceSink`: optional per-event stream, for a consumer that needs more than the bounded ring window (a long-lived relay); the ring stays the record of truth for the attempt ([ADR-0010](../adr/0010-quic-ownership-and-trace-sink.md)).
   - `ja4::ja4`: Computes JA4 TLS fingerprint from raw ClientHello bytes.
 
 ### `netune-http1`
@@ -60,8 +61,12 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `TlsProfile` & `TlsRouterConnector`: Configures and lazily compiles TLS identities.
   - `FaultIo`: In-process fault injection engine.
   - `DnsResolver` & `StaticResolver`: Asynchronous, mockable DNS resolution.
-  - `SocketConfig`: L3/L4 transport tuning (TTL, buffer sizing, MSS, and a
-    pre-connect `SO_MARK` on Linux). Applies to both TCP and datagram sockets.
+  - `SocketConfig`: L3/L4 transport tuning — TTL, buffer sizing, MSS, `SO_MARK`,
+    `SO_BINDTODEVICE`, a bound source address, TCP keepalive, `IP_TOS`/`IPV6_TCLASS`,
+    and `TCP_FASTOPEN_CONNECT`. Every pre-connect option forces the manual-socket path
+    (`needs_manual_socket`), so none of them can be silently skipped
+    ([INV-SOCKET-01](../dev/standards/invariants.md)). Applies to both TCP and
+    datagram sockets.
   - `SegmentingIo`: Early flight wire segmentation for SNI middlebox evasion.
   - `DatagramConnector` / `DatagramTransport`: Per-peer datagram sessions whose
     peer is fixed at open time, so egress confinement precedes the socket

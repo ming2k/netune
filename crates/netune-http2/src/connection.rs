@@ -278,16 +278,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> H2Connection<T> {
                     last_stream_id,
                     error_code,
                     debug_data,
-                } => {
+                } if last_stream_id < stream_id => {
                     // A GOAWAY that still covers our stream lets it finish; one that does
-                    // not has already abandoned this request.
-                    if last_stream_id < stream_id {
-                        return Err(H2Error::GoAway {
-                            error_code,
-                            debug_data: debug_data.to_vec(),
-                        });
-                    }
+                    // not has already abandoned this request. Matching on the condition
+                    // rather than branching inside the arm keeps the fall-through case
+                    // (a GOAWAY that covers us) in the shared arm below, where it belongs.
+                    return Err(H2Error::GoAway {
+                        error_code,
+                        debug_data: debug_data.to_vec(),
+                    });
                 }
+                Frame::GoAway { .. } => {}
                 Frame::RstStream {
                     stream_id: sid,
                     error_code,

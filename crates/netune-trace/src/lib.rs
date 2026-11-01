@@ -59,7 +59,7 @@ pub use derive::{DerivedTimings, derive};
 pub use event::{Alpn, Event, EventKind, FrameClass, TimeSource};
 pub use forge::{ClientHelloForge, RawExtension};
 pub use log::{EncodedEvent, EventLog, MAX_DELTA_NS};
-pub use record::Recorder;
+pub use record::{Recorder, TraceSink};
 pub use tlsfp::{ClientHello, Ja3, Ja4, is_grease, ja3, ja4};
 pub use trace::{AttemptRef, ConnectionInfo, EndpointRef, Fidelity, RequestTrace, TraceId};
 pub use verdict::{Reading, Reason, Validity};

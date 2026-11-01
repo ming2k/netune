@@ -11,16 +11,43 @@
 //! logic worth testing — batching-agnostic recording, overflow accounting, the
 //! origin conversion — is here.
 
+use std::sync::Arc;
 use std::time::Instant;
 
-use crate::event::{EventKind, FrameClass, TimeSource};
+use crate::event::{Event, EventKind, FrameClass, TimeSource};
 use crate::log::EventLog;
+
+/// A destination for events as they are recorded (ADR-0010).
+///
+/// # Why the ring buffer is not enough
+///
+/// [`EventLog`] is a bounded window: it keeps the last `capacity` events of one attempt,
+/// which is exactly right for a request/response client (ADR-0001's `INV-TRACE-01`) and
+/// exactly wrong for a transparent proxy relay, where a single connection lives for minutes
+/// and moves gigabytes. A relay needs a *stream*, and a consumer that wants one installs a
+/// sink.
+///
+/// # What a sink must and must not do
+///
+/// * **Must not block.** `Recorder::push` is on the transport read/write path, and the
+///   recorder is already behind a mutex. A sink that waits for a slow consumer turns a
+///   network read into a queue wait.
+/// * **Must not panic.** A panicking sink would take down a flow from inside its own
+///   instrumentation.
+/// * **May drop.** A sink that cannot keep up is expected to drop; the ring buffer remains the
+///   record of truth for the attempt.
+pub trait TraceSink: Send + Sync + std::fmt::Debug {
+    /// Receives one event. `at_ns` is relative to the recorder's origin.
+    fn event(&self, event: Event);
+}
 
 /// Records one request attempt's events against a monotonic origin.
 #[derive(Debug)]
 pub struct Recorder {
     origin: Instant,
     log: EventLog,
+    /// Where events go besides the ring, when a consumer asked for a stream.
+    sink: Option<Arc<dyn TraceSink>>,
 }
 
 impl Recorder {
@@ -34,7 +61,35 @@ impl Recorder {
     pub fn start_at(origin: Instant, capacity: usize) -> Self {
         let mut log = EventLog::with_capacity(capacity);
         log.push_at(0, EventKind::Dispatch, 0, 0);
-        Self { origin, log }
+        Self {
+            origin,
+            log,
+            sink: None,
+        }
+    }
+
+    /// Streams every event of this trace to `sink` as well as to the ring.
+    ///
+    /// Consumes and returns `self` so a sink cannot be installed halfway through a trace by
+    /// accident: the events before the call would be missing from the stream, and a consumer
+    /// reading the stream as the whole record would be wrong.
+    #[must_use]
+    pub fn with_sink(mut self, sink: Arc<dyn TraceSink>) -> Self {
+        // The dispatch event was recorded before the sink existed; replay it so the stream is
+        // complete from offset 0.
+        if let Some(event) = self.log.first_of(EventKind::Dispatch) {
+            sink.event(event);
+        }
+        self.sink = Some(sink);
+        self
+    }
+
+    /// Records one event, to the ring and to the sink when there is one.
+    fn push(&mut self, at_ns: u64, kind: EventKind, a: u32, b: u32) {
+        self.log.push_at(at_ns, kind, a, b);
+        if let Some(sink) = &self.sink {
+            sink.event(Event { at_ns, kind, a, b });
+        }
     }
 
     /// The monotonic origin this recorder measures against.
@@ -51,7 +106,7 @@ impl Recorder {
     /// Record one successful socket read of `bytes`, timestamped by `source`.
     pub fn read(&mut self, bytes: usize, source: TimeSource) {
         let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
-        self.log.push_at(
+        self.push(
             self.now_ns(),
             EventKind::Read,
             bytes,
@@ -62,23 +117,22 @@ impl Recorder {
     /// Record one socket write syscall boundary (`poll_write` returned `bytes`).
     pub fn wrote(&mut self, bytes: usize) {
         let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
-        self.log.push_at(self.now_ns(), EventKind::Write, bytes, 0);
+        self.push(self.now_ns(), EventKind::Write, bytes, 0);
     }
 
     /// Record one origin protocol frame of `class` carrying `tokens` output
     /// tokens (0 for a preamble, usage or keep-alive frame).
     pub fn frame(&mut self, class: FrameClass, tokens: u32) {
         let now = self.now_ns();
-        self.log
-            .push_at(now, EventKind::ProtocolFrame, u32::from(class.code()), 0);
+        self.push(now, EventKind::ProtocolFrame, u32::from(class.code()), 0);
         if tokens > 0 {
-            self.log.push_at(now, EventKind::OutputToken, tokens, 0);
+            self.push(now, EventKind::OutputToken, tokens, 0);
         }
     }
 
     /// Record an arbitrary event at "now".
     pub fn mark(&mut self, kind: EventKind, a: u32, b: u32) {
-        self.log.push_at(self.now_ns(), kind, a, b);
+        self.push(self.now_ns(), kind, a, b);
     }
 
     /// Record that the attempt used a pooled connection: no DNS/TCP/TLS phases
@@ -167,5 +221,54 @@ mod tests {
         let log = recorder.into_log();
         assert!(log.first_of(EventKind::ConnectReused).is_some());
         assert!(log.first_of(EventKind::DnsStart).is_none());
+    }
+
+    /// A sink that keeps everything it is given, for a test that needs the stream.
+    #[derive(Debug, Default)]
+    struct CollectingSink(std::sync::Mutex<Vec<Event>>);
+
+    impl TraceSink for CollectingSink {
+        fn event(&self, event: Event) {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+        }
+    }
+
+    #[test]
+    fn a_sink_streams_every_event_from_offset_zero() {
+        // The property a relay depends on: a stream, not a window. The ring keeps the last
+        // `capacity` events, so with a capacity of 2 it would lose everything but the tail;
+        // the sink must still have all of them, starting with `Dispatch` at offset 0 — which
+        // was recorded *before* the sink existed and is replayed by `with_sink`.
+        let sink = Arc::new(CollectingSink::default());
+        let mut recorder = Recorder::start(2).with_sink(Arc::clone(&sink) as Arc<dyn TraceSink>);
+        recorder.read(10, TimeSource::Syscall);
+        recorder.wrote(20);
+        recorder.read(30, TimeSource::Syscall);
+
+        let streamed = sink.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(streamed.len(), 4, "dispatch plus three events");
+        assert_eq!(streamed[0].kind, EventKind::Dispatch);
+        assert_eq!(streamed[0].at_ns, 0);
+        assert_eq!(
+            streamed
+                .iter()
+                .filter(|e| e.kind == EventKind::Read)
+                .count(),
+            2,
+            "both reads reached the sink"
+        );
+
+        // The ring is still the record of truth for the attempt, and still bounded.
+        let log = recorder.into_log();
+        assert_eq!(log.len(), 2, "the ring kept only its capacity");
+        assert_eq!(log.dropped(), 2, "and counted what it dropped");
+    }
+
+    #[test]
+    fn a_recorder_without_a_sink_pays_nothing() {
+        let mut recorder = Recorder::start(8);
+        recorder.read(1, TimeSource::Syscall);
+        recorder.wrote(1);
+        assert_eq!(recorder.log().len(), 3);
     }
 }

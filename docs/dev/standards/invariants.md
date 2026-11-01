@@ -38,6 +38,8 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | Family | Scope | Ratified in |
 | :--- | :--- | :--- |
 | `[INV-TRACE-01..02]` | Timings are pure derivations of recorded events; no synthetic measurement bias. | ADR-0001 |
+| `[INV-TRACE-03]` | An event reaches a configured `TraceSink` before the operation that recorded it returns, and the ring buffer remains an independent bounded record of the attempt (a slow sink may drop; the ring may not lose its window silently). | ADR-0010 |
+| `[INV-SOCKET-01]` | A `SocketConfig` option is either applied or reported; no pre-connect option may be silently skipped by the fast path (`needs_manual_socket`). | ADR-0006, ADR-0010 |
 | `[INV-TRANSPORT-00..04]` | Replay safety: a pooled socket that drops before any response-head byte is replaced; after that point it is never retried. Idle bound, distinct `Incomplete`. | ADR-0001 (`00`), ADR-0005 (`01..04`) |
 | `[INV-EGRESS-01..03]` | Confinement is checked before connect; private, loopback, link-local and metadata ranges are refused. | ADR-0002 |
 | `[INV-TLS-01..03]` | TLS identity is explicit data (`TlsProfile`); presets keep a stable wire identity across dependency updates. | ADR-0004 |

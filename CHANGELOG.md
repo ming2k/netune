@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5] - 2026-11-01
+
+### Added
+
+- **`TraceSink` trait and streaming trace export (`netune-trace`)** ([ADR-0010](docs/adr/0010-quic-ownership-and-trace-sink.md)).
+  `Recorder::with_sink` streams events as they occur to an installed `TraceSink`
+  while continuing to populate the bounded `EventLog` ring buffer. Long-lived
+  transparent proxy relays can stream trace events without ring-window overflow
+  loss, while request/response attempts retain the ring as their record of truth
+  (`INV-TRACE-03`).
+- **`SocketConfig` pre-connect routing options and enforcement (`netune`)** ([ADR-0010](docs/adr/0010-quic-ownership-and-trace-sink.md)).
+  Added `bind_device` (`SO_BINDTODEVICE`), `bind_address`, `keepalive` (`SO_KEEPALIVE`),
+  `tos` (`IP_TOS`/`IPV6_TCLASS`), and `tcp_fast_open` (`TCP_FASTOPEN_CONNECT`).
+  `needs_manual_socket` guarantees every pre-connect option forces manual socket
+  creation before `connect(2)` so that none are silently skipped by the fast path,
+  and OS errors propagate immediately (`INV-SOCKET-01`).
+- **RFC 9113 HTTP/2 GOAWAY match guard (`netune-http2`).**
+  Pattern guard `last_stream_id < stream_id` cleanly distinguishes abandoned
+  streams from active requests covered by the GOAWAY frame.
+
 ## [0.0.4] - 2026-10-30
 
 ### Added

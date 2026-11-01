@@ -65,8 +65,8 @@ The crates are consumed from this repository by tag:
 
 ```toml
 [dependencies]
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.2" }
-netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.2" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.5" }
+netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.5" }
 ```
 
 Pin a `tag` (or a `rev` for the strictest reproducibility) and upgrade

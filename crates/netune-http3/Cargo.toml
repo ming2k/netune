@@ -13,8 +13,8 @@ bytes = { workspace = true }
 h3 = { workspace = true }
 h3-quinn = { workspace = true }
 http = { workspace = true }
-netune-quic = { path = "../netune-quic", version = "0.0.6" }
-netune-trace = { path = "../netune-trace", version = "0.0.6" }
+netune-quic = { path = "../netune-quic", version = "0.0.7" }
+netune-trace = { path = "../netune-trace", version = "0.0.7" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "time", "sync"] }
 

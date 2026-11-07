@@ -61,7 +61,7 @@ pub use derive::{DerivedTimings, derive};
 pub use derive_ingress::{
     DerivedIngress, derive_ingress, derive_ingress_exchanges, exchange_count,
 };
-pub use derive_transport::{DerivedH3, DerivedQuic, derive_h3, derive_quic};
+pub use derive_transport::{DerivedH3, DerivedQuic, derive_h3, derive_h3_exchanges, derive_quic};
 pub use event::{Alpn, Event, EventKind, FrameClass, TimeSource};
 pub use forge::{ClientHelloForge, RawExtension};
 pub use log::{EncodedEvent, EventLog, MAX_DELTA_NS};

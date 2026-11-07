@@ -81,8 +81,8 @@ The crates are consumed from this repository by tag:
 
 ```toml
 [dependencies]
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.6" }
-netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.6" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.7" }
+netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.7" }
 ```
 
 Pin a `tag` (or a `rev` for the strictest reproducibility) and upgrade
@@ -157,7 +157,7 @@ if they had not happened.
 
 ## Status
 
-Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.6`.
+Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.7`.
 
 MSRV: 1.95. License: MIT.
 

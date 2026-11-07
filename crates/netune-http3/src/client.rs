@@ -14,6 +14,10 @@ pub struct H3Client {
     driver: tokio::task::JoinHandle<()>,
     send_request: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
     recorder: Option<Arc<Mutex<Recorder>>>,
+    /// Exchange id for the next request. One client serves many requests over one
+    /// connection and one recorder, so each exchange needs an identity the trace can be
+    /// split by. Starts at `1`: stream `0` is reserved for connection-level facts.
+    next_exchange: u32,
 }
 
 impl std::fmt::Debug for H3Client {
@@ -41,6 +45,7 @@ impl H3Client {
             driver: driver_task,
             send_request,
             recorder,
+            next_exchange: 1,
         })
     }
 
@@ -66,10 +71,13 @@ impl H3Client {
         &mut self,
         request: http::Request<Bytes>,
     ) -> Result<http::Response<Bytes>, H3Error> {
+        let exchange = self.next_exchange;
+        self.next_exchange = self.next_exchange.saturating_add(1);
+
         if let Some(r) = &self.recorder
             && let Ok(mut rec) = r.lock()
         {
-            rec.mark(EventKind::H3StreamStart, 0, 0);
+            rec.mark_stream(exchange, EventKind::H3StreamStart, 0, 0);
         }
 
         let (parts, body) = request.into_parts();
@@ -101,7 +109,8 @@ impl H3Client {
         if let Some(r) = &self.recorder
             && let Ok(mut rec) = r.lock()
         {
-            rec.mark(
+            rec.mark_stream(
+                exchange,
                 EventKind::H3HeadComplete,
                 response.status().as_u16() as u32,
                 0,
@@ -124,7 +133,7 @@ impl H3Client {
             && let Ok(mut rec) = r.lock()
         {
             let bytes = body_bytes.len().min(u32::MAX as usize) as u32;
-            rec.mark(EventKind::H3Finished, bytes, 0);
+            rec.mark_stream(exchange, EventKind::H3Finished, bytes, 0);
         }
 
         let (resp_parts, ()) = response.into_parts();

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.0.7] - 2026-11-07
+
+### Fixed
+
+- **HTTP/3 traces are per-exchange.** One `H3Client` serves many requests over one
+  connection and one recorder. Each request now takes an exchange id and records
+  `H3StreamStart` / `H3HeadComplete` / `H3Finished` against it (`Event::stream`, numbered
+  from 1; `0` stays connection-level). A reader that took the first event of each kind
+  attributed every later request to the first; `derive_h3` now refuses a multi-exchange log
+  with `Reason::MultipleExchanges`, and the new `derive_h3_exchanges` returns the
+  per-request view. The e2e test executes two requests and asserts two distinct, fully
+  derivable exchanges.
+
 ## [0.0.6] - 2026-11-07
 
 ### Added

@@ -62,9 +62,12 @@ QUIC handshakes are explicit data via `QuicProfile` and `QuicTransportParameters
 ### 5. Deterministic Trace Observability
 `netune-trace` carries the ordered boundaries of a QUIC/HTTP-3 exchange: `QuicStart` /
 `QuicEnd` (the handshake; `a` = 1 on success), `QuicStreamOpen`, `H3StreamStart`,
-`H3HeadComplete` (`a` = status) and `H3Finished` (`a` = body bytes received). `derive_quic`
-and `derive_h3` compute the handshake, TTFB, body and end-to-end spans as pure functions of
-the log (`[INV-TRACE-01]`, `[INV-QUIC-03]`).
+`H3HeadComplete` (`a` = status) and `H3Finished` (`a` = body bytes received). HTTP/3 events
+carry the exchange id in `Event::stream` (numbered from 1; `0` is reserved for
+connection-level facts), because one `H3Client` serves many requests over one recorder.
+`derive_quic` computes the handshake span; `derive_h3` derives a single exchange and refuses
+a multi-exchange log, while `derive_h3_exchanges` returns the per-request view — all pure
+functions of the log (`[INV-TRACE-01]`, `[INV-QUIC-03]`).
 
 Congestion-window and packet-loss counters are transport **state**, not ordered boundaries:
 they are sampled on demand from `QuicConnection::stats()` and deliberately not recorded as

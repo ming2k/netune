@@ -102,20 +102,22 @@ async fn test_http3_client_request_response_and_trace() {
                 .await
                 .expect("server h3 connection");
 
-            if let Some(resolver) = h3_conn.accept().await.expect("accept h3 request") {
+            while let Some(resolver) = h3_conn.accept().await.expect("accept h3 request") {
                 let (req, mut stream) = resolver.resolve_request().await.expect("resolve request");
-                assert_eq!(req.uri().path(), "/test");
-                let response = http::Response::builder()
-                    .status(200)
-                    .header("content-type", "text/plain")
-                    .body(())
-                    .expect("response head");
-                stream.send_response(response).await.expect("send response");
-                stream
-                    .send_data(Bytes::from_static(b"hello http3"))
-                    .await
-                    .expect("send data");
-                stream.finish().await.expect("finish");
+                let path = req.uri().path().to_string();
+                tokio::spawn(async move {
+                    let response = http::Response::builder()
+                        .status(200)
+                        .header("content-type", "text/plain")
+                        .body(())
+                        .expect("response head");
+                    stream.send_response(response).await.expect("send response");
+                    stream
+                        .send_data(Bytes::from(format!("hello {path}")))
+                        .await
+                        .expect("send data");
+                    stream.finish().await.expect("finish");
+                });
             }
 
             let _ = conn.closed().await;
@@ -143,35 +145,40 @@ async fn test_http3_client_request_response_and_trace() {
         .await
         .expect("h3 client");
 
-    let request = http::Request::builder()
-        .method("GET")
-        .uri("https://localhost/test")
-        .body(Bytes::new())
-        .expect("request");
+    for path in ["/one", "/two"] {
+        let request = http::Request::builder()
+            .method("GET")
+            .uri(format!("https://localhost{path}"))
+            .body(Bytes::new())
+            .expect("request");
 
-    let response = h3_client.execute(request).await.expect("execute");
-    assert_eq!(response.status(), 200);
-    assert_eq!(response.body(), &Bytes::from_static(b"hello http3"));
+        let response = h3_client.execute(request).await.expect("execute");
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), &Bytes::from(format!("hello {path}")));
+    }
 
     // Verify trace events [INV-QUIC-03]
     let log = recorder.lock().unwrap().log().clone();
-    let kinds: Vec<EventKind> = log.iter().map(|e| e.kind).collect();
-    assert!(
-        kinds.contains(&EventKind::H3StreamStart),
-        "must record H3StreamStart"
-    );
-    assert!(
-        kinds.contains(&EventKind::H3HeadComplete),
-        "must record H3HeadComplete"
-    );
-    assert!(
-        kinds.contains(&EventKind::H3Finished),
-        "must record H3Finished so body and end-to-end spans are derivable"
-    );
+    let streams: Vec<u32> = log
+        .iter()
+        .filter(|event| event.kind == EventKind::H3StreamStart)
+        .map(|event| event.stream)
+        .collect();
+    assert_eq!(streams.len(), 2, "each request is its own exchange");
+    assert_ne!(streams[0], streams[1], "exchange ids must differ");
+    let kinds: Vec<EventKind> = log.iter().map(|event| event.kind).collect();
+    for kind in [
+        EventKind::H3StreamStart,
+        EventKind::H3HeadComplete,
+        EventKind::H3Finished,
+    ] {
+        assert!(kinds.contains(&kind), "must record {kind:?}");
+    }
 
     // The trace must be derivable, not merely populated: [INV-QUIC-03] promises a pure
-    // function of the recorded events, and this is that function.
-    let derived = netune_trace::derive_h3(&netune_trace::RequestTrace {
+    // function of the recorded events, and this is that function. A multi-exchange log
+    // must not be attributed to the first request.
+    let trace = netune_trace::RequestTrace {
         id: netune_trace::TraceId::new("http3-e2e"),
         attempt: netune_trace::AttemptRef {
             round: 1,
@@ -186,7 +193,19 @@ async fn test_http3_client_request_response_and_trace() {
         connection: netune_trace::ConnectionInfo::default(),
         fidelity: netune_trace::Fidelity::l0(),
         log,
-    });
-    assert!(derived.ttfb_us.is_measured(), "TTFB must be derivable");
-    assert!(derived.e2e_us.is_measured(), "end-to-end must be derivable");
+    };
+    let single = netune_trace::derive_h3(&trace);
+    assert_eq!(
+        single.ttfb_us.validity().reason(),
+        Some(netune_trace::Reason::MultipleExchanges),
+        "a two-request log has no single TTFB"
+    );
+    let exchanges = netune_trace::derive_h3_exchanges(&trace);
+    assert_eq!(exchanges.len(), 2);
+    assert!(
+        exchanges
+            .iter()
+            .all(|derived| derived.ttfb_us.is_measured() && derived.e2e_us.is_measured()),
+        "each exchange must derive its own TTFB and end-to-end span"
+    );
 }

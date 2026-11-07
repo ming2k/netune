@@ -141,6 +141,85 @@ async fn test_ws_handshake_and_bidirectional_data() {
     assert!(rec.log().first_of(EventKind::ProtocolFrame).is_some());
 }
 
+/// `[INV-WS-05]`: an upgraded socket is never returned to the keep-alive pool.
+///
+/// The invariant is stated in ADR-0007 and indexed in
+/// `docs/dev/invariants.md`, and until this test existed nothing
+/// failed if an upgrade path started handing its socket back: a WS connection's
+/// state lives on the wire, so a pooled upgrade would hand the next request a
+/// stream mid-frame. The assertion is on the pool the client actually owns, not
+/// on a proxy for it.
+#[tokio::test]
+async fn inv_ws_05_an_upgraded_socket_never_enters_the_pool() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("port").port();
+
+    let server_task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = socket.read(&mut buf).await.expect("read");
+            assert!(n > 0);
+            request.extend_from_slice(&buf[..n]);
+        }
+        let request = String::from_utf8_lossy(&request).to_string();
+        let key = request
+            .lines()
+            .find(|line| line.to_lowercase().starts_with("sec-websocket-key:"))
+            .expect("key")
+            .split(':')
+            .nth(1)
+            .expect("key value")
+            .trim();
+        let accept = compute_accept_key(key);
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {accept}\r\n\r\n"
+        );
+        socket.write_all(response.as_bytes()).await.expect("101");
+
+        // Complete the close handshake so the client's `close` returns.
+        let mut read_buf = BytesMut::new();
+        loop {
+            match FrameDecoder::decode(&mut read_buf, Role::Server, 64 * 1024).expect("decode") {
+                Some(frame) if frame.opcode == netune_ws::Opcode::Close => {
+                    let mut out = BytesMut::new();
+                    FrameEncoder::encode(
+                        &Frame::close(Some(CloseCode::NORMAL), "bye"),
+                        None,
+                        &mut out,
+                    );
+                    socket.write_all(&out).await.expect("close reply");
+                    return;
+                }
+                Some(_) => continue,
+                None => {}
+            }
+            let n = socket.read_buf(&mut read_buf).await.expect("read close");
+            assert!(n > 0, "client never sent a close frame");
+        }
+    });
+
+    let authority = format!("127.0.0.1:{port}");
+    let pool = Pool::default();
+    let client = Client::new(TcpConnector::new(), pool.clone(), ClientConfig::default());
+    let target = Target::plain(authority.clone());
+
+    let mut ws = client
+        .connect_ws(&target, "/v1/stream")
+        .await
+        .expect("connect_ws");
+    ws.close(CloseCode::NORMAL, "done").await.expect("close");
+    server_task.await.expect("server join");
+
+    assert_eq!(
+        pool.idle_count(&authority),
+        0,
+        "an upgraded socket must never be released to the keep-alive pool"
+    );
+}
+
 #[tokio::test]
 async fn test_ws_rejection_non_101() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

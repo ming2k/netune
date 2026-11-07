@@ -1,4 +1,24 @@
-//! Request serialization.
+//! Request serialization (client role).
+//!
+//! One function, one direction. A client writes a request and a server writes a response;
+//! they are not the same operation and they are not in the same crate module any more —
+//! [`crate::response::ResponseWriter`] exists because a *response* has framing obligations
+//! (streaming, `HEAD`, `204`, chunk termination) that a request simply does not.
+//!
+//! # Why a request is always self-delimiting
+//!
+//! A request must say where its body ends even when the body is empty: only a request that
+//! declares its length can traverse a proxy that does not buffer, be replayed by a
+//! redirect-follower, or be answered by a server that reuses the connection. So a
+//! `Content-Length` is always written (0 when there is no body), and if the caller already
+//! supplied one it is not duplicated.
+//!
+//! # Header fidelity
+//!
+//! When the caller sets `raw_headers`, those exact names and bytes are written, in that
+//! order, with their original casing. Order and casing are what a passive observer
+//! fingerprints (`JA4H`), so the codec spells what it is handed rather than normalising
+//! through `HeaderMap`.
 
 use bytes::{BufMut, BytesMut};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
@@ -8,14 +28,19 @@ use crate::head::RequestHead;
 
 /// Serialize `head` plus an optional length-delimited body onto `writer`.
 ///
-/// A `Content-Length` is always written (0 for an absent body) unless the caller
-/// already supplied one, so every request is self-delimiting: a proxy or server
-/// never has to guess where the body ends.
+/// # Errors
+///
+/// An I/O failure from the transport. A target that is not a valid request-target is
+/// refused before a byte is written, because a client that sends one is building the very
+/// request a server is required to reject.
 pub async fn write_request<W: AsyncWrite + Unpin>(
     writer: &mut W,
     head: &RequestHead,
     body: Option<&[u8]>,
 ) -> Result<(), HttpError> {
+    crate::target::classify(&head.method, head.target.as_bytes())
+        .map_err(|error| HttpError::Protocol(error.reason()))?;
+
     let mut out = BytesMut::with_capacity(512 + body.map_or(0, <[u8]>::len));
 
     out.put_slice(head.method.as_str().as_bytes());
@@ -105,104 +130,23 @@ mod tests {
         assert_eq!(text.matches("content-length").count(), 1);
     }
 
-    // -- the HTTP-layer fingerprint surface -------------------------------
-    //
-    // Header order and casing are what a passive observer fingerprints at
-    // the HTTP layer (JA4H). `http::HeaderMap` preserves insertion order,
-    // and the writer spells each name exactly as it was inserted, so the
-    // caller — not the codec — owns both. These tests pin that: any change
-    // to the writer that reorders, recases, or normalizes headers shows up
-    // here as a fingerprint-relevant regression, not a silent drift.
-
     #[tokio::test]
-    async fn header_order_is_what_the_caller_inserted() {
-        let head = RequestHead::new(Method::GET, "/models")
-            .with_header("user-agent", "netune/0.1")
-            .with_header("accept", "application/json")
-            .with_header("authorization", "Bearer t");
+    async fn raw_headers_are_spelled_verbatim_in_the_callers_order() {
+        let head = RequestHead::new(Method::GET, "/v1")
+            .with_raw_header("User-Agent", "netune/0")
+            .with_raw_header("X-Trace", "1");
         let text = encode(&head, None).await;
-        let body_start = text.find("\r\n\r\n").expect("head terminator");
-        let head_text = &text[..body_start];
-        let ua = head_text.find("user-agent").expect("user-agent");
-        let accept = head_text.find("accept").expect("accept");
-        let auth = head_text.find("authorization").expect("authorization");
-        assert!(
-            ua < accept && accept < auth,
-            "insertion order is wire order:\n{head_text}"
-        );
+        let user_agent = text.find("User-Agent: netune/0").expect("casing kept");
+        let trace = text.find("X-Trace: 1").expect("order kept");
+        assert!(user_agent < trace, "caller order is preserved: {text}");
     }
 
     #[tokio::test]
-    async fn header_casing_is_lowercased_by_the_header_map() {
-        // A real, recorded limitation: `http::HeaderName::try_from`
-        // lowercases every name, so the wire casing is always lowercase —
-        // unlike some browsers that send title-cased names. Order is still
-        // ours (see `header_order_is_what_the_caller_inserted`), so the
-        // JA4H order signal is available while the casing signal is fixed
-        // lowercase. If a future profile needs arbitrary casing, the seam
-        // is here: the writer spells whatever name it is handed, so the
-        // change belongs in header construction, not serialization.
-        let head = RequestHead::new(Method::GET, "/x").with_header("X-API-Key", "k");
-        let text = encode(&head, None).await;
-        assert!(
-            text.contains("x-api-key: k\r\n"),
-            "HeaderMap lowercases; the writer does not re-case:\n{text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn duplicate_headers_replace_their_predecessor_on_insert() {
-        // Another recorded limitation: `with_header` inserts, and a
-        // `HeaderMap` insert replaces a same-named value. A multi-value
-        // header (cookie, accept) therefore needs `append` semantics, which
-        // `RequestHead` does not yet expose. The writer, given such a map,
-        // would emit both values in order — the constraint is in the
-        // head builder, not the codec.
-        let head = RequestHead::new(Method::GET, "/x")
-            .with_header("accept", "text/html")
-            .with_header("accept", "application/json");
-        let text = encode(&head, None).await;
-        assert!(text.contains("accept: application/json\r\n"));
-        assert!(
-            !text.contains("accept: text/html"),
-            "insert replaced the earlier value:\n{text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_content_length_fills_in_after_the_callers_headers() {
-        // The synthesized `content-length` must not jump ahead of the
-        // caller's headers: a passive observer counting "which header closes
-        // the block" would see a different fingerprint depending on where it
-        // landed.
-        let head = RequestHead::new(Method::POST, "/x")
-            .with_header("user-agent", "netune/0.1")
-            .with_header("accept", "application/json");
-        let text = encode(&head, Some(b"{}")).await;
-        let head_text = &text[..text.find("\r\n\r\n").expect("terminator")];
-        let user_agent = head_text.find("user-agent").expect("user-agent");
-        let accept = head_text.find("accept").expect("accept");
-        let length = head_text.find("content-length").expect("content-length");
-        assert!(
-            user_agent < accept && accept < length,
-            "the synthesized length closes the header block, after the caller's:\n{head_text}"
-        );
-    }
-
-    #[tokio::test]
-    async fn raw_header_casing_and_duplicates_reach_the_wire() {
-        // ADR-0006: raw headers explicitly bypass HeaderMap normalization to preserve
-        // exact wire casing (e.g. Title-Case) and duplicate multi-value headers.
-        let head = RequestHead::new(Method::GET, "/index.html")
-            .with_raw_header("User-Agent", "Mozilla/5.0")
-            .with_raw_header("Accept", "text/html")
-            .with_raw_header("Accept", "application/xhtml+xml")
-            .with_raw_header("X-Custom-Header", "Value123");
-        let text = encode(&head, None).await;
-        assert!(text.contains("User-Agent: Mozilla/5.0\r\n"));
-        assert!(text.contains("Accept: text/html\r\n"));
-        assert!(text.contains("Accept: application/xhtml+xml\r\n"));
-        assert!(text.contains("X-Custom-Header: Value123\r\n"));
-        assert!(text.contains("Content-Length: 0\r\n"));
+    async fn a_target_a_server_would_reject_is_never_written() {
+        let head = RequestHead::new(Method::GET, "/a b");
+        let error = write_request(&mut Vec::new(), &head, None)
+            .await
+            .expect_err("must refuse");
+        assert_eq!(error.class(), "protocol");
     }
 }

@@ -239,19 +239,11 @@ impl DynamicTable {
         self.entries.push_front((name, value));
     }
 
-    /// Resizes the table, evicting as needed (§4.3).
+    /// Resizes the table, evicting as needed (§4.3), *without* a ceiling.
     ///
-    /// # Errors
-    ///
-    /// Returns an error when `max_size` exceeds what the decoder advertised: a peer may
-    /// shrink its encoder's table, never grow it past what the decoder allowed.
-    pub fn set_max_size(&mut self, max_size: usize) -> Result<(), H2Error> {
-        if max_size > self.max_size {
-            return Err(H2Error::Hpack(format!(
-                "dynamic table size update to {max_size} exceeds the advertised {}",
-                self.max_size
-            )));
-        }
+    /// This is the encoder's path: the peer's `SETTINGS_HEADER_TABLE_SIZE` is a permission to use a
+    /// table that large, so "growing past the current size" is precisely what it asks for.
+    pub fn resize(&mut self, max_size: usize) {
         self.max_size = max_size;
         while self.size > self.max_size {
             match self.entries.pop_back() {
@@ -261,6 +253,22 @@ impl DynamicTable {
                 None => break,
             }
         }
+    }
+
+    /// Resizes the table from a *decoded* size update, evicting as needed (§4.3).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `max_size` exceeds what this end advertised: a peer may shrink its
+    /// encoder's table, never grow it past the ceiling we published.
+    pub fn set_max_size(&mut self, max_size: usize) -> Result<(), H2Error> {
+        if max_size > self.max_size {
+            return Err(H2Error::Hpack(format!(
+                "dynamic table size update to {max_size} exceeds the advertised {}",
+                self.max_size
+            )));
+        }
+        self.resize(max_size);
         Ok(())
     }
 
@@ -354,15 +362,13 @@ impl HpackEncoder {
         &self.table
     }
 
-    /// Resizes the encoder's table, emitting the required size update.
+    /// Resizes the encoder's table, emitting the §4.2 size update that must precede the next block.
     ///
-    /// # Errors
-    ///
-    /// Returns the table's error when the new size is not permitted.
-    pub fn set_max_size(&mut self, max_size: usize, out: &mut Vec<u8>) -> Result<(), H2Error> {
-        self.table.set_max_size(max_size)?;
+    /// The peer's `SETTINGS_HEADER_TABLE_SIZE` is the authority here: growing the encoder's table to
+    /// it is exactly what the peer asked for, so this is infallible.
+    pub fn set_max_size(&mut self, max_size: usize, out: &mut Vec<u8>) {
+        self.table.resize(max_size);
         encode_integer(max_size, 5, 0x20, out);
-        Ok(())
     }
 }
 

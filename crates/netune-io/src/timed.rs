@@ -1,14 +1,16 @@
 //! The tap: an `AsyncRead`/`AsyncWrite` wrapper that records every syscall
 //! boundary.
 //!
-//! This is the only place `netune` touches the trace on the byte path, and it
-//! is deliberately thin: two `poll_*` methods, one record call each, no
-//! allocation and no lock shared across connections (the [`Recorder`] belongs to
-//! this connection's attempt, so the mutex is uncontended in the common case).
+//! This is the only place either orchestrator touches the trace on the byte
+//! path, and it is deliberately thin: two `poll_*` methods, one record call
+//! each, no allocation and no lock shared across connections (the
+//! [`Recorder`] belongs to this connection's attempt, so the mutex is
+//! uncontended in the common case).
 //!
 //! `TimedIo` wraps the *transport* stream — TCP today, TLS on top of it next —
 //! so the recorded timeline is the same regardless of how many layers sit above
-//! it.
+//! it, and the same regardless of whether the bytes are a request being read by
+//! a server or a response being read by a client.
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};

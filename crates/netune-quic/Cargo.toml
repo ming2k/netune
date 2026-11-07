@@ -1,0 +1,30 @@
+[package]
+name = "netune-quic"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "First-class QUIC transport (RFC 9000, RFC 9221) for netune with profile shaping, abstract socket stacks, and trace integration"
+repository = "https://github.com/ming2k/netune"
+license.workspace = true
+readme = false
+
+[dependencies]
+bytes = { workspace = true }
+libc = { workspace = true }
+netune-egress = { path = "../netune-egress", version = "0.0.6" }
+netune-io = { path = "../netune-io", version = "0.0.6" }
+netune-trace = { path = "../netune-trace", version = "0.0.6" }
+quinn = { workspace = true }
+quinn-proto = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+socket2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt"] }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

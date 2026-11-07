@@ -16,17 +16,34 @@ use bytes::{Bytes, BytesMut};
 #[cfg(feature = "http2")]
 use http::HeaderMap;
 use http::{Method, StatusCode};
-use netune_http1::{BodyKind, Http1Reader, Limits, RequestHead, ResponseHead, write_request};
+use netune_http1::{BodyKind, Http1Reader, IncomingResponse, Limits, RequestHead, write_request};
 #[cfg(feature = "http2")]
-use netune_http2::{H2Connection, H2Fingerprint};
+use netune_http2::{H2ClientConnection, H2Fingerprint};
 use netune_trace::{Alpn, EventKind, Recorder};
 
 use crate::connect::{Connector, Target};
 use crate::decompress::Decoder;
 use crate::error::NetError;
-use crate::io::TimedIo;
 use crate::pool::Pool;
 use crate::tcp_info::{SAMPLE_INTERVAL, Sampler, start as start_sampler};
+use netune_io::TimedIo;
+
+/// The HTTP/2 framing identity that pairs with a TLS profile name.
+///
+/// One name selects both halves of an identity, because a client that presents
+/// a Go hello and then frames like Chrome is *more* distinctive than either
+/// choice alone. Names with no declared HTTP/2 pairing fall back to the
+/// Chromium baseline — the most common framing on the public web — rather than
+/// to something that would look like a hand-assembled hybrid.
+#[cfg(feature = "http2")]
+fn h2_fingerprint_for(profile: Option<&str>) -> H2Fingerprint {
+    match profile {
+        Some("safari-current") => H2Fingerprint::safari(),
+        Some("firefox-current") => H2Fingerprint::firefox(),
+        Some("antigravity-cli") => H2Fingerprint::go(),
+        _ => H2Fingerprint::chrome(),
+    }
+}
 
 /// Client policy.
 #[derive(Debug, Clone)]
@@ -498,11 +515,7 @@ impl<C: Connector> Client<C> {
 
         #[cfg(feature = "http2")]
         if target.force_h2 || (self.config.enable_http2 && alpn == Some(Alpn::H2)) {
-            let fp = match target.tls_profile.as_deref() {
-                Some("safari-current") => H2Fingerprint::safari(),
-                Some("firefox-current") => H2Fingerprint::firefox(),
-                _ => H2Fingerprint::chrome(),
-            };
+            let fp = h2_fingerprint_for(target.tls_profile.as_deref());
 
             let scheme = if target.tls_server_name.is_some() {
                 "https"
@@ -511,7 +524,7 @@ impl<C: Connector> Client<C> {
             };
             let authority = &target.authority;
 
-            let mut h2 = H2Connection::handshake(stream, fp)
+            let mut h2 = H2ClientConnection::handshake(stream, fp)
                 .await
                 .map_err(|e| NetError::Protocol(format!("HTTP/2 handshake: {e}")))?;
 
@@ -561,7 +574,7 @@ impl<C: Connector> Client<C> {
                 }
             }
 
-            let response_head = ResponseHead {
+            let response_head = IncomingResponse {
                 version: http::Version::HTTP_2,
                 status,
                 headers: hmap,
@@ -648,7 +661,7 @@ impl<C: Connector> Client<C> {
 }
 
 /// The `Location` of a redirecting response, if any.
-fn redirect_location(head: &ResponseHead) -> Option<String> {
+fn redirect_location(head: &IncomingResponse) -> Option<String> {
     match head.status.as_u16() {
         301 | 302 | 303 | 307 | 308 => head
             .headers
@@ -670,7 +683,7 @@ fn redirect_to_get(status: StatusCode) -> bool {
 /// A close-delimited body cannot be reused (its end is the connection's end),
 /// and an explicit `connection: close` or an HTTP/1.0 response without
 /// `keep-alive` ends the connection by contract.
-fn is_reusable(head: &ResponseHead) -> bool {
+fn is_reusable(head: &IncomingResponse) -> bool {
     let mut close = false;
     let mut keep_alive = false;
     for value in head.headers.get_all(http::header::CONNECTION) {
@@ -761,7 +774,7 @@ fn split_authority(rest: &str, default_port: u16) -> (String, String) {
 
 /// A parsed response: head plus a decoded, traced body stream.
 pub struct Response {
-    pub head: ResponseHead,
+    pub head: IncomingResponse,
     pub body: BodyStream,
 }
 

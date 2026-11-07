@@ -14,7 +14,6 @@
 //! recorded in the output so a reader knows what was applied.
 
 use std::io;
-use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::Instant;
 
@@ -182,9 +181,4 @@ impl Capture {
             return Err(error);
         }
     }
-}
-
-#[allow(dead_code)]
-fn _assert_maybe_uninit_is_used() {
-    let _ = MaybeUninit::<u8>::uninit();
 }

@@ -100,6 +100,48 @@ pub enum EventKind {
     /// One datagram crossed the socket boundary, in either direction. `a` =
     /// payload bytes carried, `b` = direction (0 sent, 1 received).
     UdpDatagram = 31,
+    /// Origin of an *ingress* trace: a connection was accepted. Always at offset
+    /// 0 of an ingress attempt, and never present in an egress one.
+    ///
+    /// The two directions have separate origins on purpose. An egress trace is
+    /// anchored on `Dispatch` — the harness deciding to send — while an ingress
+    /// trace is anchored on the kernel handing over a socket, so no ingress
+    /// timing can be silently measured against a client's clock.
+    IngressDispatch = 32,
+    /// A TLS handshake completed on an accepted connection. `a` = 1 when the
+    /// session was resumed.
+    IngressTlsEnd = 33,
+    /// A client's request head was parsed: start line and headers complete.
+    /// `a` = head bytes read.
+    RequestHeadComplete = 34,
+    /// First body byte of a request arrived.
+    RequestBodyStart = 35,
+    /// The request body was fully consumed. `a` = body bytes read.
+    RequestBodyEnd = 36,
+    /// The handler was entered. Brackets the one span that is application time
+    /// rather than transport time.
+    HandlerStart = 37,
+    /// The handler returned a response. `a` = the status code it produced.
+    HandlerEnd = 38,
+    /// The response head was flushed to the kernel.
+    ResponseHeadSent = 39,
+    /// One chunk of a response body was flushed. `a` = payload bytes in this
+    /// chunk.
+    ResponseChunkSent = 40,
+    /// The response was fully written. `a` = total body bytes written.
+    ResponseEnd = 41,
+    /// QUIC connection handshake started.
+    QuicStart = 42,
+    /// QUIC connection handshake completed. `a` = 1 on success, 0 on failure.
+    QuicEnd = 43,
+    /// QUIC stream opened. `a` = stream ID, `b` = 1 for bidi, 0 for uni.
+    QuicStreamOpen = 46,
+    /// HTTP/3 request stream started.
+    H3StreamStart = 48,
+    /// HTTP/3 response headers received. `a` = status code.
+    H3HeadComplete = 49,
+    /// HTTP/3 response body fully received. `a` = body bytes received.
+    H3Finished = 50,
 }
 
 impl EventKind {
@@ -144,8 +186,45 @@ impl EventKind {
             29 => Self::WsFrame,
             30 => Self::UdpOpen,
             31 => Self::UdpDatagram,
+            32 => Self::IngressDispatch,
+            33 => Self::IngressTlsEnd,
+            34 => Self::RequestHeadComplete,
+            35 => Self::RequestBodyStart,
+            36 => Self::RequestBodyEnd,
+            37 => Self::HandlerStart,
+            38 => Self::HandlerEnd,
+            39 => Self::ResponseHeadSent,
+            40 => Self::ResponseChunkSent,
+            41 => Self::ResponseEnd,
+            42 => Self::QuicStart,
+            43 => Self::QuicEnd,
+            46 => Self::QuicStreamOpen,
+            48 => Self::H3StreamStart,
+            49 => Self::H3HeadComplete,
+            50 => Self::H3Finished,
             _ => return None,
         })
+    }
+
+    /// Whether this kind belongs to an ingress trace rather than an egress one.
+    ///
+    /// The check is exhaustive over the ingress family on purpose: adding an
+    /// ingress kind and forgetting to classify it would let a reader treat it as
+    /// an egress fact.
+    pub const fn is_ingress(self) -> bool {
+        matches!(
+            self,
+            Self::IngressDispatch
+                | Self::IngressTlsEnd
+                | Self::RequestHeadComplete
+                | Self::RequestBodyStart
+                | Self::RequestBodyEnd
+                | Self::HandlerStart
+                | Self::HandlerEnd
+                | Self::ResponseHeadSent
+                | Self::ResponseChunkSent
+                | Self::ResponseEnd
+        )
     }
 
     /// Whether this kind is an encoding aid rather than a recorded fact.
@@ -275,6 +354,18 @@ pub struct Event {
     /// Nanoseconds since dispatch (the trace origin).
     pub at_ns: u64,
     pub kind: EventKind,
+    /// Which exchange on the connection this event belongs to.
+    ///
+    /// `0` for an exchange the transport could not multiplex (all of egress, and HTTP/1.1
+    /// ingress, where a connection carries one request at a time), and the protocol's own
+    /// stream identifier for HTTP/2, where one connection carries many concurrently.
+    ///
+    /// It travels with the event rather than being inferred from position because a
+    /// multiplexed log *interleaves*: an event's neighbour is not its predecessor, so a
+    /// reader that grouped by position would attribute one stream's read to another's
+    /// handler span. Grouping by this field is the only way a derivation can describe two
+    /// exchanges that were genuinely simultaneous.
+    pub stream: u32,
     /// Kind-specific first payload word (see each [`EventKind`]).
     pub a: u32,
     /// Kind-specific second payload word.
@@ -282,7 +373,7 @@ pub struct Event {
 }
 
 impl Event {
-    /// The read's byte count, for [`EventKind::Read`].
+    /// The read's byte count, for the kinds that carry one.
     pub const fn bytes(self) -> Option<u32> {
         match self.kind {
             EventKind::Read
@@ -290,7 +381,19 @@ impl Event {
             | EventKind::Segment
             | EventKind::RequestWriteEnd
             | EventKind::ChunkBoundary
-            | EventKind::UdpDatagram => Some(self.a),
+            | EventKind::UdpDatagram
+            | EventKind::RequestHeadComplete
+            | EventKind::RequestBodyEnd
+            | EventKind::ResponseChunkSent
+            | EventKind::ResponseEnd => Some(self.a),
+            _ => None,
+        }
+    }
+
+    /// The status code a handler produced, for [`EventKind::HandlerEnd`].
+    pub const fn status(self) -> Option<u16> {
+        match self.kind {
+            EventKind::HandlerEnd => Some(self.a as u16),
             _ => None,
         }
     }
@@ -376,6 +479,7 @@ mod tests {
     fn accessors_read_the_right_word() {
         let read = Event {
             at_ns: 7,
+            stream: 0,
             kind: EventKind::Read,
             a: 1448,
             b: TimeSource::KernelSoftware.code() as u32,
@@ -386,6 +490,7 @@ mod tests {
 
         let token = Event {
             at_ns: 9,
+            stream: 0,
             kind: EventKind::OutputToken,
             a: 3,
             b: 0,
@@ -395,6 +500,7 @@ mod tests {
 
         let frame = Event {
             at_ns: 11,
+            stream: 0,
             kind: EventKind::ProtocolFrame,
             a: FrameClass::Open.code() as u32,
             b: 0,
@@ -403,6 +509,7 @@ mod tests {
 
         let sent = Event {
             at_ns: 12,
+            stream: 0,
             kind: EventKind::UdpDatagram,
             a: 1200,
             b: 0,
@@ -411,6 +518,7 @@ mod tests {
         assert_eq!(sent.is_send(), Some(true));
         let received = Event {
             at_ns: 13,
+            stream: 0,
             kind: EventKind::UdpDatagram,
             a: 40,
             b: 1,

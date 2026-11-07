@@ -2,19 +2,20 @@
 id: ADR-0010
 title: "QUIC stays out of netune until a consumer needs it as a client, and the trace model gains a streaming sink"
 status: accepted
-date: 2026-02-14
+date: 2026-11-01
 scope: [transport/quic, trace/sink, transport/datagram]
-supersedes: []
+superseded_by: null
 ---
 
 # 0010. QUIC stays out of netune until a consumer needs it as a client, and the trace model gains a streaming sink
 
-- Status: Accepted
-- Date: 2026-02-14
+- Status: Partially Superseded by [ADR-0016](0016-quic-and-http3-transport.md) (Decision 1 on QUIC deferral superseded; Decision 2 on `TraceSink` and Decision 3 on metrics remain active)
+- Date: 2026-11-01
 - Deciders: Ming Li
 - Related: [ADR-0001](0001-owned-transport-trace-model.md),
   [ADR-0008](0008-datagram-transport-and-socks5-udp-association.md),
-  [ADR-0003](0003-workspace-decomposition-privilege-boundaries.md)
+  [ADR-0003](0003-workspace-decomposition-privilege-boundaries.md),
+  [ADR-0016](0016-quic-and-http3-transport.md)
 
 ---
 
@@ -74,6 +75,24 @@ per-read/per-write lock is paid on the hot path. `daer` today works around this 
    sink covers the first; counters already exist on the types that own them
    (`Pool::stats`, the datagram counters). A metrics façade is a consumer concern.
 
+### Invariants & Behavioral Boundaries
+
+- **`[INV-TRACE-03]` Sink Completeness, Ring Independence**: an event reaches a configured
+  `TraceSink` before the operation that recorded it returns, and installing a sink cannot
+  truncate the attempt's window — the ring buffer stays an independent bounded record, so a
+  sink that drops events (a slow consumer) does not make the trace lose its history silently.
+  *Enforced by*: `Recorder::with_sink` consumes and returns `self`, so a sink cannot be
+  installed halfway through a trace (`a_sink_streams_every_event_from_offset_zero`), and
+  `push` writes the ring before the sink (`a_recorder_without_a_sink_pays_nothing`).
+
+- **`[INV-SOCKET-01]` Pre-Connect Options Are Applied or Reported**: every `SocketConfig`
+  option is either applied to the socket before `connect(2)`, or the attempt fails loudly.
+  No pre-connect option may be silently skipped by the fast path. *Enforced by*:
+  `SocketConfig::needs_manual_socket` is the single predicate deciding fast path versus
+  manual construction (`every_pre_connect_option_forces_the_manual_socket_path`), and the
+  bound source address is verified from the peer's side rather than assumed
+  (`a_bound_source_address_is_what_the_peer_sees`).
+
 ## Consequences
 
 - `daer` keeps `quinn`/`h3`, and this ADR is the record of why that is not a boundary
@@ -98,3 +117,39 @@ per-read/per-write lock is paid on the hot path. `daer` today works around this 
   bound source was silently ignored and the peer saw the route's choice.
 - The QUIC duplication is visible in `daer`'s `Cargo.lock`: `ring` and `aws-lc-rs` both
   present, and two `rustls` builds.
+
+## Rejected Alternatives & Negative Knowledge
+
+### Option 1 (Rejected): Wrap `quinn` and re-export it as `netune::quic`
+
+- **Why considered**: the shortest path to a QUIC client. `netune` would gain `connect_quic`
+  in an afternoon, and `daer` would drop its own `quinn` dependency.
+- **Why rejected**: `quinn` owns the whole transport — record framing, loss recovery,
+  congestion control — and takes a `rustls::ClientConfig`. Handing it one does not let netune
+  shape the handshake the way `TlsProfile` shapes a TCP one, because the ClientHello is
+  assembled by `quinn`'s state machine, not by ours. The result would be a transport whose
+  wire identity the caller cannot select, which is precisely the failure ADR-0004 exists to
+  prevent. It also imports a second `rustls` and a second crypto provider into every build
+  that touches it, which is the duplication ADR-0001's ownership argument forbids. A wrapper
+  that cannot answer "what identity does this send" is not ownership; it is a dependency with
+  extra steps.
+
+### Option 2 (Rejected): Add the sink as a `tracing` subscriber
+
+- **Why considered**: `tracing` already solves fan-out, filtering, and formatting, and every
+  Rust service already depends on it.
+- **Why rejected**: a logging facade in a leaf crate is a dependency the consuming binary did
+  not choose, and ADR-0003's decomposition exists so leaves stay dependency-light. It would
+  also make netune's event vocabulary a function of `tracing`'s data model, so a consumer that
+  wants structured events without a subscriber pays for both. Three lines of `TraceSink` give
+  a consumer exactly the bridge they want, and nothing to a consumer who wants none.
+
+### Option 3 (Rejected): Make the sink the record of truth and drop the ring
+
+- **Why considered**: two paths for one event is a smell, and a sink is strictly more
+  expressive than a bounded ring.
+- **Why rejected**: a sink is fire-and-forget. If the consumer's channel is full, the event is
+  gone, and a `RequestTrace` built from that stream would silently report a shorter attempt
+  than happened. `INV-TRACE-01`'s timings are pure functions of the recorded events, so losing
+  events does not just lose detail — it fabricates a faster request. The ring stays the record
+  of truth precisely because it cannot silently lose its window; the drop count is reported.

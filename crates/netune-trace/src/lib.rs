@@ -47,6 +47,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod derive;
+mod derive_ingress;
+mod derive_transport;
 mod event;
 mod forge;
 mod log;
@@ -56,6 +58,10 @@ mod trace;
 mod verdict;
 
 pub use derive::{DerivedTimings, derive};
+pub use derive_ingress::{
+    DerivedIngress, derive_ingress, derive_ingress_exchanges, exchange_count,
+};
+pub use derive_transport::{DerivedH3, DerivedQuic, derive_h3, derive_quic};
 pub use event::{Alpn, Event, EventKind, FrameClass, TimeSource};
 pub use forge::{ClientHelloForge, RawExtension};
 pub use log::{EncodedEvent, EventLog, MAX_DELTA_NS};

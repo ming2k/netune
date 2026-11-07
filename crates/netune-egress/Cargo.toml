@@ -1,0 +1,19 @@
+[package]
+name = "netune-egress"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Egress confinement policy: the pure address predicate and policy shared by every outbound netune transport (TCP, UDP datagram, QUIC)"
+repository = "https://github.com/ming2k/netune"
+license.workspace = true
+readme = false
+keywords = ["ssrf", "egress", "security", "network"]
+categories = ["network-programming"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+
+[lints]
+workspace = true

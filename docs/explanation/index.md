@@ -9,5 +9,6 @@ Discursive documentation about how and why `netune` is built the way it is. Read
 | Article | Explains |
 | :--- | :--- |
 | [Structural Privilege Boundaries](privilege-boundaries.md) | Why packet construction and frame transmission are separated at compile time rather than gated at runtime. |
+| [Why Ingress Is a Second Orchestrator](two-orchestrators.md) | Why a server could not be a feature flag on the client, and what the workspace red-lines had to become for one to exist. |
 
 For the rationale behind each ratified decision, see the [Architectural Decision Records](../adr/index.md).

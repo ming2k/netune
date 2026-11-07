@@ -54,6 +54,11 @@ pub enum Preset {
     SafariCurrent,
     /// Modern Firefox baseline (Gecko ESR / Firefox 132+).
     FirefoxCurrent,
+    /// The Google Antigravity CLI (`agy`) identity — a **Go `crypto/tls`**
+    /// client (Go 1.28, `boringcrypto` build tag). Offered as the closest
+    /// rustls-shaped approximation of a Go hello; see
+    /// [`TlsProfile::antigravity_cli`] for exactly where the two diverge.
+    AntigravityCli,
 }
 
 impl Preset {
@@ -66,6 +71,7 @@ impl Preset {
             Preset::ChromeCurrent,
             Preset::SafariCurrent,
             Preset::FirefoxCurrent,
+            Preset::AntigravityCli,
         ]
     }
 
@@ -78,6 +84,7 @@ impl Preset {
             Preset::ChromeCurrent => "chrome-current",
             Preset::SafariCurrent => "safari-current",
             Preset::FirefoxCurrent => "firefox-current",
+            Preset::AntigravityCli => "antigravity-cli",
         }
     }
 
@@ -98,6 +105,7 @@ impl Preset {
             Preset::ChromeCurrent => TlsProfile::chrome_current(),
             Preset::SafariCurrent => TlsProfile::safari_current(),
             Preset::FirefoxCurrent => TlsProfile::firefox_current(),
+            Preset::AntigravityCli => TlsProfile::antigravity_cli(),
         }
     }
 }
@@ -266,6 +274,94 @@ impl TlsProfile {
         }
     }
 
+    /// The Google Antigravity CLI (`agy`) identity: **Go `crypto/tls`**,
+    /// captured live from `agy` 1.5.3 (Go 1.28, `boringcrypto` build tag).
+    ///
+    /// The capture (first ClientHello to `daily-cloudcode-pa.googleapis.com`)
+    /// is, in Go's fixed extension order:
+    ///
+    /// ```text
+    /// legacy_version 0x0301, record_version 0x0303
+    /// ciphers   c02b c02f c02c c030 cca9 cca8 c009 c013 c00a c014 1301 1302 1303
+    /// extensions 0000 000b ff01 0017 0012 0005 000a 000d 0032 0010 002b 0033
+    /// groups    11ec 11eb 11ed 1d 17 18 19   (key_share: 11ec + 1d)
+    /// sigalgs   0904 0905 0906 0804 0403 0807 0805 0806 0401 0501 0601 0503 0603
+    /// alpn      h2, http/1.1        SNI present, no GREASE, no padding
+    /// JA3       771,49195,49199,49196,49200,52393,52392,49161,49171,49162,49172,
+    ///           4865,4866,4867,0,11,65281,23,18,5,10,13,50,16,43,51,
+    ///           4588,4587,4589,29,23,24,25,0
+    /// JA3 md5   047514f2ccd8b013647df2d9e189c231
+    /// ```
+    ///
+    /// A Go hello is *not* rustls-shaped, so this profile is the intersection
+    /// of what Go offers with what rustls can emit, and the divergences are
+    /// stated rather than hidden:
+    ///
+    /// - **Ciphers:** Go's offer minus its four CBC suites
+    ///   (`c009 c013 c00a c014`), which rustls cannot offer. The surviving nine
+    ///   are offered in Go's order (the allowlist order is the offer order), so
+    ///   the JA3 cipher list differs only by the four absent CBC entries.
+    /// - **Groups:** Go's hybrid order is `X25519MLKEM768` first; rustls 0.23
+    ///   implements `0x11ec` and this profile leads with it (allowlist order is
+    ///   offer order), but rustls has no `SecP256r1MLKEM768`/`SecP384r1MLKEM1024`
+    ///   (`0x11eb`/`0x11ed`), so those two are absent.
+    /// - **Extensions:** rustls emits its own set — it has no
+    ///   `renegotiation_info` (`ff01`), `extended_master_secret` (`0017`),
+    ///   `signed_certificate_timestamp` (`0012`) or `status_request` (`0005`)
+    ///   extension to offer, and always randomizes extension order. The
+    ///   extension hash in JA4 therefore cannot match Go's.
+    /// - **Signature algorithms:** Go 1.28 offers the ML-DSA schemes
+    ///   (`0904`/`0905`/`0906`), which rustls does not implement; the NIST/RSA
+    ///   tail is declared here in Go's order and rustls emits the subset it can.
+    ///
+    /// In short: this is an identity that *connects and negotiates* like the
+    /// CLI (h2 ALPN first, TLS 1.3 offered, no GREASE, no browser extensions)
+    /// and is far closer to Go than any browser preset, but a byte-exact Go
+    /// hello needs a Go-shaped TLS engine, not a rustls profile.
+    pub fn antigravity_cli() -> Self {
+        Self {
+            name: "antigravity-cli",
+            alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            protocol_versions: rustls::ALL_VERSIONS,
+            cipher_suites: Some(vec![
+                rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+                rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+                rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+                rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+                rustls::CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+                rustls::CipherSuite::TLS13_AES_128_GCM_SHA256,
+                rustls::CipherSuite::TLS13_AES_256_GCM_SHA384,
+                rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
+            ]),
+            kx_groups: Some(vec![
+                rustls::NamedGroup::X25519MLKEM768,
+                rustls::NamedGroup::X25519,
+                rustls::NamedGroup::secp256r1,
+                rustls::NamedGroup::secp384r1,
+            ]),
+            verifier: Verifier::Platform,
+            // rustls owns extension order; the Go order is recorded in the doc
+            // comment above rather than asserted here, because asserting it
+            // would fail every build on a rustls that reorders its hello.
+            extension_order: None,
+            grease_enabled: false,
+            signature_algorithms: Some(vec![
+                0x0804, // rsa_pss_rsae_sha256
+                0x0403, // ecdsa_secp256r1_sha256
+                0x0807, // ed25519
+                0x0805, // rsa_pss_rsae_sha384
+                0x0806, // rsa_pss_rsae_sha512
+                0x0401, // rsa_pkcs1_sha256
+                0x0501, // rsa_pkcs1_sha384
+                0x0601, // rsa_pkcs1_sha512
+                0x0503, // ecdsa_secp384r1_sha384
+                0x0603, // ecdsa_secp521r1_sha512
+            ]),
+            alps_protocols: Vec::new(),
+        }
+    }
+
     /// Specify expected TLS extension ordering.
     pub fn with_extension_order(mut self, order: &[u16]) -> Self {
         self.extension_order = Some(order.to_vec());
@@ -358,16 +454,25 @@ impl TlsProfile {
 /// allowlist naming a suite the provider lacks is *silently dropped* rather
 /// than failing the build: the profile still connects, it just offers less.
 /// `None` (and an empty `Some`) mean "no restriction".
+///
+/// The allowlist order is the offer order: the hello carries suites and groups
+/// in the order the profile names them, not in the provider's default order.
+/// That is the whole point of a fingerprint profile — a Go client that leads
+/// with `X25519MLKEM768` must not be approximated by a provider list that
+/// leads with `X25519`.
 fn filter_provider(profile: &TlsProfile, base: &CryptoProvider) -> CryptoProvider {
     let restrict = |allowlist: &Option<Vec<rustls::CipherSuite>>| {
         allowlist
             .as_ref()
             .filter(|list| !list.is_empty())
             .map(|list| {
-                base.cipher_suites
-                    .iter()
-                    .copied()
-                    .filter(|suite| list.contains(&suite.suite()))
+                list.iter()
+                    .filter_map(|want| {
+                        base.cipher_suites
+                            .iter()
+                            .find(|b| b.suite() == *want)
+                            .cloned()
+                    })
                     .collect()
             })
             .unwrap_or_else(|| base.cipher_suites.clone())
@@ -377,10 +482,8 @@ fn filter_provider(profile: &TlsProfile, base: &CryptoProvider) -> CryptoProvide
             .as_ref()
             .filter(|list| !list.is_empty())
             .map(|list| {
-                base.kx_groups
-                    .iter()
-                    .copied()
-                    .filter(|group| list.contains(&group.name()))
+                list.iter()
+                    .filter_map(|want| base.kx_groups.iter().find(|b| b.name() == *want).copied())
                     .collect()
             })
             .unwrap_or_else(|| base.kx_groups.clone())
@@ -507,6 +610,79 @@ mod tests {
             assert!(profile.signature_algorithms.is_some());
             // Verifies that browser profiles build into runnable client configs
             assert!(profile.build(provider()).is_ok());
+        }
+    }
+
+    /// The Antigravity CLI identity must negotiate h2, must not offer GREASE,
+    /// and must not silently degrade to the provider default cipher set — the
+    /// whole point of the preset is that the offer is Go's, minus only the
+    /// suites rustls cannot run.
+    #[test]
+    fn the_antigravity_cli_profile_offers_go_suites_and_h2() {
+        let preset = Preset::by_name("antigravity-cli").expect("preset is registered");
+        let profile = preset.profile();
+        assert_eq!(profile.name, "antigravity-cli");
+        assert_eq!(
+            profile.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            "the CLI offers h2 first"
+        );
+        assert!(!profile.grease_enabled, "Go never sends GREASE");
+
+        let configured = profile
+            .cipher_suites
+            .clone()
+            .expect("the profile names suites explicitly");
+        assert_eq!(configured.len(), 9, "Go's 13 minus the four CBC suites");
+
+        // Building against aws-lc-rs drops nothing: every Go-compatible suite
+        // the profile names is implemented, so the compiled offer is exactly
+        // the allowlist, in the order the profile names it.
+        let config = profile.build(provider()).expect("build");
+        let compiled: Vec<_> = config
+            .crypto_provider()
+            .cipher_suites
+            .iter()
+            .map(|suite| suite.suite())
+            .collect();
+        assert_eq!(compiled.len(), configured.len());
+        for suite in &configured {
+            assert!(compiled.contains(suite), "{suite:?} survived the build");
+        }
+
+        // Go's first key-share group is the hybrid X25519MLKEM768.
+        let groups: Vec<_> = config
+            .crypto_provider()
+            .kx_groups
+            .iter()
+            .map(|group| group.name())
+            .collect();
+        assert_eq!(
+            groups.first(),
+            Some(&rustls::NamedGroup::X25519MLKEM768),
+            "hybrid group leads, as in the captured Go hello"
+        );
+        assert_eq!(
+            config.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
+    }
+
+    #[test]
+    fn every_preset_has_a_unique_name_and_builds() {
+        let mut names: Vec<&str> = Preset::all().iter().map(|preset| preset.name()).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "preset names are unique");
+        for preset in Preset::all() {
+            let profile = preset.profile();
+            assert_eq!(profile.name, preset.name(), "profile names its preset");
+            assert!(
+                profile.build(provider()).is_ok(),
+                "{} builds",
+                preset.name()
+            );
         }
     }
 }

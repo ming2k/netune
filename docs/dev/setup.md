@@ -44,9 +44,11 @@ cargo nextest run
 cargo nextest run -p netune-probe --features inject
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
+python3 .github/scripts/check-docs.py
+cargo test --doc --workspace --all-features
 ```
 
-These are the same gates CI runs; see [`standards/workflow.md`](standards/workflow.md) for the full list and the code-to-doc synchronization rules.
+These are the same gates CI runs; see [`workflow.md`](workflow.md) for the full list, including the documentation integrity gate and the code-to-doc synchronization rules.
 
 ---
 
@@ -59,8 +61,10 @@ These are the same gates CI runs; see [`standards/workflow.md`](standards/workfl
 | `crates/netune-trace` | Trace model, pure timing derivations, JA3/JA4. |
 | `crates/netune-probe` | L2 frame parse/build; transmit only behind `--features inject`. |
 | `docs/adr/` | Ratified decisions. |
-| `docs/dev/standards/` | Engineering standards. |
+| `docs/dev/` | Contributor docs, setup, testing, architecture, invariants, and workflow. |
+| `docs/dev/standards/` | Engineering documentation & collaboration meta-standards. |
 | `docs/dev/` | Setup, testing, release, postmortems. |
+| `.github/scripts/` | The documentation integrity gate and its self-test. |
 
 ---
 

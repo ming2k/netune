@@ -15,7 +15,6 @@
 //! for RTT and retransmits, HTTP `CONNECT` and SOCKS5 proxies ([`Proxy`], [`ProxyConnector`]),
 //! redirect following with credential rules, streaming `Content-Encoding` decoding,
 //! in-process chaos testing ([`FaultIo`]), and [`Client::send`] driving the codec end to end.
-//!
 //! Datagrams are a second, parallel path rather than a mode of the first
 //! ([`DatagramConnector`], [`DatagramTransport`], [`UdpConnector`],
 //! [`Socks5DatagramConnector`]). A session is connected to one peer, decided when it
@@ -30,8 +29,22 @@
 //! L2 frame parsing, capture, forging and optional injection are housed in the companion
 //! crate `netune-probe`; nothing there is linked by default. HTTP/2 is implemented in
 //! `netune-http2` and driven through [`H2Client`] when the `http2` feature is on.
+//!
+//! # This crate is one direction of travel
+//!
+//! `netune` opens sockets outward. It never listens, accepts, or keeps a server
+//! session table; those belong to `netune-server`, the peer orchestrator, which
+//! depends on the same codec and trace leaves and on no crate here
+//! (ADR-0011). The byte-path instrumentation both directions need
+//! ([`TimedIo`], [`FaultIo`]) is re-exported from `netune-io` rather than
+//! defined here, so honoring that boundary costs a consumer nothing.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+// The documentation's Rust examples are compiled by doctest; see this module
+// for why, and for the one rule it imposes on how a guide fences its code.
+#[cfg(doctest)]
+mod doc_examples;
 
 mod client;
 mod connect;
@@ -39,10 +52,8 @@ mod decompress;
 mod dns;
 mod error;
 mod evasion;
-mod fault;
 #[cfg(feature = "http2")]
 mod h2_client;
-mod io;
 mod pool;
 mod proxy;
 mod socket;
@@ -60,20 +71,24 @@ pub const DEFAULT_TRACE_CAPACITY: usize = 1024;
 
 pub use client::{BodyStream, Client, ClientConfig, Response};
 pub use connect::{
-    Connector, EgressConfinement, Established, Target, TcpConnector, Transport, is_public_ip,
+    ConfinementRefused, Connector, EgressConfinement, Established, Target, TcpConnector, Transport,
+    is_public_ip,
 };
 pub use decompress::Decoder;
 pub use dns::{DnsResolver, StaticResolver, SystemResolver};
 pub use error::NetError;
 pub use evasion::SegmentingIo;
-pub use fault::{Fault, FaultIo, FaultScript};
 #[cfg(feature = "http2")]
 pub use h2_client::H2Client;
 pub use http::{HeaderMap, Method};
-pub use io::TimedIo;
 pub use netune_http1::{BodyKind, RequestHead, ResponseHead};
 #[cfg(feature = "http2")]
-pub use netune_http2::{H2Connection, H2Fingerprint, H2Response, PseudoHeaderOrder};
+pub use netune_http2::{H2ClientConnection, H2Fingerprint, H2Response, PseudoHeaderOrder};
+/// The byte-path instrumentation, re-exported so a consumer of `netune` reaches
+/// [`TimedIo`] and [`FaultIo`] without naming the leaf crate. They live in
+/// `netune-io` because ingress needs the identical tap and the two
+/// orchestrators must not depend on each other (ADR-0011).
+pub use netune_io::{Fault, FaultIo, FaultScript, TimedIo};
 #[cfg(feature = "ws")]
 pub use netune_ws::{CloseCode, CloseReason, Message as WsMessage, Opcode as WsOpcode};
 pub use pool::{IdleConnection, Pool, PoolConfig};
@@ -90,3 +105,13 @@ pub use udp::{
 pub use ws::{WsHandshake, WsLimits, WsStream};
 #[cfg(feature = "ws")]
 pub use ws_session::{WsSession, WsSessionConfig};
+
+#[cfg(feature = "quic")]
+pub mod quic {
+    pub use netune_quic::*;
+}
+
+#[cfg(feature = "http3")]
+pub mod http3 {
+    pub use netune_http3::*;
+}

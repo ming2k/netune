@@ -1,0 +1,24 @@
+[package]
+name = "netune-io"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Transport byte-path wrappers: a syscall-boundary trace tap and an in-process fault injector, with no policy and no socket"
+repository = "https://github.com/ming2k/netune"
+license.workspace = true
+readme.workspace = true
+keywords = ["io", "tracing", "observability", "chaos", "async"]
+categories = ["network-programming", "development-tools::debugging"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+netune-trace = { path = "../netune-trace", version = "0.0.6" }
+tokio = { workspace = true, features = ["io-util", "rt", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "time"] }
+
+[lints]
+workspace = true

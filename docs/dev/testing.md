@@ -27,10 +27,12 @@ This guide defines how `netune` is tested, what each test tier is for, and the r
 | :--- | :--- | :--- |
 | 1. Unit | `#[cfg(test)]` modules in `src/` | Pure functions, state machines |
 | 2. Differential | `crates/*/tests/differential.rs`, `tests/golden.rs` | A battle-tested oracle as a **dev-dependency only** |
-| 3. Integration | `crates/netune/tests/*.rs` | Loopback mock origins, TLS fixtures, `FaultIo` |
-| 4. End-to-end | `crates/netune/tests/{e2e,tls_e2e,ws,ws_session}.rs` | A full client lifecycle over a real socket |
+| 3. Integration | `crates/netune/tests/*.rs`, `crates/netune-server/tests/ingress.rs` | Loopback mock origins, TLS fixtures, `FaultIo`; ingress shedding, slow-peer bounds, drain |
+| 4. End-to-end | `crates/netune/tests/{e2e,tls_e2e,ws,ws_session}.rs`, `crates/netune-server/tests/interop.rs` | A full client lifecycle over a real socket; our client against our server |
 
 The WebSocket guide's code samples are also compiled and executed by `crates/netune/tests/guide_examples.rs`, so a drifting guide fails CI instead of misleading readers.
+
+`crates/netune-server/tests/interop.rs` is the only suite that may see both orchestrators, and it sees `netune` as a **dev-dependency**. It asserts two things at once: that a request completes between our own ends, and that neither orchestrator's production manifest names the other (`[INV-SERVER-01]`).
 
 ---
 
@@ -82,4 +84,45 @@ CI additionally sets `RUSTFLAGS="-D warnings"`, so warnings are failures on `mai
 - Unit behaviour → a `#[cfg(test)]` module beside the code.
 - A decoder or encoder that has a spec → add a differential or golden case, not only a hand-written expectation.
 - A transport failure mode → a `FaultIo` scenario in `crates/netune/tests/`, asserting both the error variant and the recorded events.
-- A documentation snippet → a case in `guide_examples.rs`.
+- A documentation snippet → a ```` ```rust ```` block in the document itself. It is compiled automatically (section 6).
+
+---
+
+## 6. Documentation Examples Are Tests
+
+A guide is consumed by copy-paste. Nothing about Markdown makes a stale snippet
+fail, so the examples are compiled as doctests:
+
+- `crates/netune/src/doc_examples.rs` includes `README.md` and every guide under
+  `docs/{tutorials,how-to}/` with `#[doc = include_str!(…)]`, gated on
+  `#[cfg(doctest)]`. Its `rust` blocks become real doctests.
+- CI runs `cargo test --doc --workspace --all-features`, so a guide that names a
+  type, method, or field that does not exist is a build failure.
+
+The fencing rules that follow from this:
+
+| The block… | Fence it as | Why |
+| :--- | :--- | :--- |
+| Is a complete program | ```` ```rust,no_run ```` | Compiled, not executed: it dials a host that only exists on the reader's machine. |
+| Should actually run in CI | ```` ```rust ```` | Only for hermetic examples (a `FaultIo` script, a struct literal). |
+| Is a fragment | ```` ```rust ```` + a `# async fn run()` wrapper | Still type-checked; hidden `#` lines keep the rendered page clean. |
+
+Never use `ignore`: an ignored block is a block nobody checks, which is how the
+examples drifted from the API in the first place. `docs/how-to/websocket-client.md`
+additionally has an executed transcription in `tests/guide_examples.rs` — that
+one proves the *behaviour* the text describes, not just that it compiles.
+
+---
+
+## 7. Documentation Integrity Gate
+
+`.github/scripts/check-docs.py` enforces the structural rules (links, anchors,
+the public/internal firewall, the ADR registry, invariant governance, version
+consistency). Its rule list is indexed in
+[`standards/README.md`](standards/README.md); it is itself tested by
+`test-check-docs.py`, so a rule cannot be weakened to make a build green.
+
+```bash
+python3 .github/scripts/check-docs.py        # run the gate
+python3 .github/scripts/test-check-docs.py   # prove the gate still bites
+```

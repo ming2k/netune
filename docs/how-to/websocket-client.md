@@ -22,7 +22,7 @@ there is no listening or accept surface anywhere in the workspace.
 
 ## Connect and Echo
 
-```rust
+```rust,no_run
 use netune::{Client, ClientConfig, Pool, Target, TcpConnector, WsMessage};
 use netune_ws::CloseCode;
 
@@ -74,28 +74,44 @@ What the transport does for you during the session:
 Offer `Sec-WebSocket-Protocol` values in preference order; the server must
 echo exactly one of them, or none:
 
-```rust
-use netune::WsHandshake;
+```rust,no_run
+use netune::{Client, ClientConfig, Pool, Target, TcpConnector, WsHandshake};
+use netune_trace::Recorder;
+use std::sync::{Arc, Mutex};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let client = Client::new(TcpConnector::new(), Pool::default(), ClientConfig::default());
+let target = Target::plain("ws.example.internal:8080");
+let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
 
 let handshake = WsHandshake::default()
     .with_subprotocol("mcp.v1")
     .with_subprotocol("mcp.v0")
     .with_extra_header("authorization", "Bearer <token>");
 
-let mut ws = client.connect_ws_traced(&target, "/mcp", recorder, handshake).await?;
+let mut ws = client
+    .connect_ws_traced(&target, "/mcp", recorder, handshake)
+    .await?;
+# Ok(())
+# }
 ```
 
 An echo of an unoffered subprotocol is a terminal handshake error — loud, by
-[`INV-TLS-02`]'s fail-fast posture, never a silent fallback.
+`INV-TLS-02`'s fail-fast posture, never a silent fallback.
 
 ## Trace What Happened
 
-Pass an explicit `Recorder` to keep the attempt's trace:
+`connect_ws` allocates a throwaway recorder. Pass an explicit one when you want
+to keep the attempt's trace:
 
-```rust
+```rust,no_run
+use netune::{Client, ClientConfig, Pool, Target, TcpConnector, WsHandshake};
+use netune_trace::Recorder;
 use std::sync::{Arc, Mutex};
-use netune::WsHandshake;
-use netune_trace::{EventKind, Recorder};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let client = Client::new(TcpConnector::new(), Pool::default(), ClientConfig::default());
+let target = Target::plain("ws.example.internal:8080");
 
 let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
 let mut ws = client
@@ -103,7 +119,14 @@ let mut ws = client
     .await?;
 
 // ... session, then read the log from the recorder you passed ...
-let log = recorder.lock().unwrap().log().clone();
+let log = recorder
+    .lock()
+    .unwrap_or_else(|error| error.into_inner())
+    .log()
+    .clone();
+# let _ = (&mut ws, log);
+# Ok(())
+# }
 ```
 
 Event coverage on the WS path:
@@ -155,9 +178,14 @@ For sessions that outlast middlebox idle windows, wrap the stream in a
 no pong arrives in time, so a silently culled socket becomes an explicit
 error instead of a hung read.
 
-```rust
-use netune::{WsSession, WsSessionConfig};
+```rust,no_run
+use netune::{Client, ClientConfig, Pool, Target, TcpConnector, WsSession, WsSessionConfig};
 use std::time::Duration;
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let client = Client::new(TcpConnector::new(), Pool::default(), ClientConfig::default());
+let target = Target::plain("ws.example.internal:8080");
+let ws = client.connect_ws(&target, "/v1/stream").await?;
 
 let mut session = WsSession::new(
     ws,
@@ -171,11 +199,14 @@ let mut session = WsSession::new(
 
 while let Some(message) = session.next().await? {
     // same message handling as above; pings/pongs keep the wire proven
+    let _ = message;
 }
 
 // Reconnection is intentionally NOT automatic: a WebSocket's identity is its
 // connection, and a silent re-dial would silently drop in-flight messages.
 // Build retry/resume policy in the harness above `NetError`.
+# Ok(())
+# }
 ```
 
 One subtlety worth knowing: only a pong whose payload matches the outstanding

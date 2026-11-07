@@ -2,5 +2,9 @@
 Cargo.lock.orig
 *.swp
 
+# Python bytecode from the CI gate scripts (`check-*.py`, `test-check-*.py`).
+__pycache__/
+*.py[cod]
+
 # Local agent-tool workspace configuration (machine-specific roots).
 /.muta/

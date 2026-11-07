@@ -20,6 +20,8 @@ pub const MAX_DELTA_NS: u64 = u32::MAX as u64;
 /// One stored event, delta-encoded against its predecessor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncodedEvent {
+    /// Exchanges on the connection this event belongs to (see [`Event::stream`]).
+    pub stream: u32,
     /// Nanoseconds since the previous stored event (`0` for a `TimeJump`).
     pub dt_ns: u32,
     pub kind: EventKind,
@@ -72,12 +74,22 @@ impl EventLog {
         }
     }
 
-    /// Record an event at an absolute offset from the trace origin.
+    /// Record an event belonging to exchange `0` (the only exchange an egress trace or an
+    /// HTTP/1.1 connection has).
     ///
-    /// Offsets must be non-decreasing; a smaller offset is clamped to the
-    /// previous one (a monotonic clock cannot go backwards, so this only ever
-    /// absorbs a caller bug without corrupting the encoding).
+    /// Offsets must be non-decreasing; a smaller offset is clamped to the previous one (a
+    /// monotonic clock cannot go backwards, so this only ever absorbs a caller bug without
+    /// corrupting the encoding).
     pub fn push_at(&mut self, at_ns: u64, kind: EventKind, a: u32, b: u32) {
+        self.push_at_stream(at_ns, 0, kind, a, b);
+    }
+
+    /// Record an event belonging to a specific exchange on the connection.
+    ///
+    /// `stream` is the exchange's identity: `0` when the transport cannot multiplex one
+    /// connection across several exchanges, and the protocol's own stream id for HTTP/2,
+    /// where a log interleaves exchanges and position carries no grouping.
+    pub fn push_at_stream(&mut self, at_ns: u64, stream: u32, kind: EventKind, a: u32, b: u32) {
         debug_assert!(
             !kind.is_synthetic(),
             "TimeJump is an encoding aid; producers must not emit it"
@@ -90,12 +102,14 @@ impl EventLog {
             // Carry the high bits in a synthetic record, the low bits in the
             // real event. Lossless for any u64 gap.
             self.store(EncodedEvent {
+                stream: 0,
                 dt_ns: 0,
                 kind: EventKind::TimeJump,
                 a: (delta >> 32) as u32,
                 b: 0,
             });
             self.store(EncodedEvent {
+                stream,
                 dt_ns: (delta & u64::from(u32::MAX)) as u32,
                 kind,
                 a,
@@ -103,6 +117,7 @@ impl EventLog {
             });
         } else {
             self.store(EncodedEvent {
+                stream,
                 dt_ns: delta as u32,
                 kind,
                 a,
@@ -149,6 +164,7 @@ impl EventLog {
             acc = acc.saturating_add(encoded.dt_ns as u64);
             Some(Event {
                 at_ns: acc,
+                stream: encoded.stream,
                 kind: encoded.kind,
                 a: encoded.a,
                 b: encoded.b,
@@ -183,6 +199,15 @@ impl EventLog {
     /// Absolute offset of the newest event.
     pub fn last_ns(&self) -> u64 {
         self.last_ns
+    }
+
+    /// The earliest event still in the ring, whatever its kind.
+    ///
+    /// Used when the origin kind is not yet known — a trace whose direction has not
+    /// been established — and by [`crate::Recorder::with_sink`], which must replay
+    /// the origin event whether it is `Dispatch` or `IngressDispatch`.
+    pub fn first(&self) -> Option<Event> {
+        self.iter().next()
     }
 
     /// First event of a kind, in offset order.

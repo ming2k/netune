@@ -12,6 +12,10 @@ superseded_by: null
 - Status: Accepted
 - Date: 2026-10-20
 - Deciders: Ming Li
+- Amended: [ADR-0011](0011-server-side-ingress-transport.md) narrows
+  `[INV-WS-01]`'s second clause. The WebSocket transport surface **in `netune`**
+  remains client-only; the workspace-wide prohibition on accept/listen code is
+  superseded, because ingress now lives in `netune-server` ([INV-SERVER-01]).
 
 ---
 
@@ -58,6 +62,17 @@ WebSocket is not a symmetric peer protocol. RFC 6455 §5.1 mandates that client�
 ### Invariants & Behavioral Boundaries
 
 - **`[INV-WS-01]` Client Role Exclusivity**: The production transport surface exposes only client-side WebSocket egress. Server-side accept/listen code must never compile into any workspace crate; mock origins in tests are the only server implementations.
+
+  > **Amended by ADR-0011 (2026-11-01).** The second sentence is retired. Its
+  > original wording is kept above for forensic use. What remains binding, and is
+  > what the invariant was protecting: the **WebSocket transport surface in
+  > `netune`** is client-egress only, and no accept loop exists in any egress
+  > crate. Ingress accept code now exists, in exactly one place, `netune-server`
+  > ([INV-SERVER-01]). Serving a WebSocket upgrade from `netune-server` is a
+  > separate, later decision; until it lands, `netune-ws`'s `Role::Server` support
+  > stays exercised by tests only. Why the prohibition was too broad: it forbade a
+  > *capability* to protect a *direction*, and a direction is already enforced by
+  > crate topology.
 - **`[INV-WS-02]` Masking Direction Enforcement**: Frames the client sends carry a fresh 4-byte mask; masked frames received from a server are a `PROTOCOL_ERROR` (close code 1002), per RFC 6455 §5.1.
 - **`[INV-WS-03]` Bounded Reassembly**: A fragmented message may not exceed `max_message_bytes`; a control frame may not exceed 125 bytes and may not be fragmented. A frame *declaring* more than `max_frame_bytes` is refused before its body arrives. Violations are terminal protocol errors, never silent truncation.
 - **`[INV-WS-04]` Frame-Level Observability**: Every frame crossing the wire is recorded as an `EventKind::WsFrame` event (payload class + byte count), so fragmented messages stay individually visible in the trace; message-level accounting is a `ProtocolFrame` event. Any handshake failure closes the attempt's trace with an `Error` event — a trace never ends as a headless corpse.

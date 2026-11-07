@@ -22,4 +22,4 @@ pub use handshake::{
     WS_GUID, compute_accept_key, generate_key, generate_nonce, sha1, verify_handshake,
 };
 pub use mask::{apply_mask, generate_mask};
-pub use message::{CloseReason, Message, MessageAssembler};
+pub use message::{CloseReason, DataOpcode, Message, MessageAssembler};

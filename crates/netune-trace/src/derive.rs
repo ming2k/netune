@@ -71,11 +71,11 @@ const NANOS_PER_MICRO: u64 = 1_000;
 
 /// Truncating nanoseconds → microseconds. A sub-microsecond span measures 0 µs,
 /// which is honest for the resolution the field claims.
-fn us(ns: u64) -> u64 {
+pub(crate) fn us(ns: u64) -> u64 {
     ns / NANOS_PER_MICRO
 }
 
-fn span(start: Option<u64>, end: Option<u64>) -> Reading<u64> {
+pub(crate) fn span(start: Option<u64>, end: Option<u64>) -> Reading<u64> {
     match (start, end) {
         (Some(start), Some(end)) if end >= start => Reading::measured(us(end - start)),
         _ => Reading::not_applicable(Reason::PhaseAbsent),

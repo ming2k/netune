@@ -5,7 +5,7 @@
 //! a declared [`H2Fingerprint`].
 
 use http::Method;
-use netune_http2::{H2Connection, H2Fingerprint, H2Response};
+use netune_http2::{H2ClientConnection, H2Fingerprint, H2Response};
 use netune_trace::{EventKind, Recorder};
 use std::sync::{Arc, Mutex};
 
@@ -56,7 +56,7 @@ impl<C: Connector> H2Client<C> {
         };
         let authority = &target.authority;
 
-        let mut h2 = H2Connection::handshake(established.stream, self.fingerprint.clone())
+        let mut h2 = H2ClientConnection::handshake(established.stream, self.fingerprint.clone())
             .await
             .map_err(|e| NetError::Protocol(format!("HTTP/2 handshake: {e}")))?;
 

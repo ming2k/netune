@@ -299,19 +299,73 @@ impl Frame {
     }
 
     /// Decode a frame given its parsed header and complete payload bytes.
+    ///
+    /// # Padding and priority
+    ///
+    /// `PADDED` and `PRIORITY` are *legal* on a client's `DATA`, `HEADERS` and `PUSH_PROMISE`
+    /// frame (RFC 9113 §6.1, §6.2), and a conforming sender may use them: a
+    /// privacy-preserving client pads headers on purpose to blunt traffic analysis. A decoder
+    /// that returned the raw payload would hand its caller the pad-length octet as if it were
+    /// a header block, so both are stripped here — once, for both roles, because a server
+    /// that mishandled padding would be trivially crashable by any client that padded.
+    ///
+    /// # Errors
+    ///
+    /// A pad length longer than the payload, a `HEADERS` frame carrying `PRIORITY` with no
+    /// room for its 5-octet prefix, and any frame whose own length rule is violated.
     pub fn decode(header: &FrameHeader, payload: Bytes) -> Result<Self, H2Error> {
         match header.frame_type {
-            FRAME_DATA => Ok(Self::Data {
-                stream_id: header.stream_id,
-                end_stream: (header.flags & FLAG_END_STREAM) != 0,
-                payload,
-            }),
-            FRAME_HEADERS => Ok(Self::Headers {
-                stream_id: header.stream_id,
-                end_stream: (header.flags & FLAG_END_STREAM) != 0,
-                end_headers: (header.flags & FLAG_END_HEADERS) != 0,
-                header_block: payload,
-            }),
+            FRAME_DATA => {
+                let pad = strip_pad(header.flags, &payload, "DATA")?;
+                Ok(Self::Data {
+                    stream_id: header.stream_id,
+                    end_stream: (header.flags & FLAG_END_STREAM) != 0,
+                    payload: pad,
+                })
+            }
+            FRAME_HEADERS => {
+                let mut block = payload;
+                if header.flags & FLAG_PADDED != 0 {
+                    block = strip_pad(header.flags, &block, "HEADERS")?;
+                }
+                if header.flags & FLAG_PRIORITY != 0 {
+                    if block.len() < 5 {
+                        return Err(H2Error::FrameSize(
+                            "HEADERS with PRIORITY carries no priority fields".into(),
+                        ));
+                    }
+                    block = block.slice(5..);
+                }
+                Ok(Self::Headers {
+                    stream_id: header.stream_id,
+                    end_stream: (header.flags & FLAG_END_STREAM) != 0,
+                    end_headers: (header.flags & FLAG_END_HEADERS) != 0,
+                    header_block: block,
+                })
+            }
+            FRAME_PRIORITY => {
+                if header.length != 5 {
+                    return Err(H2Error::FrameSize(
+                        "PRIORITY must be exactly 5 bytes".into(),
+                    ));
+                }
+                if header.stream_id == 0 {
+                    return Err(H2Error::Protocol("PRIORITY on stream 0".into()));
+                }
+                let dependency = payload[0..4].to_vec();
+                let raw = u32::from_be_bytes([
+                    dependency[0] & 0x7F,
+                    dependency[1],
+                    dependency[2],
+                    dependency[3],
+                ]);
+                Ok(Self::Priority {
+                    stream_id: header.stream_id,
+                    exclusive: dependency[0] & 0x80 != 0,
+                    stream_dependency: raw,
+                    weight: payload[4],
+                })
+            }
             FRAME_SETTINGS => {
                 let ack = (header.flags & FLAG_ACK) != 0;
                 if ack {
@@ -399,23 +453,51 @@ impl Frame {
                 header_block: payload,
             }),
             FRAME_PUSH_PROMISE => {
-                if header.length < 4 {
+                let mut block = payload;
+                if header.flags & FLAG_PADDED != 0 {
+                    block = strip_pad(header.flags, &block, "PUSH_PROMISE")?;
+                }
+                if block.len() < 4 {
                     return Err(H2Error::FrameSize(
                         "PUSH_PROMISE must be at least 4 bytes".into(),
                     ));
                 }
                 let promised_stream_id =
-                    u32::from_be_bytes([payload[0] & 0x7F, payload[1], payload[2], payload[3]]);
+                    u32::from_be_bytes([block[0] & 0x7F, block[1], block[2], block[3]]);
                 Ok(Self::PushPromise {
                     stream_id: header.stream_id,
                     promised_stream_id,
                     end_headers: (header.flags & FLAG_END_HEADERS) != 0,
-                    header_block: payload.slice(4..),
+                    header_block: block.slice(4..),
                 })
             }
             other => Err(H2Error::Protocol(format!("unhandled frame type {other}"))),
         }
     }
+}
+
+/// Remove `PADDED` padding from a payload, returning the unpadded bytes.
+///
+/// A pad length that exceeds the remaining payload is not a decoder inconvenience: a decoder
+/// that sliced anyway would panic, and one that silently clamped would accept a frame the
+/// sender framed illegally. It is a connection error, which is what RFC 9113 §6.1 requires.
+fn strip_pad(flags: u8, payload: &Bytes, frame: &str) -> Result<Bytes, H2Error> {
+    if flags & FLAG_PADDED == 0 {
+        return Ok(payload.clone());
+    }
+    if payload.is_empty() {
+        return Err(H2Error::FrameSize(format!(
+            "{frame} declares padding but carries no pad length"
+        )));
+    }
+    let pad = usize::from(payload[0]);
+    if pad + 1 > payload.len() {
+        return Err(H2Error::FrameSize(format!(
+            "{frame} declares {pad} pad bytes in a {} byte payload",
+            payload.len()
+        )));
+    }
+    Ok(payload.slice(1..payload.len() - pad))
 }
 
 #[cfg(test)]

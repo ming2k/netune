@@ -511,7 +511,6 @@ pub(crate) fn udp_max_datagram_size(socket: &tokio::net::UdpSocket) -> io::Resul
     }
 }
 
-#[allow(unused_variables)]
 fn apply_pre_connect_options(socket: &Socket, config: &SocketConfig) -> io::Result<()> {
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     if let Some(mark) = config.mark {

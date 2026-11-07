@@ -39,6 +39,17 @@ pub enum Reason {
     TcpInfoUnavailable = 7,
     /// The trace has no dispatch origin, so nothing is measurable against it.
     NoOrigin = 8,
+    /// The log holds more than one exchange, so a single set of spans would describe
+    /// only the first and silently omit the rest.
+    ///
+    /// A keep-alive connection serves several requests; a reader that saw one
+    /// `handler_us` for such a connection would conclude the handler is fast while the
+    /// fifth request took half a second. Use
+    /// [`crate::derive_ingress_exchanges`] for the per-exchange view.
+    MultipleExchanges = 9,
+    /// The transport's handshake did not complete, so the interval from its start to its
+    /// end is not a handshake duration.
+    HandshakeFailed = 10,
 }
 
 impl Reason {
@@ -58,6 +69,8 @@ impl Reason {
             Self::ImplausibleRate => "implausible rate",
             Self::TcpInfoUnavailable => "TCP_INFO unavailable",
             Self::NoOrigin => "no origin",
+            Self::MultipleExchanges => "multiple exchanges",
+            Self::HandshakeFailed => "handshake failed",
         }
     }
 }

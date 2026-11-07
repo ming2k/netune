@@ -51,12 +51,35 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Begin a trace at "now", emitting [`EventKind::Dispatch`] at offset 0.
+    /// Begin an egress trace at "now", emitting [`EventKind::Dispatch`] at offset 0.
     pub fn start(capacity: usize) -> Self {
         Self::start_at(Instant::now(), capacity)
     }
 
-    /// Begin a trace at an explicit origin (tests, and the L2 probe, which
+    /// Begin an ingress trace at "now", emitting
+    /// [`EventKind::IngressDispatch`] at offset 0.
+    ///
+    /// A separate constructor rather than a flag because the origin event *is* the
+    /// definition of what the trace measures from, and the two directions measure
+    /// from different facts: an egress attempt begins when the harness decides to
+    /// send, an ingress attempt when the kernel hands over a socket.
+    pub fn start_ingress(capacity: usize) -> Self {
+        Self::start_ingress_at(Instant::now(), capacity)
+    }
+
+    /// Begin an ingress trace at an explicit origin (tests, and a capture with its
+    /// own clock).
+    pub fn start_ingress_at(origin: Instant, capacity: usize) -> Self {
+        let mut log = EventLog::with_capacity(capacity);
+        log.push_at(0, EventKind::IngressDispatch, 0, 0);
+        Self {
+            origin,
+            log,
+            sink: None,
+        }
+    }
+
+    /// Begin an egress trace at an explicit origin (tests, and the L2 probe, which
     /// timestamps against its own capture clock).
     pub fn start_at(origin: Instant, capacity: usize) -> Self {
         let mut log = EventLog::with_capacity(capacity);
@@ -75,9 +98,9 @@ impl Recorder {
     /// reading the stream as the whole record would be wrong.
     #[must_use]
     pub fn with_sink(mut self, sink: Arc<dyn TraceSink>) -> Self {
-        // The dispatch event was recorded before the sink existed; replay it so the stream is
-        // complete from offset 0.
-        if let Some(event) = self.log.first_of(EventKind::Dispatch) {
+        // The origin event was recorded before the sink existed; replay it so the
+        // stream is complete from offset 0, whichever direction this trace is.
+        if let Some(event) = self.log.first() {
             sink.event(event);
         }
         self.sink = Some(sink);
@@ -86,9 +109,23 @@ impl Recorder {
 
     /// Records one event, to the ring and to the sink when there is one.
     fn push(&mut self, at_ns: u64, kind: EventKind, a: u32, b: u32) {
-        self.log.push_at(at_ns, kind, a, b);
+        self.push_stream(at_ns, 0, kind, a, b);
+    }
+
+    /// Records one event belonging to a specific exchange on the connection.
+    ///
+    /// See [`Event::stream`]: a multiplexed transport interleaves exchanges on one
+    /// connection, so the exchange identity has to travel with the event.
+    fn push_stream(&mut self, at_ns: u64, stream: u32, kind: EventKind, a: u32, b: u32) {
+        self.log.push_at_stream(at_ns, stream, kind, a, b);
         if let Some(sink) = &self.sink {
-            sink.event(Event { at_ns, kind, a, b });
+            sink.event(Event {
+                at_ns,
+                stream,
+                kind,
+                a,
+                b,
+            });
         }
     }
 
@@ -130,9 +167,17 @@ impl Recorder {
         }
     }
 
-    /// Record an arbitrary event at "now".
+    /// Record an arbitrary event at "now", belonging to exchange `0`.
     pub fn mark(&mut self, kind: EventKind, a: u32, b: u32) {
         self.push(self.now_ns(), kind, a, b);
+    }
+
+    /// Record an arbitrary event at "now", belonging to the exchange `stream`.
+    ///
+    /// The ingress HTTP/2 path uses this for every fact it records, because a log with two
+    /// concurrent streams in it cannot be split by position.
+    pub fn mark_stream(&mut self, stream: u32, kind: EventKind, a: u32, b: u32) {
+        self.push_stream(self.now_ns(), stream, kind, a, b);
     }
 
     /// Record that the attempt used a pooled connection: no DNS/TCP/TLS phases
@@ -151,6 +196,29 @@ impl Recorder {
     /// Record a `TCP_INFO` sample.
     pub fn tcp_info(&mut self, rtt_us: u32, retransmits: u32) {
         self.mark(EventKind::TcpInfo, rtt_us, retransmits);
+    }
+
+    /// Record that a request head was completely parsed (`a` = head bytes).
+    pub fn request_head(&mut self, bytes: usize) {
+        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+        self.mark(EventKind::RequestHeadComplete, bytes, 0);
+    }
+
+    /// Record that the request body was fully consumed (`a` = body bytes).
+    pub fn request_body_end(&mut self, bytes: usize) {
+        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+        self.mark(EventKind::RequestBodyEnd, bytes, 0);
+    }
+
+    /// Record that the handler returned, carrying the status it produced.
+    pub fn handler_end(&mut self, status: u16) {
+        self.mark(EventKind::HandlerEnd, u32::from(status), 0);
+    }
+
+    /// Record that the response was fully written (`a` = body bytes written).
+    pub fn response_end(&mut self, bytes: usize) {
+        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+        self.mark(EventKind::ResponseEnd, bytes, 0);
     }
 
     /// Finish recording and hand over the log.

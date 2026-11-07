@@ -21,6 +21,10 @@ pub enum PseudoHeaderOrder {
     MethodPathAuthorityScheme,
     /// Safari: `:method`, `:scheme`, `:authority`, `:path`.
     MethodSchemeAuthorityPath,
+    /// Go `net/http` (golang.org/x/net/http2): `:authority`, `:method`, `:path`,
+    /// `:scheme`. Go writes `:authority` first — the one major stack that does —
+    /// which makes the pseudo-header order alone a Go marker.
+    AuthorityMethodPathScheme,
     /// Custom explicit order.
     Custom(&'static [&'static str]),
 }
@@ -32,6 +36,7 @@ impl PseudoHeaderOrder {
             Self::MethodAuthoritySchemePath => &[":method", ":authority", ":scheme", ":path"],
             Self::MethodPathAuthorityScheme => &[":method", ":path", ":authority", ":scheme"],
             Self::MethodSchemeAuthorityPath => &[":method", ":scheme", ":authority", ":path"],
+            Self::AuthorityMethodPathScheme => &[":authority", ":method", ":path", ":scheme"],
             Self::Custom(list) => list,
         }
     }
@@ -111,6 +116,43 @@ impl H2Fingerprint {
         }
     }
 
+    /// The Go `net/http` client identity (`golang.org/x/net/http2`).
+    ///
+    /// Live-captured from Google Antigravity CLI 1.5.3 (`agy`, Go 1.28) on its
+    /// first request to `daily-cloudcode-pa.googleapis.com`; the same framing is
+    /// what every Go binary that uses `net/http` over HTTP/2 puts on the wire
+    /// (the values are `golang.org/x/net/http2` defaults, not the CLI's):
+    ///
+    /// - `SETTINGS`: `ENABLE_PUSH=0`, `INITIAL_WINDOW_SIZE=4194304`,
+    ///   `MAX_FRAME_SIZE=1048576`, `MAX_HEADER_LIST_SIZE=10485760` — in that
+    ///   order, which is Go's `writeSettings` order.
+    /// - connection `WINDOW_UPDATE` of `1073741824` (Go's 1 GiB transport cap).
+    /// - no `HEADER_TABLE_SIZE` setting (HPACK decoder table stays the 4096
+    ///   default) and no `MAX_CONCURRENT_STREAMS` (Go never sends it).
+    /// - no PRIORITY frames (Go never sends them).
+    /// - pseudo-headers in Go's order: `:authority`, `:method`, `:path`,
+    ///   `:scheme`.
+    /// - **regular headers are emitted in Go map-iteration order**, i.e. they
+    ///   differ per request; there is no stable regular-header ordering to
+    ///   impersonate, and a stack that emits a *fixed* order is the outlier.
+    ///
+    /// Akamai H2 Hash: `2:0,4:4194304,5:1048576,6:10485760|1073741824|0|a,m,p,s`
+    pub fn go() -> Self {
+        Self {
+            name: "go-nethttp",
+            settings: vec![
+                (SETTING_ENABLE_PUSH, 0),
+                (SETTING_INITIAL_WINDOW_SIZE, 4_194_304),
+                (SETTING_MAX_FRAME_SIZE, 1_048_576),
+                (SETTING_MAX_HEADER_LIST_SIZE, 10_485_760),
+            ],
+            initial_connection_window_update: Some(1_073_741_824),
+            pseudo_headers_order: PseudoHeaderOrder::AuthorityMethodPathScheme,
+            header_table_size: 4096,
+            send_priority_frames: false,
+        }
+    }
+
     /// Sort pseudo-headers and regular headers according to this fingerprint's policy.
     pub fn order_request_headers<'a>(
         &self,
@@ -166,5 +208,38 @@ mod tests {
         assert_eq!(headers[1], (":path", "/v1/submit"));
         assert_eq!(headers[2], (":authority", "api.local"));
         assert_eq!(headers[3], (":scheme", "https"));
+    }
+
+    /// The Go identity is the one stack that leads with `:authority`, and its
+    /// SETTINGS set is four entries in Go's `writeSettings` order — the values
+    /// live-captured from the 1.5.3 `agy` client. Freezing them here means a
+    /// change to `go()` can only be a deliberate one.
+    #[test]
+    fn go_identity_matches_the_captured_antigravity_cli_framing() {
+        let fp = H2Fingerprint::go();
+        assert_eq!(fp.name, "go-nethttp");
+        assert_eq!(
+            fp.settings,
+            vec![(2, 0), (4, 4_194_304), (5, 1_048_576), (6, 10_485_760)]
+        );
+        assert_eq!(fp.initial_connection_window_update, Some(1_073_741_824));
+        assert!(!fp.send_priority_frames, "Go never sends PRIORITY frames");
+
+        let extra = [("authorization".to_string(), "Bearer x".to_string())];
+        let headers = fp.order_request_headers(
+            "POST",
+            "daily-cloudcode-pa.googleapis.com",
+            "https",
+            "/v1internal:loadCodeAssist",
+            &extra,
+        );
+        assert_eq!(
+            headers[0],
+            (":authority", "daily-cloudcode-pa.googleapis.com")
+        );
+        assert_eq!(headers[1], (":method", "POST"));
+        assert_eq!(headers[2], (":path", "/v1internal:loadCodeAssist"));
+        assert_eq!(headers[3], (":scheme", "https"));
+        assert_eq!(headers[4], ("authorization", "Bearer x"));
     }
 }

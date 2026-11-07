@@ -1,4 +1,4 @@
-//! The chaos twin of [`crate::io::TimedIo`]: a transport wrapper that
+//! The chaos twin of [`crate::TimedIo`]: a transport wrapper that
 //! *injects* faults instead of recording facts.
 //!
 //! Where `TimedIo` answers "what did the transport actually do?", `FaultIo`

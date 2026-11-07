@@ -5,7 +5,236 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.0.6] - 2026-11-07
+
+### Added
+
+- **First-class QUIC and HTTP/3 client transport** (`netune-quic`, `netune-http3`)
+  ([ADR-0016](docs/adr/0016-quic-and-http3-transport.md)). QUIC endpoints carry an explicit
+  identity (`QuicProfile`, `QuicTransportParameters`), RFC 9221 datagram sessions, bidirectional
+  `QuicStream`s, and an abstract socket seam (`QuicUdpSocket`) that applies every `SocketConfig`
+  option before the first packet is sent. HTTP/3 (RFC 9114) request dispatch builds on it. Both
+  are opt-in (`netune` features `quic` / `http3`); the default feature set is unchanged, and
+  every crate compiles against `aws-lc-rs` only (`[INV-QUIC-01..04]`, `[INV-SOCKET-01]`).
+  The trace vocabulary is ordered boundaries only: `QuicStart`/`QuicEnd`, `QuicStreamOpen`,
+  `H3StreamStart`/`H3HeadComplete`/`H3Finished`, with new `derive_quic` and `derive_h3` pure
+  derivations for the handshake, TTFB, body and end-to-end spans. Congestion and loss counters
+  stay transport state (`QuicConnection::stats()`), not events. The never-emitted
+  `QuicLoss`, `QuicCongestion` and `QuicStreamClose` kinds are removed rather than left as
+  vocabulary no producer writes.
+- **`netune-egress`: the egress-confinement rule as one pure leaf** (ADR-0002).
+  `is_public_ip`, `EgressConfinement` and `ConfinementRefused` moved out of `netune` so TCP,
+  UDP/QUIC datagrams and the QUIC connector share one predicate instead of copies that can
+  drift. `netune` re-exports them, so existing consumers compile unchanged; confinement still
+  strictly precedes socket creation (`[INV-EGRESS-01]`, `[INV-QUIC-02]`).
+- **Per-request TLS and HTTP/2 identities** (ADR-0004, ADR-0006).
+  `Target::with_tls_profile` selects a named `TlsProfile` for one request and
+  `TlsRouterConnector` reads it, so a client is no longer fixed to the identity it was
+  constructed with. One profile name pairs both halves of the wire identity — the TLS hello
+  *and* the HTTP/2 framing (`safari-current`, `firefox-current`, `antigravity-cli`) — because a
+  Go hello over Chrome framing is more distinctive than either choice alone. `Client::send`
+  resolves the pairing in one place.
+- **The Go `net/http` identity: `Preset::AntigravityCli` and `H2Fingerprint::go()`** (ADR-0006).
+  Live-captured from Antigravity CLI 1.5.3: Go's `crypto/tls` hello (`h2,http/1.1`, no GREASE,
+  Go cipher and group order) and Go's `net/http` HTTP/2 framing (four SETTINGS in
+  `writeSettings` order, a 1 GiB connection window, no PRIORITY frames, and `:authority`-first
+  pseudo-headers through the new `PseudoHeaderOrder::AuthorityMethodPathScheme`). Divergences
+  from Go that rustls cannot emit are stated in `TlsProfile::antigravity_cli` rather than
+  hidden.
+- **`netune-server`: an observable ingress orchestrator serving HTTP/1.1 and HTTP/2**
+  ([ADR-0011](docs/adr/0011-server-side-ingress-transport.md),
+  [ADR-0012](docs/adr/0012-http2-ingress.md)). A crate that owns the workspace's only
+  listening socket: an accept loop with explicit admission control (`max_connections`
+  sheds, never an unbounded queue), bounded per-phase timeouts applied before application
+  code runs, per-connection ingress traces, and a graceful drain that lets in-flight
+  exchanges finish up to `drain_timeout`. It depends on the codecs, the trace model and
+  `netune-io` only — never on `netune` (`INV-SERVER-01`). It is a transport, not a
+  framework: no routing, extractors or middleware.
+- **HTTP/2 ingress, decided once per connection** ([ADR-0012](docs/adr/0012-http2-ingress.md)).
+  The protocol comes from the connection's first bytes (prior knowledge) or from ALPN and
+  is never upgraded in place (`INV-SERVER-09`). A listener that does not offer the protocol
+  a peer asked for refuses it with `505` rather than downgrading. One `Handler` answers
+  both: `:authority` and `Host` are translated so one field names the authority, and
+  `Connection` — which HTTP/2 forbids — is dropped.
+- **One HTTP/2 connection machine behind two thin roles** ([ADR-0012](docs/adr/0012-http2-ingress.md)).
+  `H2Connection` owns frame reading bounded by the *local* advertised maximum, the SETTINGS
+  exchange, PING echo, GOAWAY bookkeeping, HPACK and `CONTINUATION` contiguity, with `Role`
+  as a field (`INV-SERVER-08`). `client::H2ClientConnection` and `server::ServerSession` are
+  the roles. The server role keeps a stream table, sheds with `REFUSED_STREAM` instead of
+  closing the connection, replenishes receive credit only as the handler consumes
+  (`INV-SERVER-11`), and wakes on handler completion instead of sitting in a socket read.
+- **A response is a state machine whose body may still be arriving**
+  ([ADR-0013](docs/adr/0013-response-writer-state-machine.md)).
+  `netune_http1::ResponseWriter` takes the request method, so it refuses a body under
+  `HEAD`/`1xx`/`204`/`304`/`CONNECT`-2xx, refuses a body past a declared `Content-Length`,
+  and refuses a `finish` short of it (`INV-SERVER-12`). `ResponseBody::Stream` /
+  `Response::stream` make incremental bodies first class in both protocols — chunked framing
+  on HTTP/1.1, `DATA` frames on HTTP/2 — from one handler return type.
+- **Request framing is validated before any handler runs**
+  ([ADR-0014](docs/adr/0014-request-validation-before-dispatch.md)). The RFC 9112 §3.2
+  request-target grammar and the `Host` grammar it is compared against are enforced in the
+  codec; the listener additionally refuses two `Host` headers and an absolute-form target
+  whose authority disagrees with `Host`. A bare LF is a protocol error in the server role.
+  `max_body_bytes` is cumulative across every `next_chunk`, and a declared `Content-Length`
+  beyond it is refused before the first body byte (`INV-SERVER-14..16`).
+- **`Expect: 100-continue`, a per-write deadline, a reuse quota, and panic containment.**
+  A peer that asks permission before uploading is answered immediately rather than paying its
+  own timeout; a peer that stops reading is cut off by `write_timeout` instead of holding a
+  slot for `handler_timeout`; a connection closes after `max_requests_per_connection`, which
+  is how a configuration rollout drains; and a panicking handler is answered with `500`
+  instead of resetting the socket.
+- **Per-event stream identity in the trace model** ([ADR-0012](docs/adr/0012-http2-ingress.md)).
+  `Event` and `EncodedEvent` gained `stream`: `0` where the transport cannot multiplex, the
+  protocol's stream id for HTTP/2. `derive_ingress_exchanges` splits a multiplexed log *by
+  stream* rather than by position, and a connection-level failure is copied into every
+  sub-log it ended (`INV-SERVER-10`). `derive_ingress` still refuses a multi-exchange log.
+  Because `EncodedEvent` serializes the new field, a log persisted by `0.0.5` does not
+  deserialize into `0.0.6`; re-record rather than re-read old on-disk logs.
+- **`netune-io`: the byte-path adapters as a shared leaf**
+  ([ADR-0011](docs/adr/0011-server-side-ingress-transport.md)). `TimedIo` and `FaultIo`
+  moved out of `netune` because ingress needs the identical syscall tap and the two
+  orchestrators must not depend on each other. `netune` re-exports both, so existing
+  consumers compile unchanged.
+- **Request-direction HTTP/1.1 codec (`netune-http1`)** ([ADR-0011](docs/adr/0011-server-side-ingress-transport.md)).
+  `Http1ServerReader` applies the framing rules a *request* obeys: no close-delimited body,
+  a `Transfer-Encoding` that must end in `chunked`, and both framing headers refused as
+  smuggling. Request and response directions share one framing core, so chunked decoding
+  exists once (`INV-SERVER-04`).
+- **Ingress event vocabulary and pure derivations (`netune-trace`)**
+  ([ADR-0011](docs/adr/0011-server-side-ingress-transport.md)). Ten ingress `EventKind`s
+  (`IngressDispatch` … `ResponseEnd`) with `Recorder::start_ingress`, plus
+  `derive_ingress`, which computes `request_read_us`, `queue_us`, `handler_us`, `write_us`,
+  `response_write_us` and `ingress_e2e_us` as pure functions of the recorded trace
+  (`INV-SERVER-02`). `derive` (egress) is untouched.
+- **Differential coverage in both directions (`netune-http1`).**
+  `tests/differential_server.rs` uses hyper as the *client* against our server role: hyper's
+  requests must be framed by us the way hyper intended, and our responses must be accepted
+  by hyper unmodified — including a `HEAD` response that declares a length and writes no
+  body.
+
+### Changed
+
+- **The WebSocket assembler models a fragmented message as `DataOpcode`** (`netune-ws`).
+  `MessageAssembler` holds `Option<DataOpcode>` instead of `Option<Opcode>`, so a control
+  opcode or a `Continuation` starting a data message is an explicit `PROTOCOL_ERROR` rather
+  than an `unreachable!()` branch. `pending_opcode()` still returns the wire `Opcode`. The new
+  `DataOpcode` is exported.
+- **The shared client negotiates HTTP/2.** `shared_client()` now sets
+  `ClientConfig::enable_http2`, so an `h2` ALPN result is framed as HTTP/2 instead of being
+  downgraded to HTTP/1.1; the request's `tls_profile` selects the matching framing identity.
+- **`Response::no_content`, `version_not_supported` and `unavailable` are removed**
+  (`netune-server`). They were public constructors no code path reached; `not_implemented` stays because
+  the transport now uses it for `CONNECT`.
+- **`netune-http2`'s `PADDED` and `PRIORITY` handling.** A conforming client may pad
+  `DATA`/`HEADERS`/`PUSH_PROMISE` (privacy-preserving clients do), and the previous decoder
+  returned the pad-length octet as if it began a header block. Both are now stripped once,
+  for both roles, and `PRIORITY` is parsed and ignored as RFC 9113 §5.3.1 permits.
+- **The HPACK encoder can grow to the peer's advertised table size.**
+  `DynamicTable::set_max_size` refused any increase, which made a peer's
+  `SETTINGS_HEADER_TABLE_SIZE` unusable and, in the server role, a stream error. The encoder
+  now resizes to whatever the peer granted and emits the §4.2 size update ahead of the next
+  header block.
+- **`netune-server` gained a default-on `http2` feature.** Both protocols are on by default; turning
+  it off compiles out HPACK and the frame decoder for a listener that serves one protocol, and refuses
+  `Protocols::HTTP2` at bind time rather than accepting connections it would close.
+- **`ServerConfig` gained `max_requests_per_connection`, `write_timeout`, `require_host`,
+  `expect_continue`, `protocols` and `http2`.** Every zero-valued bound is refused at bind
+  time, because a zero bound is a configuration error rather than "unlimited".
+  `ServerConfig::for_tests` tightens exactly the bounds a test would otherwise wait on.
+- **`RequestHead` / `ResponseHead` mean "a head this role builds"; parsed heads are
+  `IncomingRequest` / `IncomingResponse`** (`netune-http1`). A `*Head` carries what an
+  author controls (raw wire header casing, a chosen reason phrase, a declared framing); an
+  `Incoming*` carries what a peer controls (the version actually spoken, the request target
+  as raw bytes, the target form). No compatibility alias is provided: the distinction is
+  the point.
+- **`ServerConfig` is not `Copy`** (`netune-server`), because it can carry a `trace_sink`.
+  Take it by reference or clone it.
+- **`netune-http2`'s client role is `client::H2ClientConnection`.** The connection machine
+  is shared, so a `handshake` that was implicitly a client is no longer a method on it.
+  `netune` re-exports the new name.
+
+- **TLS termination inside the listener** ([ADR-0015](docs/adr/0015-self-terminated-tls.md)).
+  A new off-by-default `tls` feature adds `TlsTermination`, which reads the ClientHello with
+  `LazyConfigAcceptor`, selects a `rustls::ServerConfig` from the SNI name (with a required fallback),
+  lets ALPN decide the protocol, and records the handshake as `IngressTlsEnd` or
+  `ERROR_TLS_HANDSHAKE`. The handshake is bounded by `head_timeout`, and a TLS configuration whose ALPN
+  list cannot serve what `protocols` claims is refused at bind time (`INV-SERVER-18..21`). The TLS path
+  shares the entire connection pipeline with the plaintext one.
+
+### Removed
+
+- **`netune_http1::write_response`, `write_response_head`, `write_chunked_chunk`,
+  `write_chunked_end`, `ResponseBody` and `default_reason`.** Replaced by `ResponseWriter`
+  and `write_interim`. Four functions each enforcing part of one rule became one type that
+  enforces all of it. There is no compatibility shim, because a shim would let a caller keep
+  producing a message that contradicts its own head.
+
+### Fixed
+
+- **`CONNECT` was answered as if a tunnel had opened.** `netune-server` never dials a peer
+  (`INV-SERVER-01`), so it cannot open one — but it answered `200 OK` and the client's tunnel bytes went
+  to the HTTP parser, after the client had already committed to a relay that was not happening. Both
+  protocols now refuse `CONNECT` with `501` before dispatch.
+- **A listener served a protocol it did not offer.** The refusal existed for HTTP/2 on an
+  HTTP/1.1-only listener but not for HTTP/1.1 on an `HTTP2`-only one, so the latter served requests it
+  never advertised — the downgrade `INV-SERVER-09` forbids, through the door nobody checked.
+  `Protocols::default()` is now what the compiled feature set can serve, an explicit request for an
+  absent protocol fails at bind time, and both directions are refused.
+- **An HTTP/2 shutdown never drained an in-flight stream.** The session was handed
+  `std::future::pending()`, so a request in flight at shutdown was aborted by the drain deadline
+  instead of being finished — `INV-SERVER-06` silently did not hold for the multiplexed protocol. The
+  listener now propagates a drain signal through a `watch` channel, and the session finishes every
+  handler that completes before announcing `GOAWAY`.
+- **Any HTTP/2 request body larger than one stream window deadlocked.** Credit was accounted against
+  the connection window only and replenished unconditionally, so the per-stream window was never
+  restored: a peer correctly stopped sending at 64 KiB and the request hung. Both windows are now
+  charged on receipt and restored on handler consumption, and an overrun is a `FLOW_CONTROL_ERROR`.
+- **`write_timeout` was dead on the HTTP/2 path.** The field was documented as the slow-read defence
+  and no code read it; a peer that stopped reading held the connection for the length of
+  `handler_timeout`. Every frame write is now bounded by it.
+- **A streaming handler that returned and then stalled held a connection forever.** `handler_timeout`
+  bounds the handler's future, not the stream it returns, so a stream that never produced a chunk was
+  unbounded. The interval between chunks is now bounded by the same timeout.
+- **An HTTP/2 handler timeout was recorded on stream `0`.** `split_multiplexed` copies connection-level
+  events into every sub-log, so one stream's timeout poisoned the derivation of every other stream on
+  the connection. Both the timeout and the panic are now recorded against the stream that failed.
+- **A request body was reported as `BodyKind::Chunked` on HTTP/2.** HTTP/2 has no transfer coding; a
+  handler branching on that value took a path the protocol cannot produce. It is now `UntilClose`,
+  which is what `END_STREAM` means.
+- **A chunked response head could be written with an unframed body.** The old
+  `write_response` accepted raw bytes under a head declaring `Transfer-Encoding: chunked`
+  and returned `Ok`, putting a message on the wire that every conforming peer misparses —
+  and the malformation stayed invisible until the peer failed. The writer now refuses both
+  mismatches, and `netune-server` streams a chunked response through the framed path so the
+  capability is reachable rather than merely declared.
+- **`ResponseHead::with_chunked_body` / `with_body` left the previous framing declaration
+  in place (`netune-http1`).** Converting a `Content-Length` response into a streamed one
+  produced a head declaring both, which the writer correctly refused — so the caller got an
+  empty response instead of an error at the point of the mistake. Each setter now clears the
+  other framing header.
+- **`derive_ingress` reported one set of spans for a keep-alive connection that served
+  several requests, describing only the first (`netune-trace`).** It now returns
+  `NotEstimable(MultipleExchanges)`, and `derive_ingress_exchanges` gives the per-request
+  view with each exchange anchored where its connection became free. A multiplexed HTTP/2
+  connection derives per stream rather than refusing.
+- **Ingress traces ended at the event sink and never reached a running server
+  (`netune-server`).** `ServerConfig::trace_sink` took a raw `TraceSink`, whose events carry
+  no connection boundary, so a consumer could not recover a derivable trace from them. It now
+  takes a `TraceObserver` and hands over a complete `IngressTrace` per finished connection,
+  with `SinkObserver` and `CollectingObserver` provided.
+- **A bare LF terminated a request line.** RFC 9112 §2.2 defines CRLF; a second hop that
+  recognises only CRLF reads the difference as part of the next header, which is the same
+  desync class as `CL.TE`. The server role now refuses it while the client role still
+  tolerates it, because a sloppy origin is not a security boundary.
+- **A streaming body reader had no size bound.** `max_body_bytes` was only checked by
+  `read_body_to_end`, so a handler calling `read_body_chunk` in a loop — the case
+  `RequestBody` exists for — could read without limit. The bound is now applied per chunk,
+  cumulatively.
+- **A timing test failed roughly one run in eight (`netune::e2e`).** The prefill gap between
+  a response head and its first body byte was 5 ms, the same order as the 2 ms
+  `BATCH_GAP_NS` window that refuses `server_ttft_us` as batched; under parallel load the
+  two arrived in one read and the promised estimability collapsed. The prefill window is now
+  80 ms, so the property under test is unchanged and the flake is gone.
 
 ## [0.0.5] - 2026-11-01
 

@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        features: ["", "netune-probe/inject"]
+        features: ["", "netune-probe/inject", "all-features"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -51,6 +51,13 @@ jobs:
         if: matrix.features == ''
       - run: cargo nextest run -p netune-probe --features inject
         if: matrix.features == 'netune-probe/inject'
+      # The `all-features` posture is where opt-in code is *executed*, not merely
+      # compiled: `netune-server`'s `tls` suite lives behind the non-default
+      # `tls` feature, so `cargo nextest run` never runs it and the lint/doc
+      # jobs compile it without executing. Running the whole workspace with
+      # every feature on is the only gate that proves those paths work.
+      - run: cargo nextest run --all-features
+        if: matrix.features == 'all-features'
 
   supply-chain:
     name: Supply chain (advisories, licences, bans)
@@ -73,18 +80,75 @@ jobs:
           toolchain: "1.95.0"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # `INV-QUIC-01` states that `ring` never reaches a build — `aws-lc-rs` is the
+      # one crypto provider. `cargo-deny`'s ban table cannot enforce it: it resolves
+      # cross-platform metadata and would fail on a `ring` that is only linked on a
+      # target this project never builds. The precise statement is "does not
+      # *compile*", so the precise mechanism is to ask the compiler's own resolver
+      # for the host target and fail if it names `ring`.
+      - name: No second crypto engine (INV-QUIC-01)
+        run: |
+          if cargo tree --all-features --invert ring 2>/dev/null | grep -q '^ring '; then
+            echo "::error::ring is in the host dependency graph; aws-lc-rs is the only permitted crypto provider (INV-QUIC-01, ADR-0016)"
+            cargo tree --all-features --invert ring
+            exit 1
+          fi
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Both feature postures are checked: `--all-features` proves the opt-in
+      # paths compile, `--no-default-features` proves the codecs are genuinely
+      # optional rather than merely gated in name.
+      - run: cargo check --all-targets --all-features
       - run: cargo check --all-targets --no-default-features
       - run: cargo fmt --check
 
   doc:
-    name: Doc warnings clean
+    name: Documentation integrity
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The standards in `docs/dev/standards/` are only rules if something
+      # fails when they are broken. This gate is that mechanism: links,
+      # anchors, the public/internal firewall, the ADR registry, invariant
+      # governance, and version consistency. Run it first so a documentation
+      # defect is reported before the slower rustdoc pass.
+      - name: Documentation integrity gate
+        run: python3 .github/scripts/check-docs.py
+      # `--document-private-items` is deliberately absent: rustdoc warnings are
+      # about the public surface, and every intra-doc link on it must resolve.
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: "-D warnings"
+      # The examples in `README.md` and `docs/{tutorials,how-to}/` are compiled
+      # as doctests by `src/doc_examples.rs`. Without this step a guide could
+      # describe an API that does not exist and every other gate would pass —
+      # which is exactly how the guides reached that state before.
+      - run: cargo test --doc --workspace --all-features
+        env:
+          RUSTFLAGS: ""
+
+  docs-gate-selftest:
+    name: Documentation gate self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # A checker that is not itself checked rots silently: every rule below
+      # has a fixture that must fail and a fixture that must pass.
+      - run: python3 .github/scripts/test-check-docs.py
+
+  architecture:
+    name: Architecture gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # `architecture.md` and `AGENTS.md` state the topology and the red-lines.
+      # Without this job they are review conventions, and a stray `Cargo.toml`
+      # edge ships. It needs no toolchain: it reads manifests and source.
+      - name: Architecture gate
+        run: python3 .github/scripts/check-architecture.py
+      - name: Architecture gate self-test
+        run: python3 .github/scripts/test-check-architecture.py

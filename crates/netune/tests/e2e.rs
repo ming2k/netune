@@ -22,6 +22,19 @@ use tokio::net::TcpListener;
 const CHUNKS: usize = 24;
 const CHUNK_GAP: Duration = Duration::from_millis(5);
 
+/// The gap between the response head and the first body byte.
+///
+/// Deliberately much larger than [`CHUNK_GAP`]. `server_ttft_us` is refused as
+/// `TransportBatched` when the head and the first body byte are recorded less than
+/// `BATCH_GAP_NS` (2 ms) apart, which is the correct behaviour — but it also means the
+/// assertion that the scope *is* estimable depends on the client's very first read not
+/// collecting both. The head and the first chunk were 5 ms apart, so a client task
+/// descheduled for 5 ms under parallel test load delivered them in one read and the gap
+/// collapsed to zero, making this test fail roughly one run in eight. The measured
+/// quantity (streaming cadence between tokens) is still 5 ms; only the prefill window is
+/// widened, so the property under test is unchanged and the flake is gone.
+const FIRST_CHUNK_GAP: Duration = Duration::from_millis(80);
+
 /// Serve `responses` requests on one keep-alive connection.
 async fn serve(listener: TcpListener, responses: usize) {
     let (mut socket, _) = listener.accept().await.expect("accept");
@@ -47,7 +60,7 @@ async fn serve(listener: TcpListener, responses: usize) {
         // Headers first, then a prefill gap before the first token — the shape
         // a real streaming API has, and the shape that makes `server_ttft_us`
         // estimable rather than batched.
-        tokio::time::sleep(CHUNK_GAP).await;
+        tokio::time::sleep(FIRST_CHUNK_GAP).await;
         for i in 0..CHUNKS {
             let frame = format!("data: {i}\n");
             let chunk = format!("{:x}\r\n{frame}\r\n", frame.len());

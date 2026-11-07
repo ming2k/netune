@@ -3,6 +3,38 @@ use bytes::{Bytes, BytesMut};
 use crate::error::WsError;
 use crate::frame::{CloseCode, Frame, Opcode};
 
+/// The opcode of a *data* message (RFC 6455 §5.6): a fragmented message can be
+/// started only by `Text` or `Binary`, never by a control opcode or a
+/// `Continuation`. Encoding that in the type is what lets the assembler's
+/// completion match be exhaustive without an `unreachable!()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataOpcode {
+    /// A UTF-8 text message.
+    Text,
+    /// A raw binary message.
+    Binary,
+}
+
+impl DataOpcode {
+    /// Classify a frame opcode as a data-message start, or `None` when the
+    /// opcode cannot begin a data message.
+    const fn of(opcode: Opcode) -> Option<Self> {
+        match opcode {
+            Opcode::Text => Some(Self::Text),
+            Opcode::Binary => Some(Self::Binary),
+            Opcode::Continuation | Opcode::Close | Opcode::Ping | Opcode::Pong => None,
+        }
+    }
+
+    /// The wire opcode this message is carried in.
+    pub const fn as_opcode(self) -> Opcode {
+        match self {
+            Self::Text => Opcode::Text,
+            Self::Binary => Opcode::Binary,
+        }
+    }
+}
+
 /// A reassembled WebSocket message ready for application processing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
@@ -228,7 +260,7 @@ mod dfa_tests {
 /// State machine for reassembling fragmented WebSocket data frames (RFC 6455 §5.4).
 #[derive(Debug)]
 pub struct MessageAssembler {
-    fragmented_opcode: Option<Opcode>,
+    fragmented_opcode: Option<DataOpcode>,
     /// Incremental UTF-8 validator, driven only while assembling a text message.
     utf8: Utf8Validator,
     /// Reassembled bytes for the in-flight binary message.
@@ -248,8 +280,11 @@ impl MessageAssembler {
     }
 
     /// The opcode of the fragmented message currently being assembled, if any.
+    ///
+    /// Returns the wire [`Opcode`] so callers classify the in-flight message
+    /// (e.g. for tracing) without needing to know about `DataOpcode`.
     pub fn pending_opcode(&self) -> Option<Opcode> {
-        self.fragmented_opcode
+        self.fragmented_opcode.map(DataOpcode::as_opcode)
     }
 
     /// Reset any in-progress fragmented message state.
@@ -299,10 +334,20 @@ impl MessageAssembler {
                         CloseCode::PROTOCOL_ERROR,
                     ));
                 }
-                self.fragmented_opcode = Some(frame.opcode);
-                match frame.opcode {
-                    Opcode::Text => self.utf8.push(&frame.payload)?,
-                    _ => {
+                // `DataOpcode::of` is total over `Text | Binary`, so the `let
+                // Some` cannot fail here; expressing the state as `DataOpcode`
+                // removes the "any Opcode" lie that the completion match below
+                // used to paper over with `unreachable!()`.
+                let Some(kind) = DataOpcode::of(frame.opcode) else {
+                    return Err(WsError::protocol(
+                        "fragmented message must begin with a data opcode",
+                        CloseCode::PROTOCOL_ERROR,
+                    ));
+                };
+                self.fragmented_opcode = Some(kind);
+                match kind {
+                    DataOpcode::Text => self.utf8.push(&frame.payload)?,
+                    DataOpcode::Binary => {
                         if self.binary_buffer.len() + frame.payload.len() > self.max_message_bytes {
                             return Err(WsError::PayloadTooLarge {
                                 length: self.binary_buffer.len() + frame.payload.len(),
@@ -317,16 +362,16 @@ impl MessageAssembler {
 
             // Continuation frames
             Opcode::Continuation => {
-                let Some(initial_opcode) = self.fragmented_opcode else {
+                let Some(kind) = self.fragmented_opcode else {
                     return Err(WsError::protocol(
                         "Received continuation frame without preceding initial fragmented frame",
                         CloseCode::PROTOCOL_ERROR,
                     ));
                 };
 
-                match initial_opcode {
-                    Opcode::Text => self.utf8.push(&frame.payload)?,
-                    _ => {
+                match kind {
+                    DataOpcode::Text => self.utf8.push(&frame.payload)?,
+                    DataOpcode::Binary => {
                         let new_len = self.binary_buffer.len() + frame.payload.len();
                         if new_len > self.max_message_bytes {
                             return Err(WsError::PayloadTooLarge {
@@ -340,17 +385,16 @@ impl MessageAssembler {
 
                 if frame.fin {
                     self.fragmented_opcode = None;
-                    match initial_opcode {
-                        Opcode::Text => {
+                    match kind {
+                        DataOpcode::Text => {
                             let text = self.utf8.finish()?;
                             self.utf8.clear();
                             Ok(Some(Message::Text(text)))
                         }
-                        Opcode::Binary => {
+                        DataOpcode::Binary => {
                             let assembled = self.binary_buffer.split().freeze();
                             Ok(Some(Message::Binary(assembled)))
                         }
-                        _ => unreachable!(),
                     }
                 } else {
                     Ok(None)

@@ -159,80 +159,12 @@ pub trait Connector: Send + Sync {
 }
 
 /// Egress confinement policy for connection establishment (ADR-0002).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum EgressConfinement {
-    /// Standard unrestricted egress (for configured LLM endpoints and proxies).
-    #[default]
-    Unrestricted,
-    /// Strict public egress: rejects loopback, RFC 1918 private, link-local,
-    /// carrier-grade NAT, cloud metadata, and multicast addresses.
-    StrictPublic,
-}
-
-/// True only for globally-routable addresses. Rejects loopback, private RFC1918
-/// ranges, link-local, cloud metadata, carrier-grade NAT, and unspecified/broadcast.
-pub fn is_public_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            let [a, b, c, _d] = octets;
-            // Cloud instance-metadata endpoint (AWS/Azure/GCP): link-local 169.254.169.254
-            if octets == [169, 254, 169, 254] {
-                return false;
-            }
-            if v4.is_loopback()        // 127.0.0.0/8
-                || v4.is_private()     // 10/8, 172.16/12, 192.168/16
-                || v4.is_link_local()  // 169.254/16
-                || v4.is_unspecified() // 0.0.0.0
-                || v4.is_broadcast()
-            // 255.255.255.255
-            {
-                return false;
-            }
-            // Carrier-grade NAT (100.64.0.0/10)
-            if a == 100 && (b & 0xc0) == 64 {
-                return false;
-            }
-            // Documentation/benchmarking networks (198.18.0.0/15, 198.51.100/24, 203.0.113/24)
-            if a == 198 && (18..=19).contains(&b) {
-                return false;
-            }
-            if a == 192 && b == 0 && (c == 0 || c == 2) {
-                return false;
-            }
-            if a == 198 && b == 51 && c == 100 {
-                return false;
-            }
-            if a == 203 && b == 0 && c == 113 {
-                return false;
-            }
-            // Reserved / Class E
-            if a >= 240 {
-                return false;
-            }
-            true
-        }
-        std::net::IpAddr::V6(v6) => {
-            if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
-                return false;
-            }
-            let seg0 = v6.segments()[0];
-            // Unique-local fc00::/7 (RFC 4193)
-            if (seg0 & 0xfe00) == 0xfc00 {
-                return false;
-            }
-            // Link-local fe80::/10 (RFC 4291)
-            if (seg0 & 0xffc0) == 0xfe80 {
-                return false;
-            }
-            // IPv4-mapped IPv6 (::ffff:x.x.x.x)
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_public_ip(std::net::IpAddr::V4(v4));
-            }
-            true
-        }
-    }
-}
+///
+/// Re-exported from `netune-egress`, the single source of truth shared by the
+/// TCP connector, the datagram sessions and `netune-quic`. Keeping the
+/// definition there is what makes the QUIC path enforce the same rule the TCP
+/// path does ([INV-EGRESS-01]).
+pub use netune_egress::{ConfinementRefused, EgressConfinement, is_public_ip};
 
 /// Resolves, then connects over TCP with optional egress confinement and socket tuning.
 #[derive(Debug, Clone)]
@@ -416,20 +348,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_public_ip() {
-        assert!(!is_public_ip("127.0.0.1".parse().unwrap()));
-        assert!(!is_public_ip("10.0.0.1".parse().unwrap()));
-        assert!(!is_public_ip("172.16.0.1".parse().unwrap()));
-        assert!(!is_public_ip("192.168.1.1".parse().unwrap()));
+    fn confinement_predicate_is_the_shared_egress_crate() {
+        // The truth table lives in `netune-egress` (asserted there in full). What matters
+        // *here* is the wiring: `netune`'s re-export is the shared predicate, so the TCP and
+        // datagram paths cannot drift from the QUIC path. A thin sample is enough to catch a
+        // re-export that stops pointing at `netune-egress`.
+        assert!(std::ptr::fn_addr_eq(
+            is_public_ip as fn(std::net::IpAddr) -> bool,
+            netune_egress::is_public_ip as fn(std::net::IpAddr) -> bool,
+        ));
         assert!(!is_public_ip("169.254.169.254".parse().unwrap()));
-        assert!(!is_public_ip("100.64.0.1".parse().unwrap()));
-        assert!(!is_public_ip("::1".parse().unwrap()));
-        assert!(!is_public_ip("fe80::1".parse().unwrap()));
-        assert!(!is_public_ip("fc00::1".parse().unwrap()));
-
         assert!(is_public_ip("8.8.8.8".parse().unwrap()));
-        assert!(is_public_ip("1.1.1.1".parse().unwrap()));
-        assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
     }
 
     #[tokio::test]

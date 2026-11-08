@@ -6,6 +6,13 @@
 //! a handshake that never happened. Reuse is also where the previous client's
 //! behaviour was least visible — a 90 s idle eviction silently moved hundreds of
 //! milliseconds into TTFT.
+//!
+//! HTTP/1.1 and HTTP/2 are pooled as different payloads because "reuse" means
+//! different things: an HTTP/1.1 socket is bytes at a message boundary, while an
+//! HTTP/2 connection carries negotiated SETTINGS and HPACK state that a second
+//! handshake cannot recreate on the same socket. A pool that stored only the
+//! byte stream would either re-handshake an already-negotiated connection or
+//! lose the compression tables.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -16,6 +23,8 @@ use tokio::runtime::Id as RuntimeId;
 use bytes::BytesMut;
 
 use crate::connect::Transport;
+#[cfg(feature = "http2")]
+use netune_http2::H2ClientConnection;
 
 /// Pool policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,9 +56,22 @@ impl Default for PoolConfig {
     }
 }
 
-/// A connection taken from the pool, with whatever bytes it already buffered.
-pub struct IdleConnection {
+/// Which protocol an idle connection speaks.
+///
+/// A caller selecting from the pool has to say which protocols it can drive: an
+/// HTTP/2 connection cannot be handed to the HTTP/1.1 writer, and a request that
+/// mandates HTTP/2 cannot use a keep-alive socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Protocol {
+    Http1,
+    #[cfg(feature = "http2")]
+    Http2,
+}
+
+/// An idle HTTP/1.1 keep-alive socket.
+pub struct Http1Idle {
     pub stream: Box<dyn Transport>,
+    /// Bytes the peer sent after the last response, to be parsed as the next one.
     pub buffered: BytesMut,
     pub local_port: Option<u16>,
     /// Duplicate socket handle for `TCP_INFO` sampling on the next use.
@@ -58,24 +80,100 @@ pub struct IdleConnection {
     pub age: Duration,
 }
 
-struct Idle {
-    stream: Box<dyn Transport>,
-    buffered: BytesMut,
-    local_port: Option<u16>,
-    socket: Option<std::net::TcpStream>,
-    since: Instant,
-    /// The tokio runtime whose reactor registered this socket.
-    ///
-    /// A socket is not a portable resource: it is registered with the reactor
-    /// that created it, and when that runtime is dropped the registration is
-    /// marked shut down. A pool that is process-scoped — one `Client` shared by
-    /// every task, as `nuo` does — can therefore hand a dead registration to a
-    /// different runtime, which surfaces to the caller as
-    /// `RUNTIME_SHUTTING_DOWN_ERROR` ("A Tokio 1.x context was found, but it is
-    /// being shutdown"). Recording the owner turns that silent, unattributable
-    /// transport failure into a discarded candidate, and the caller pays a
-    /// handshake instead of reporting a network error that is not one.
-    runtime: Option<RuntimeId>,
+/// An established HTTP/2 connection with no stream in flight.
+#[cfg(feature = "http2")]
+pub struct Http2Idle {
+    pub connection: Box<H2ClientConnection<Box<dyn Transport>>>,
+    pub local_port: Option<u16>,
+    /// Duplicate socket handle for `TCP_INFO` sampling on the next use.
+    pub socket: Option<std::net::TcpStream>,
+    /// How long it sat idle.
+    pub age: Duration,
+}
+
+/// A connection taken from the pool.
+pub enum IdleConnection {
+    Http1(Http1Idle),
+    #[cfg(feature = "http2")]
+    Http2(Http2Idle),
+}
+
+enum Idle {
+    Http1 {
+        stream: Box<dyn Transport>,
+        buffered: BytesMut,
+        local_port: Option<u16>,
+        socket: Option<std::net::TcpStream>,
+        since: Instant,
+        runtime: Option<RuntimeId>,
+    },
+    #[cfg(feature = "http2")]
+    Http2 {
+        // Boxed: a negotiated connection carries SETTINGS and both HPACK tables,
+        // so it dwarfs the HTTP/1.1 socket variant and would otherwise inflate
+        // every entry in the idle map.
+        connection: Box<H2ClientConnection<Box<dyn Transport>>>,
+        local_port: Option<u16>,
+        socket: Option<std::net::TcpStream>,
+        since: Instant,
+        runtime: Option<RuntimeId>,
+    },
+}
+
+impl Idle {
+    const fn protocol(&self) -> Protocol {
+        match self {
+            Self::Http1 { .. } => Protocol::Http1,
+            #[cfg(feature = "http2")]
+            Self::Http2 { .. } => Protocol::Http2,
+        }
+    }
+
+    const fn since(&self) -> Instant {
+        match self {
+            Self::Http1 { since, .. } => *since,
+            #[cfg(feature = "http2")]
+            Self::Http2 { since, .. } => *since,
+        }
+    }
+
+    const fn runtime(&self) -> Option<RuntimeId> {
+        match self {
+            Self::Http1 { runtime, .. } => *runtime,
+            #[cfg(feature = "http2")]
+            Self::Http2 { runtime, .. } => *runtime,
+        }
+    }
+
+    fn into_connection(self, age: Duration) -> IdleConnection {
+        match self {
+            Self::Http1 {
+                stream,
+                buffered,
+                local_port,
+                socket,
+                ..
+            } => IdleConnection::Http1(Http1Idle {
+                stream,
+                buffered,
+                local_port,
+                socket,
+                age,
+            }),
+            #[cfg(feature = "http2")]
+            Self::Http2 {
+                connection,
+                local_port,
+                socket,
+                ..
+            } => IdleConnection::Http2(Http2Idle {
+                connection,
+                local_port,
+                socket,
+                age,
+            }),
+        }
+    }
 }
 
 /// The id of the runtime the caller is currently running on, if any.
@@ -115,36 +213,44 @@ impl Pool {
         self.inner.config
     }
 
-    /// Take a live idle connection for `authority`, if one is fresh enough and
-    /// still belongs to the calling runtime.
+    /// Take the newest live idle connection for `authority`, whatever its protocol.
     pub fn take(&self, authority: &str) -> Option<IdleConnection> {
+        self.take_matching(authority, |_| true)
+    }
+
+    /// Take the newest live idle connection whose protocol `accept` approves.
+    ///
+    /// A candidate the caller cannot drive is left in place for a request that
+    /// can; only expired entries and sockets registered with another runtime are
+    /// discarded.
+    pub(crate) fn take_matching(
+        &self,
+        authority: &str,
+        accept: impl Fn(Protocol) -> bool,
+    ) -> Option<IdleConnection> {
         let current = current_runtime_id();
         let mut idle = self.inner.idle.lock().unwrap_or_else(|e| e.into_inner());
         let entries = idle.get_mut(authority)?;
         let now = Instant::now();
-        while let Some(candidate) = entries.pop() {
-            let age = now.saturating_duration_since(candidate.since);
-            if age > self.inner.config.idle_timeout {
-                // Idle past the keep-alive window: drop it and try the next.
+        for index in (0..entries.len()).rev() {
+            let age = now.saturating_duration_since(entries[index].since());
+            // An idle socket past the keep-alive window, or one dialled by
+            // another (possibly dead) runtime, cannot be reused: its I/O
+            // registration belongs to that reactor. Drop it and keep looking.
+            if age > self.inner.config.idle_timeout || entries[index].runtime() != current {
+                entries.remove(index);
                 continue;
             }
-            // A connection dialled by another (now possibly dead) runtime cannot
-            // be read on this one: its I/O registration belongs to that reactor.
-            if candidate.runtime != current {
+            if !accept(entries[index].protocol()) {
                 continue;
             }
-            return Some(IdleConnection {
-                stream: candidate.stream,
-                buffered: candidate.buffered,
-                local_port: candidate.local_port,
-                socket: candidate.socket,
-                age,
-            });
+            let entry = entries.remove(index);
+            return Some(entry.into_connection(age));
         }
         None
     }
 
-    /// Return a connection to the pool.
+    /// Return an HTTP/1.1 keep-alive socket to the pool.
     pub fn put(
         &self,
         authority: &str,
@@ -153,6 +259,56 @@ impl Pool {
         local_port: Option<u16>,
         socket: Option<std::net::TcpStream>,
     ) {
+        self.put_http1(authority, stream, buffered, local_port, socket);
+    }
+
+    /// Return an HTTP/1.1 keep-alive socket to the pool.
+    pub fn put_http1(
+        &self,
+        authority: &str,
+        stream: Box<dyn Transport>,
+        buffered: BytesMut,
+        local_port: Option<u16>,
+        socket: Option<std::net::TcpStream>,
+    ) {
+        self.put_entry(
+            authority,
+            Idle::Http1 {
+                stream,
+                buffered,
+                local_port,
+                socket,
+                since: Instant::now(),
+                runtime: current_runtime_id(),
+            },
+        );
+    }
+
+    /// Return an established HTTP/2 connection with no stream in flight.
+    ///
+    /// The connection must have finished its exchange and must not have received
+    /// a `GOAWAY`; the caller decides that before calling this.
+    #[cfg(feature = "http2")]
+    pub fn put_http2(
+        &self,
+        authority: &str,
+        connection: H2ClientConnection<Box<dyn Transport>>,
+        local_port: Option<u16>,
+        socket: Option<std::net::TcpStream>,
+    ) {
+        self.put_entry(
+            authority,
+            Idle::Http2 {
+                connection: Box::new(connection),
+                local_port,
+                socket,
+                since: Instant::now(),
+                runtime: current_runtime_id(),
+            },
+        );
+    }
+
+    fn put_entry(&self, authority: &str, entry: Idle) {
         if self.inner.config.max_idle_per_authority == 0 {
             return;
         }
@@ -161,14 +317,7 @@ impl Pool {
         while entries.len() >= self.inner.config.max_idle_per_authority {
             entries.remove(0);
         }
-        entries.push(Idle {
-            stream,
-            buffered,
-            local_port,
-            socket,
-            since: Instant::now(),
-            runtime: current_runtime_id(),
-        });
+        entries.push(entry);
     }
 
     /// Number of idle connections retained for `authority` (tests, diagnostics).
@@ -221,6 +370,15 @@ mod tests {
         Box::new(Dummy)
     }
 
+    fn take_http1(pool: &Pool, authority: &str) -> Http1Idle {
+        match pool.take(authority) {
+            Some(IdleConnection::Http1(idle)) => idle,
+            #[cfg(feature = "http2")]
+            Some(IdleConnection::Http2(_)) => panic!("expected an HTTP/1.1 connection"),
+            None => panic!("expected an idle connection"),
+        }
+    }
+
     fn pool(max_idle: usize, idle_timeout: Duration) -> Pool {
         Pool::new(PoolConfig {
             max_idle_per_authority: max_idle,
@@ -242,7 +400,7 @@ mod tests {
         buffered.extend_from_slice(b"HTTP/1.1 200 OK\r\n");
         pool.put("example:443", idle_stream(), buffered, Some(51_234), None);
 
-        let idle = pool.take("example:443").expect("reused");
+        let idle = take_http1(&pool, "example:443");
         assert_eq!(idle.local_port, Some(51_234));
         assert_eq!(&idle.buffered[..], b"HTTP/1.1 200 OK\r\n");
         assert_eq!(pool.idle_count("example:443"), 0, "take removes it");
@@ -269,14 +427,8 @@ mod tests {
             );
         }
         assert_eq!(pool.idle_count("example:443"), 2);
-        assert_eq!(
-            pool.take("example:443").map(|i| i.local_port),
-            Some(Some(5))
-        );
-        assert_eq!(
-            pool.take("example:443").map(|i| i.local_port),
-            Some(Some(4))
-        );
+        assert_eq!(take_http1(&pool, "example:443").local_port, Some(5));
+        assert_eq!(take_http1(&pool, "example:443").local_port, Some(4));
         assert!(pool.take("example:443").is_none());
     }
 
@@ -288,6 +440,22 @@ mod tests {
         assert!(
             pool.take("example:443").is_none(),
             "an expired connection must not be handed out"
+        );
+    }
+
+    #[test]
+    fn a_candidate_the_caller_cannot_drive_is_left_in_place() {
+        let pool = pool(2, Duration::from_secs(60));
+        pool.put("example:443", idle_stream(), BytesMut::new(), None, None);
+        assert!(
+            pool.take_matching("example:443", |protocol| protocol != Protocol::Http1)
+                .is_none(),
+            "an HTTP/1.1 socket must not be handed to a caller that wants HTTP/2"
+        );
+        assert_eq!(
+            pool.idle_count("example:443"),
+            1,
+            "the rejected candidate must remain available to a compatible request"
         );
     }
 

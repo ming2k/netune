@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8] - 2026-11-08
+
+### Added
+
+- **Streamed HTTP/2 responses.** The client role exposes `H2ResponseHead`,
+  `H2ResponseEvent`, and `H2ResponseStream`: `send`/`request` now return once the
+  response `HEADERS` arrive, and the body is delivered as `Data` / `Trailers` /
+  `End` events with per-stream and connection-level flow control replenished
+  incrementally. `Client` uses this path, so an SSE generation is consumed as it
+  arrives instead of being buffered to the end of the stream.
+- **HTTP/2 connection reuse.** The pool stores negotiated HTTP/2 connections
+  alongside HTTP/1.1 keep-alive sockets and selects by protocol. A cleanly
+  finished body returns its connection for the next request, continuing the
+  stream id space instead of paying a second TLS + SETTINGS handshake. Prewarming
+  performs the HTTP/2 handshake when the negotiated protocol is `h2`.
+- **Advertised-settings enforcement.** The client's read bounds
+  (`MAX_FRAME_SIZE`, `INITIAL_WINDOW_SIZE`, `HEADER_TABLE_SIZE`, …) are now
+  derived from the `SETTINGS` it advertises, so a peer may use the limits it was
+  told it had.
+
+### Changed
+
+- HTTP/2 response bodies are decoded through the same `Content-Encoding` path as
+  HTTP/1.1, so a gzip/brotli response is no longer handed to callers still
+  compressed.
+- End-of-stream flow-control credit restores only the connection window (the
+  stream is closed) and is best-effort: a peer that hangs up after `END_STREAM`
+  cannot turn a completed response into a write error, and the connection is
+  marked non-reusable instead of pooled.
+
+### Fixed
+
+- **HTTP/2 requests no longer carry a `Host` regular header.** `Client` added
+  `Host` from the target authority for every request, including the HTTP/2 path,
+  so `:authority` and `Host` were sent together. HTTP/2 clients SHOULD name the
+  authority in `:authority` instead (RFC 9113 §8.3.1), and some origins treat
+  the pair as malformed: Google's frontend answers
+  `RST_STREAM(PROTOCOL_ERROR)` (error code 1), which surfaced as
+  `protocol error: HTTP/2 request: HTTP/2 stream 1 reset with error code 1`
+  before a response existed. The header is now added only on the HTTP/1.1 path;
+  a caller-supplied `Host` is promoted into `:authority` instead of being
+  forwarded, and regular header names from `raw_headers` are lowercased because
+  HTTP/2 requires it.
+- Transport failures while writing a request on a reused HTTP/2 connection are
+  classified as I/O errors again, so the stale-connection retry replaces the dead
+  socket instead of surfacing a protocol failure to the caller.
+
 ## [0.0.7] - 2026-11-07
 
 ### Fixed

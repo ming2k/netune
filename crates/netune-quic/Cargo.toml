@@ -11,9 +11,9 @@ readme = false
 [dependencies]
 bytes = { workspace = true }
 libc = { workspace = true }
-netune-egress = { path = "../netune-egress", version = "0.0.7" }
-netune-io = { path = "../netune-io", version = "0.0.7" }
-netune-trace = { path = "../netune-trace", version = "0.0.7" }
+netune-egress = { path = "../netune-egress", version = "0.0.8" }
+netune-io = { path = "../netune-io", version = "0.0.8" }
+netune-trace = { path = "../netune-trace", version = "0.0.8" }
 quinn = { workspace = true }
 quinn-proto = { workspace = true }
 rustls = { workspace = true }

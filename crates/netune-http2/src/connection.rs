@@ -165,6 +165,35 @@ impl LocalSettings {
         }
     }
 
+    /// The bounds implied by the `SETTINGS` a client is about to advertise.
+    ///
+    /// A `SETTINGS` frame states what this end will *accept*, so the same values
+    /// must govern what this end *enforces* while reading. Deriving both from one
+    /// list is what keeps the advertisement and the parser from disagreeing: a
+    /// client that announces a 1 MiB `MAX_FRAME_SIZE` and then rejects a 1 MiB
+    /// frame is failing its own contract, and the peer is not at fault.
+    ///
+    /// `header_table_size` is the encoder's default table size for the profile;
+    /// an explicit `HEADER_TABLE_SIZE` in `settings` takes precedence because it
+    /// is the value actually put on the wire.
+    pub fn advertised(settings: &[(u16, u32)], header_table_size: u32) -> Self {
+        let mut local = Self::for_client();
+        local.header_table_size = header_table_size;
+        for &(id, value) in settings {
+            match id {
+                SETTING_HEADER_TABLE_SIZE => local.header_table_size = value,
+                SETTING_ENABLE_PUSH => local.enable_push = value == 1,
+                SETTING_MAX_CONCURRENT_STREAMS => local.max_concurrent_streams = value,
+                SETTING_INITIAL_WINDOW_SIZE => local.initial_window_size = value,
+                SETTING_MAX_FRAME_SIZE => local.max_frame_size = value,
+                SETTING_MAX_HEADER_LIST_SIZE => local.max_header_list_size = value,
+                // Unknown identifiers are ignored, as §6.5.3 requires.
+                _ => {}
+            }
+        }
+        local
+    }
+
     /// The in-order parameter list, as it will appear on the wire.
     ///
     /// Order is a fingerprint (ADR-0006), so a caller that impersonates a browser supplies its
@@ -1047,6 +1076,25 @@ mod tests {
         assert!(local.validate().is_err());
         local.max_frame_size = MAX_MAX_FRAME_SIZE;
         assert!(local.validate().is_ok());
+    }
+
+    #[test]
+    fn advertised_settings_become_the_bounds_the_connection_enforces() {
+        // The Go fingerprint announces a 1 MiB frame limit and a 4 MiB stream
+        // window; a reader that kept the 16 KiB defaults would reject frames the
+        // peer was explicitly told it could send.
+        let settings = vec![
+            (SETTING_ENABLE_PUSH, 0),
+            (SETTING_INITIAL_WINDOW_SIZE, 4_194_304),
+            (SETTING_MAX_FRAME_SIZE, 1_048_576),
+            (SETTING_MAX_HEADER_LIST_SIZE, 10_485_760),
+        ];
+        let local = LocalSettings::advertised(&settings, 4096);
+        assert_eq!(local.initial_window_size, 4_194_304);
+        assert_eq!(local.max_frame_size, 1_048_576);
+        assert_eq!(local.max_header_list_size, 10_485_760);
+        assert!(!local.enable_push);
+        assert_eq!(local.header_table_size, 4096);
     }
 
     #[test]

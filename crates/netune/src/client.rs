@@ -18,13 +18,13 @@ use http::HeaderMap;
 use http::{Method, StatusCode};
 use netune_http1::{BodyKind, Http1Reader, IncomingResponse, Limits, RequestHead, write_request};
 #[cfg(feature = "http2")]
-use netune_http2::{H2ClientConnection, H2Fingerprint};
+use netune_http2::{H2ClientConnection, H2Fingerprint, H2ResponseEvent, H2ResponseStream};
 use netune_trace::{Alpn, EventKind, Recorder};
 
 use crate::connect::{Connector, Target};
 use crate::decompress::Decoder;
 use crate::error::NetError;
-use crate::pool::Pool;
+use crate::pool::{IdleConnection, Pool, Protocol};
 use crate::tcp_info::{SAMPLE_INTERVAL, Sampler, start as start_sampler};
 use netune_io::TimedIo;
 
@@ -42,6 +42,75 @@ fn h2_fingerprint_for(profile: Option<&str>) -> H2Fingerprint {
         Some("firefox-current") => H2Fingerprint::firefox(),
         Some("antigravity-cli") => H2Fingerprint::go(),
         _ => H2Fingerprint::chrome(),
+    }
+}
+
+/// Split a request head into the HTTP/2 authority and its regular headers.
+///
+/// HTTP/2 carries the target authority in `:authority`; a client that generates
+/// HTTP/2 requests directly SHOULD use that instead of `Host` (RFC 9113
+/// §8.3.1). Some origins enforce the reading strictly: Google's frontend
+/// answers a request carrying both with `RST_STREAM(PROTOCOL_ERROR)` (error
+/// code 1), which surfaces as a request failure before a response exists. A
+/// caller that set `Host` chose an authority, so it is promoted into
+/// `:authority` rather than forwarded.
+///
+/// Regular header names are lowercased because HTTP/2 requires lowercase
+/// names, even when `raw_headers` preserved caller casing for an HTTP/1.1
+/// fingerprint.
+#[cfg(feature = "http2")]
+fn h2_request_parts(
+    head: &RequestHead,
+    fallback_authority: &str,
+) -> (String, Vec<(String, String)>) {
+    let mut authority: Option<String> = None;
+    let mut headers = Vec::new();
+    match &head.raw_headers {
+        Some(raw) => {
+            for (name, value) in raw {
+                if name.eq_ignore_ascii_case("host") {
+                    authority.get_or_insert_with(|| value.clone());
+                } else {
+                    headers.push((name.to_ascii_lowercase(), value.clone()));
+                }
+            }
+        }
+        None => {
+            for (name, value) in head.headers.iter() {
+                if name == http::header::HOST {
+                    if let Ok(value) = value.to_str() {
+                        authority.get_or_insert_with(|| value.to_string());
+                    }
+                } else {
+                    headers.push((
+                        name.as_str().to_string(),
+                        value.to_str().unwrap_or_default().to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    (
+        authority.unwrap_or_else(|| fallback_authority.to_string()),
+        headers,
+    )
+}
+
+/// Map an HTTP/2 codec failure onto the transport's error taxonomy.
+///
+/// The distinction matters: a socket that died while no response head existed
+/// yet is a *stale pooled connection*, and [`NetError::is_stale_connection`]
+/// decides whether the attempt may be safely replayed. Reporting every codec
+/// failure as [`NetError::Protocol`] would turn a recycled-but-dead HTTP/2
+/// connection into a user-visible provider failure.
+#[cfg(feature = "http2")]
+fn h2_error(context: &str, error: netune_http2::H2Error) -> NetError {
+    match error {
+        netune_http2::H2Error::Io(error) => NetError::Io(error),
+        netune_http2::H2Error::UnexpectedEof => {
+            NetError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+        }
+        other => NetError::Protocol(format!("HTTP/2 {context}: {other}")),
     }
 }
 
@@ -94,13 +163,29 @@ impl<C: Connector> Client<C> {
     /// zero connection overhead (instant warm-pool hit). Returns `true` if a fresh
     /// connection was opened, or `false` if an idle connection was already available.
     pub async fn prewarm(&self, target: &Target) -> Result<bool, NetError> {
-        if self.pool.idle_count(&Self::pool_key(target)) > 0 {
+        let key = Self::pool_key(target);
+        if self.pool.idle_count(&key) > 0 {
             return Ok(false);
         }
         let recorder = Arc::new(Mutex::new(Recorder::start(crate::DEFAULT_TRACE_CAPACITY)));
         let established = self.connector.connect(target, &recorder).await?;
-        self.pool.put(
-            &Self::pool_key(target),
+
+        // Warm the connection in the protocol the next request will actually
+        // use; pooling an already-negotiated HTTP/2 socket as if it were
+        // HTTP/1.1 would hand it to the wrong writer.
+        #[cfg(feature = "http2")]
+        if target.force_h2 || (self.config.enable_http2 && established.alpn == Some(Alpn::H2)) {
+            let fp = h2_fingerprint_for(target.tls_profile.as_deref());
+            let h2 = H2ClientConnection::handshake(established.stream, fp)
+                .await
+                .map_err(|error| h2_error("handshake", error))?;
+            self.pool
+                .put_http2(&key, h2, established.local_port, established.socket);
+            return Ok(true);
+        }
+
+        self.pool.put_http1(
+            &key,
             established.stream,
             BytesMut::new(),
             established.local_port,
@@ -426,7 +511,28 @@ impl<C: Connector> Client<C> {
         // response head was parsed, on a connection this attempt took from the
         // pool: the request provably had not reached the origin, so re-sending
         // it cannot duplicate a side effect.
-        let mut recycled = self.pool.take(&Self::pool_key(target));
+        // Prefer a pooled connection already speaking the protocol this client
+        // wants, and never hand an HTTP/2 connection to the HTTP/1.1 writer (or
+        // a keep-alive socket to a request that mandates HTTP/2).
+        let key = Self::pool_key(target);
+        #[cfg(feature = "http2")]
+        let prefer_http2 = self.config.enable_http2 || target.force_h2;
+
+        #[cfg(feature = "http2")]
+        let mut recycled = if prefer_http2 {
+            self.pool
+                .take_matching(&key, |protocol| protocol == Protocol::Http2)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "http2"))]
+        let mut recycled = None;
+
+        if recycled.is_none() && !target.force_h2 {
+            recycled = self
+                .pool
+                .take_matching(&key, |protocol| protocol == Protocol::Http1);
+        }
         loop {
             let reused = recycled.is_some();
             let attempt = self
@@ -457,7 +563,7 @@ impl<C: Connector> Client<C> {
         recorder: Arc<Mutex<Recorder>>,
         head: &RequestHead,
         body: &Option<Bytes>,
-        recycled: Option<crate::pool::IdleConnection>,
+        recycled: Option<IdleConnection>,
     ) -> Result<Response, NetError> {
         let mut head = head.clone();
         if !head.headers.contains_key(http::header::USER_AGENT) {
@@ -467,141 +573,127 @@ impl<C: Connector> Client<C> {
                     .unwrap_or_else(|_| http::HeaderValue::from_static("netune")),
             );
         }
-        if !head.headers.contains_key(http::header::HOST)
-            && let Ok(value) = http::HeaderValue::from_str(&target.authority)
-        {
-            head.headers.insert(http::header::HOST, value);
-        }
 
         let pool_key = Self::pool_key(target);
-        let (stream, buffered, local_port, socket, alpn) = match recycled {
-            Some(idle) => {
-                let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-                // One event, carrying the idle age: `derive` and every surface
-                // read reuse through `first_of(ConnectReused)`, so a preceding
-                // age-less duplicate would make the age recorded here unreadable.
-                recorder.mark(EventKind::ConnectReused, idle.age.as_millis() as u32, 0);
-                (
-                    idle.stream,
-                    idle.buffered,
-                    idle.local_port,
-                    idle.socket,
-                    None,
-                )
-            }
-            None => {
-                let established = self.connector.connect(target, &recorder).await?;
-                (
-                    established.stream,
-                    BytesMut::new(),
-                    established.local_port,
-                    established.socket,
-                    established.alpn,
-                )
-            }
-        };
 
-        // If target mandated H2 or ALPN negotiated h2 and auto-upgrade is enabled.
-        //
-        // Without the `http2` feature this branch fails closed instead of falling
-        // back to HTTP/1.1: a caller that mandated H2, or an upstream that only
+        // A pooled connection already speaks a protocol. Drive it with the role
+        // that protocol requires; a connection the request cannot use is dropped
+        // and a fresh one is dialled.
+        if let Some(recycled) = recycled {
+            match recycled {
+                IdleConnection::Http1(idle) if !target.force_h2 => {
+                    {
+                        let mut rec = recorder.lock().unwrap_or_else(|e| e.into_inner());
+                        // One event, carrying the idle age: `derive` and every
+                        // surface read reuse through `first_of(ConnectReused)`.
+                        rec.mark(EventKind::ConnectReused, idle.age.as_millis() as u32, 0);
+                    }
+                    return self
+                        .send_http1(
+                            idle.stream,
+                            idle.buffered,
+                            idle.local_port,
+                            idle.socket,
+                            recorder,
+                            head,
+                            body,
+                            target,
+                            pool_key,
+                        )
+                        .await;
+                }
+                #[cfg(feature = "http2")]
+                IdleConnection::Http2(idle) if self.config.enable_http2 || target.force_h2 => {
+                    {
+                        let mut rec = recorder.lock().unwrap_or_else(|e| e.into_inner());
+                        rec.mark(EventKind::ConnectReused, idle.age.as_millis() as u32, 0);
+                    }
+                    return self
+                        .send_http2(
+                            *idle.connection,
+                            idle.local_port,
+                            idle.socket,
+                            recorder,
+                            head,
+                            body,
+                            target,
+                            pool_key,
+                        )
+                        .await;
+                }
+                // A protocol this request cannot drive: discard it and dial.
+                IdleConnection::Http1(_) => {}
+                #[cfg(feature = "http2")]
+                IdleConnection::Http2(_) => {}
+            }
+        }
+
+        let established = self.connector.connect(target, &recorder).await?;
+
+        // Without the `http2` feature this fails closed instead of falling back
+        // to HTTP/1.1: a caller that mandated H2, or an upstream that only
         // negotiated `h2` over ALPN, must not be handed a downgraded request.
         #[cfg(not(feature = "http2"))]
-        if target.force_h2 || alpn == Some(Alpn::H2) {
+        if target.force_h2 || established.alpn == Some(Alpn::H2) {
             return Err(NetError::Protocol(
                 "HTTP/2 was requested but the `http2` feature is not compiled in".into(),
             ));
         }
 
         #[cfg(feature = "http2")]
-        if target.force_h2 || (self.config.enable_http2 && alpn == Some(Alpn::H2)) {
+        if target.force_h2 || (self.config.enable_http2 && established.alpn == Some(Alpn::H2)) {
             let fp = h2_fingerprint_for(target.tls_profile.as_deref());
-
-            let scheme = if target.tls_server_name.is_some() {
-                "https"
-            } else {
-                "http"
-            };
-            let authority = &target.authority;
-
-            let mut h2 = H2ClientConnection::handshake(stream, fp)
+            let h2 = H2ClientConnection::handshake(established.stream, fp)
                 .await
-                .map_err(|e| NetError::Protocol(format!("HTTP/2 handshake: {e}")))?;
-
-            let extra_headers: Vec<(String, String)> =
-                head.raw_headers.clone().unwrap_or_else(|| {
-                    head.headers
-                        .iter()
-                        .map(|(k, v)| {
-                            (
-                                k.as_str().to_string(),
-                                v.to_str().unwrap_or_default().to_string(),
-                            )
-                        })
-                        .collect()
-                });
-
-            {
-                let mut rec = recorder.lock().unwrap_or_else(|e| e.into_inner());
-                rec.mark(EventKind::RequestWriteStart, 0, 0);
-            }
-
-            let h2_resp = h2
-                .request(
-                    head.method.as_str(),
-                    authority,
-                    scheme,
-                    &head.target,
-                    &extra_headers,
-                    body.as_deref(),
-                )
-                .await
-                .map_err(|e| NetError::Protocol(format!("HTTP/2 request: {e}")))?;
-
-            {
-                let mut rec = recorder.lock().unwrap_or_else(|e| e.into_inner());
-                rec.mark(EventKind::RequestWriteEnd, h2_resp.body.len() as u32, 0);
-            }
-
-            let status = StatusCode::from_u16(h2_resp.status).unwrap_or(StatusCode::OK);
-            let mut hmap = HeaderMap::new();
-            for (k, v) in h2_resp.headers {
-                if let (Ok(name), Ok(val)) = (
-                    http::header::HeaderName::try_from(k.as_str()),
-                    http::header::HeaderValue::try_from(v.as_str()),
-                ) {
-                    hmap.append(name, val);
-                }
-            }
-
-            let response_head = IncomingResponse {
-                version: http::Version::HTTP_2,
-                status,
-                headers: hmap,
-                body: BodyKind::Length(h2_resp.body.len() as u64),
-            };
-
-            return Ok(Response {
-                head: response_head,
-                body: BodyStream {
-                    reader: None,
-                    direct: Some(h2_resp.body),
+                .map_err(|error| h2_error("handshake", error))?;
+            return self
+                .send_http2(
+                    h2,
+                    established.local_port,
+                    established.socket,
                     recorder,
-                    pool: self.pool.clone(),
+                    head,
+                    body,
+                    target,
                     pool_key,
-                    authority: target.authority.clone(),
-                    local_port,
-                    reusable: false,
-                    started: false,
-                    finished: false,
-                    sampler: None,
-                    socket,
-                    decoder: Decoder::Identity,
-                    decoded: 0,
-                    max_decoded: self.config.limits.max_body_bytes,
-                },
-            });
+                )
+                .await;
         }
+
+        self.send_http1(
+            established.stream,
+            BytesMut::new(),
+            established.local_port,
+            established.socket,
+            recorder,
+            head,
+            body,
+            target,
+            pool_key,
+        )
+        .await
+    }
+
+    /// Write the request over HTTP/1.1 and return its streaming response.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_http1(
+        &self,
+        stream: Box<dyn crate::connect::Transport>,
+        buffered: BytesMut,
+        local_port: Option<u16>,
+        socket: Option<std::net::TcpStream>,
+        recorder: Arc<Mutex<Recorder>>,
+        mut head: RequestHead,
+        body: &Option<Bytes>,
+        target: &Target,
+        pool_key: String,
+    ) -> Result<Response, NetError> {
+        if !head.headers.contains_key(http::header::HOST)
+            && let Ok(value) = http::HeaderValue::from_str(&target.authority)
+        {
+            head.headers.insert(http::header::HOST, value);
+        }
+
         // Sample the socket for as long as this request is in flight. The
         // sampler gets its own duplicate handle; `socket` travels with the body
         // stream so the pool can be handed a live handle when it is released.
@@ -641,13 +733,119 @@ impl<C: Connector> Client<C> {
             head: response_head,
             body: BodyStream {
                 reader: Some(reader),
-                direct: None,
+                #[cfg(feature = "http2")]
+                h2: None,
                 recorder,
                 pool: self.pool.clone(),
                 pool_key,
                 authority: target.authority.clone(),
                 local_port,
                 reusable,
+                started: false,
+                finished: false,
+                sampler,
+                socket,
+                decoder,
+                decoded: 0,
+                max_decoded: self.config.limits.max_body_bytes,
+            },
+        })
+    }
+
+    /// Write the request over HTTP/2 and return its streaming response.
+    #[cfg(feature = "http2")]
+    #[allow(clippy::too_many_arguments)]
+    async fn send_http2(
+        &self,
+        mut h2: H2ClientConnection<Box<dyn crate::connect::Transport>>,
+        local_port: Option<u16>,
+        socket: Option<std::net::TcpStream>,
+        recorder: Arc<Mutex<Recorder>>,
+        head: RequestHead,
+        body: &Option<Bytes>,
+        target: &Target,
+        pool_key: String,
+    ) -> Result<Response, NetError> {
+        let scheme = if target.tls_server_name.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        let (authority, extra_headers) = h2_request_parts(&head, &target.authority);
+
+        {
+            let mut rec = recorder.lock().unwrap_or_else(|e| e.into_inner());
+            rec.mark(EventKind::RequestWriteStart, 0, 0);
+        }
+        let stream_id = h2
+            .start_request(
+                head.method.as_str(),
+                &authority,
+                scheme,
+                &head.target,
+                &extra_headers,
+                body.as_deref(),
+            )
+            .await
+            .map_err(|error| h2_error("request", error))?;
+        {
+            let mut rec = recorder.lock().unwrap_or_else(|e| e.into_inner());
+            let written = body.as_ref().map_or(0, |body| body.len()) as u32;
+            rec.mark(EventKind::RequestWriteEnd, written, 0);
+        }
+
+        let response = h2
+            .read_response_head(stream_id)
+            .await
+            .map_err(|error| h2_error("request", error))?;
+        let stream = h2.into_response_stream(stream_id, &response);
+
+        let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK);
+        let mut headers = HeaderMap::new();
+        for (name, value) in response.headers {
+            if let (Ok(name), Ok(value)) = (
+                http::header::HeaderName::try_from(name.as_str()),
+                http::header::HeaderValue::try_from(value.as_str()),
+            ) {
+                headers.append(name, value);
+            }
+        }
+
+        let decoder = Decoder::from_encoding(
+            headers
+                .get(http::header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+        )?;
+        if !matches!(decoder, Decoder::Identity) {
+            headers.remove(http::header::CONTENT_ENCODING);
+        }
+        let body_kind = headers
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .map_or(BodyKind::Chunked, BodyKind::Length);
+
+        let sampler = socket.as_ref().and_then(|socket| {
+            crate::tcp_info::duplicate(socket)
+                .map(|clone| start_sampler(clone, Arc::clone(&recorder), SAMPLE_INTERVAL))
+        });
+
+        Ok(Response {
+            head: IncomingResponse {
+                version: http::Version::HTTP_2,
+                status,
+                headers,
+                body: body_kind,
+            },
+            body: BodyStream {
+                reader: None,
+                h2: Some(stream),
+                recorder,
+                pool: self.pool.clone(),
+                pool_key,
+                authority: target.authority.clone(),
+                local_port,
+                reusable: true,
                 started: false,
                 finished: false,
                 sampler,
@@ -782,7 +980,8 @@ pub struct Response {
 /// boundaries and completion.
 pub struct BodyStream {
     reader: Option<Http1Reader<TimedIo<Box<dyn crate::connect::Transport>>>>,
-    direct: Option<Bytes>,
+    #[cfg(feature = "http2")]
+    h2: Option<H2ResponseStream<Box<dyn crate::connect::Transport>>>,
     recorder: Arc<Mutex<Recorder>>,
     pool: Pool,
     pool_key: String,
@@ -805,66 +1004,75 @@ pub struct BodyStream {
 impl BodyStream {
     /// Read the next decoded body bytes, or `None` at the end of the body.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, NetError> {
-        if let Some(direct) = self.direct.take() {
+        loop {
+            let Some(raw) = self.read_raw_chunk().await? else {
+                let mut tail = Vec::new();
+                self.decoder.finish(&mut tail)?;
+                {
+                    let mut recorder = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
+                    recorder.mark(EventKind::BodyEnd, 0, 0);
+                }
+                self.finished = true;
+                self.release();
+                return Ok(if tail.is_empty() {
+                    None
+                } else {
+                    Some(Bytes::from(tail))
+                });
+            };
+
+            let mut decoded = Vec::new();
+            self.decoder.push(&raw, &mut decoded)?;
+            self.decoded = self.decoded.saturating_add(decoded.len() as u64);
+            if self.decoded > self.max_decoded {
+                return Err(NetError::Decode(
+                    "decoded body exceeded the configured limit".into(),
+                ));
+            }
             let mut recorder = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
             if !self.started {
                 recorder.mark(EventKind::BodyStart, 0, 0);
                 self.started = true;
             }
-            if !direct.is_empty() {
-                recorder.mark(EventKind::ChunkBoundary, direct.len() as u32, 0);
+            if !decoded.is_empty() {
+                recorder.mark(EventKind::ChunkBoundary, decoded.len() as u32, 0);
             }
-            recorder.mark(EventKind::BodyEnd, direct.len() as u32, 0);
-            self.finished = true;
-            return Ok(Some(direct));
+            drop(recorder);
+            if !decoded.is_empty() {
+                return Ok(Some(Bytes::from(decoded)));
+            }
+            // The decoder consumed the raw bytes without producing output (a
+            // header, or a partial frame): keep reading.
         }
+    }
 
-        loop {
-            let Some(reader) = self.reader.as_mut() else {
-                return Ok(None);
-            };
-            match reader.read_body_chunk().await? {
-                Some(raw) => {
-                    let mut decoded = Vec::new();
-                    self.decoder.push(&raw, &mut decoded)?;
-                    self.decoded = self.decoded.saturating_add(decoded.len() as u64);
-                    if self.decoded > self.max_decoded {
-                        return Err(NetError::Decode(
-                            "decoded body exceeded the configured limit".into(),
-                        ));
+    /// Read the next raw (still `Content-Encoding`-encoded) body chunk.
+    async fn read_raw_chunk(&mut self) -> Result<Option<Bytes>, NetError> {
+        if let Some(reader) = self.reader.as_mut() {
+            return reader.read_body_chunk().await.map_err(NetError::from);
+        }
+        #[cfg(feature = "http2")]
+        if let Some(h2) = self.h2.as_mut() {
+            loop {
+                match h2
+                    .next_event()
+                    .await
+                    .map_err(|error| h2_error("body", error))?
+                {
+                    H2ResponseEvent::Data { payload, .. } => {
+                        if payload.is_empty() {
+                            continue;
+                        }
+                        return Ok(Some(payload));
                     }
-                    let mut recorder = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
-                    if !self.started {
-                        recorder.mark(EventKind::BodyStart, 0, 0);
-                        self.started = true;
-                    }
-                    if !decoded.is_empty() {
-                        recorder.mark(EventKind::ChunkBoundary, decoded.len() as u32, 0);
-                    }
-                    drop(recorder);
-                    if !decoded.is_empty() {
-                        return Ok(Some(Bytes::from(decoded)));
-                    }
-                    // The decoder consumed the raw bytes without producing
-                    // output (a header, or a partial frame): keep reading.
-                }
-                None => {
-                    let mut tail = Vec::new();
-                    self.decoder.finish(&mut tail)?;
-                    {
-                        let mut recorder = self.recorder.lock().unwrap_or_else(|e| e.into_inner());
-                        recorder.mark(EventKind::BodyEnd, 0, 0);
-                    }
-                    self.finished = true;
-                    self.release();
-                    return Ok(if tail.is_empty() {
-                        None
-                    } else {
-                        Some(Bytes::from(tail))
-                    });
+                    // The trailer block ends the stream; the next call returns
+                    // `End`, which is where the body is released.
+                    H2ResponseEvent::Trailers(_) => continue,
+                    H2ResponseEvent::End => return Ok(None),
                 }
             }
         }
+        Ok(None)
     }
 
     /// Drain the body.
@@ -916,21 +1124,65 @@ impl BodyStream {
     /// Return the connection to the pool when the body is done and the peer
     /// allows reuse. Idempotent.
     pub fn release(&mut self) {
-        let Some(reader) = self.reader.take() else {
-            return;
-        };
-        let (io, buffered) = reader.into_inner();
-        let stream = io.into_inner();
-        // Stop sampling before the connection goes idle.
-        drop(self.sampler.take());
-        if self.finished && self.reusable {
-            self.pool.put(
-                &self.pool_key,
-                stream,
-                buffered,
-                self.local_port,
-                self.socket.take(),
-            );
+        if let Some(reader) = self.reader.take() {
+            let (io, buffered) = reader.into_inner();
+            let stream = io.into_inner();
+            // Stop sampling before the connection goes idle.
+            drop(self.sampler.take());
+            if self.finished && self.reusable {
+                self.pool.put_http1(
+                    &self.pool_key,
+                    stream,
+                    buffered,
+                    self.local_port,
+                    self.socket.take(),
+                );
+            }
         }
+        #[cfg(feature = "http2")]
+        if let Some(h2) = self.h2.take() {
+            drop(self.sampler.take());
+            // `into_connection` reports whether the stream ended cleanly and the
+            // peer did not send GOAWAY: only then may the connection be reused.
+            if let Some((connection, reusable)) = h2.into_connection()
+                && self.finished
+                && reusable
+            {
+                self.pool.put_http2(
+                    &self.pool_key,
+                    connection,
+                    self.local_port,
+                    self.socket.take(),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "http2"))]
+mod h2_tests {
+    use super::*;
+
+    #[test]
+    fn a_host_header_becomes_the_authority_instead_of_a_regular_field() {
+        let head = RequestHead::new(Method::GET, "/v1").with_header("host", "override.example");
+        let (authority, headers) = h2_request_parts(&head, "target.example");
+        assert_eq!(authority, "override.example");
+        assert!(headers.iter().all(|(name, _)| name != "host"));
+    }
+
+    #[test]
+    fn without_a_host_header_the_target_authority_is_used() {
+        let head = RequestHead::new(Method::GET, "/v1");
+        let (authority, headers) = h2_request_parts(&head, "target.example");
+        assert_eq!(authority, "target.example");
+        assert!(headers.iter().all(|(name, _)| name != "host"));
+    }
+
+    #[test]
+    fn raw_header_casing_is_lowered_for_http2() {
+        let head = RequestHead::new(Method::GET, "/v1").with_raw_header("X-Trace-Id", "abc");
+        let (_, headers) = h2_request_parts(&head, "target.example");
+        assert_eq!(headers, vec![("x-trace-id".to_string(), "abc".to_string())]);
     }
 }

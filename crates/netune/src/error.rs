@@ -23,6 +23,12 @@ pub enum NetError {
     Security(String),
     /// A higher-level protocol negotiation or framing failure (e.g. HTTP/2 error).
     Protocol(String),
+    /// A protocol-level refusal delivered *before* the request was processed
+    /// (HTTP/2 `GOAWAY` covering only earlier streams, or `REFUSED_STREAM`).
+    ///
+    /// Distinct from [`Self::Protocol`] because replaying it on a fresh
+    /// connection is safe: the peer has told us it did not process this stream.
+    RetryableProtocol(String),
 }
 
 impl NetError {
@@ -37,7 +43,7 @@ impl NetError {
             Self::Decode(_) => "decode",
             Self::TooManyRedirects(_) => "redirect",
             Self::Security(_) => "security",
-            Self::Protocol(_) => "protocol",
+            Self::Protocol(_) | Self::RetryableProtocol(_) => "protocol",
         }
     }
 
@@ -52,6 +58,7 @@ impl NetError {
         match self {
             Self::Resolve(_) | Self::Connect(_) | Self::Io(_) => true,
             Self::Http(error) => error.is_retryable(),
+            Self::RetryableProtocol(_) => true,
             Self::UnsupportedEncoding(_)
             | Self::Decode(_)
             | Self::TooManyRedirects(_)
@@ -106,6 +113,10 @@ impl NetError {
             // so one physical event cannot be treated differently depending on
             // which shape it surfaced as.
             Self::Http(HttpError::Incomplete(_)) => true,
+            // A peer that refuses the stream before processing it is telling us
+            // replay is safe; the socket itself is alive, but a fresh connection
+            // is the only way to make progress.
+            Self::RetryableProtocol(_) => true,
             _ => false,
         }
     }
@@ -125,6 +136,7 @@ impl std::fmt::Display for NetError {
             Self::TooManyRedirects(limit) => write!(f, "more than {limit} redirects"),
             Self::Security(what) => write!(f, "security policy: {what}"),
             Self::Protocol(what) => write!(f, "protocol error: {what}"),
+            Self::RetryableProtocol(what) => write!(f, "retryable protocol error: {what}"),
         }
     }
 }

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9] - 2026-11-08
+
+### Fixed
+
+- **A draining HTTP/2 connection is replaced instead of failing the request.**
+  When a pooled connection receives `GOAWAY` (covering only earlier streams) or
+  `RST_STREAM(REFUSED_STREAM)` before the response head, the peer has said it did
+  not process this stream. That is now `NetError::RetryableProtocol`, so the
+  attempt is replayed on a fresh connection — transparently when the connection
+  came from the pool, and through the caller's retry policy otherwise. Refusals
+  after the response head remain non-retryable: the peer may already have
+  processed the request.
+
 ## [0.0.8] - 2026-11-08
 
 ### Added

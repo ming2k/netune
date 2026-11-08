@@ -105,10 +105,26 @@ fn h2_request_parts(
 /// connection into a user-visible provider failure.
 #[cfg(feature = "http2")]
 fn h2_error(context: &str, error: netune_http2::H2Error) -> NetError {
+    use netune_http2::error_code;
     match error {
         netune_http2::H2Error::Io(error) => NetError::Io(error),
         netune_http2::H2Error::UnexpectedEof => {
             NetError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+        }
+        // Before the response head, both of these say the peer did not process
+        // this stream: a fresh connection may replay it safely. They are not
+        // `Protocol`: a pooled HTTP/2 connection that starts draining must not
+        // turn into a user-visible generation failure.
+        netune_http2::H2Error::GoAway { error_code, .. } if context == "request" => {
+            NetError::RetryableProtocol(format!(
+                "HTTP/2 {context}: peer closed with GOAWAY (error code {error_code})"
+            ))
+        }
+        netune_http2::H2Error::StreamReset {
+            stream_id,
+            error_code,
+        } if context == "request" && error_code == error_code::REFUSED_STREAM => {
+            NetError::RetryableProtocol(format!("HTTP/2 {context}: stream {stream_id} was refused"))
         }
         other => NetError::Protocol(format!("HTTP/2 {context}: {other}")),
     }
@@ -1184,5 +1200,40 @@ mod h2_tests {
         let head = RequestHead::new(Method::GET, "/v1").with_raw_header("X-Trace-Id", "abc");
         let (_, headers) = h2_request_parts(&head, "target.example");
         assert_eq!(headers, vec![("x-trace-id".to_string(), "abc".to_string())]);
+    }
+
+    #[test]
+    fn a_refusal_before_the_head_is_replayable_on_a_fresh_connection() {
+        let goaway = h2_error(
+            "request",
+            netune_http2::H2Error::GoAway {
+                error_code: 0,
+                debug_data: Vec::new(),
+            },
+        );
+        assert!(goaway.is_stale_connection());
+        assert!(goaway.is_retryable());
+
+        let refused = h2_error(
+            "request",
+            netune_http2::H2Error::StreamReset {
+                stream_id: 1,
+                error_code: netune_http2::error_code::REFUSED_STREAM,
+            },
+        );
+        assert!(refused.is_stale_connection());
+        assert!(refused.is_retryable());
+
+        // A reset or GOAWAY after the response head belongs to a stream the peer
+        // may already have processed; it must not be replayed transparently.
+        let after_head = h2_error(
+            "body",
+            netune_http2::H2Error::StreamReset {
+                stream_id: 1,
+                error_code: netune_http2::error_code::REFUSED_STREAM,
+            },
+        );
+        assert!(!after_head.is_stale_connection());
+        assert!(!after_head.is_retryable());
     }
 }

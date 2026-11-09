@@ -89,6 +89,7 @@ impl H3Server {
         let server_config = netune_quic::owned::ServerConfigOwned {
             tls: Arc::new(tls),
             transport,
+            retry: true,
         };
         let endpoint =
             netune_quic::owned::Endpoint::server(address.to_string().as_str(), server_config)

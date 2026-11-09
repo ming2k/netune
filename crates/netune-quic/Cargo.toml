@@ -9,6 +9,7 @@ license.workspace = true
 readme = false
 
 [dependencies]
+aws-lc-rs = { workspace = true }
 bytes = { workspace = true }
 netune-egress = { path = "../netune-egress", version = "0.0.10" }
 netune-trace = { path = "../netune-trace", version = "0.0.10" }

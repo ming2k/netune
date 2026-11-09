@@ -11,16 +11,17 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
-use rustls::Side;
-use rustls::quic::{KeyChange, Keys};
+use rustls::pki_types::ServerName;
+use rustls::quic::{KeyChange, Keys, PacketKey, Secrets};
+use rustls::{ClientConfig, Side};
 
 use crate::crypto::{
-    TlsSession, initial_keys, long_header_info, protect_long, protect_short, unprotect_long,
-    unprotect_short,
+    TlsSession, decode_retry, initial_keys_for_version, long_header_info, protect_long,
+    protect_short, unprotect_long, unprotect_short_with,
 };
 use crate::error::QuicError;
 use crate::wire::frame::{AckFrame, AckRange, Frame};
-use crate::wire::packet::{LongPacket, LongType, ShortPacket, VERSION_1};
+use crate::wire::packet::{LongPacket, LongType, ShortPacket, VersionNegotiation};
 use crate::wire::transport_parameters::TransportParameters;
 
 /// The three QUIC packet-number spaces.
@@ -82,6 +83,7 @@ struct RecvState {
     read: u64,
     fin: Option<u64>,
     max_data: u64,
+    window: u64,
     consumed: u64,
     stopped: bool,
 }
@@ -89,6 +91,14 @@ struct RecvState {
 struct Stream {
     send: Option<SendState>,
     recv: Option<RecvState>,
+}
+
+struct OneRttKeys {
+    secrets: Secrets,
+    key_phase: bool,
+    next_local: Option<Box<dyn PacketKey>>,
+    next_remote: Option<Box<dyn PacketKey>>,
+    previous_remote: Option<Box<dyn PacketKey>>,
 }
 
 struct SentPacket {
@@ -121,6 +131,8 @@ pub(crate) struct Core {
     send_max_data: u64,
     send_data: u64,
     recv_data: u64,
+    local_max_data: u64,
+    recv_consumed: u64,
     send_level: Level,
     read_level: Level,
     established: bool,
@@ -143,17 +155,45 @@ pub(crate) struct Core {
     bytes_in_flight: u64,
     peer_opened_bidi: u64,
     peer_opened_uni: u64,
+    peer_reset_token: Option<[u8; 16]>,
+    one_rtt: Option<OneRttKeys>,
+    one_rtt_packets: u64,
+    client_config: Option<std::sync::Arc<ClientConfig>>,
+    server_name: Option<ServerName<'static>>,
+    client_tp: TransportParameters,
+    initial_token: Vec<u8>,
+    initial_odcid: Vec<u8>,
+    retried: bool,
+    retry_source_cid: Option<Vec<u8>>,
+    version: u32,
+    supported_versions: Vec<u32>,
 }
 
 impl Core {
     /// Create a client core. The first ClientHello is queued by `poll_transmit`.
     pub(crate) fn client(
-        tls: TlsSession,
+        client_config: std::sync::Arc<ClientConfig>,
+        server_name: ServerName<'static>,
         original_dcid: Vec<u8>,
         local_cid: Vec<u8>,
         local_tp: TransportParameters,
+        version: u32,
+        supported_versions: Vec<u32>,
     ) -> Result<Self, QuicError> {
-        let initial = initial_keys(&original_dcid, Side::Client)?;
+        let initial = initial_keys_for_version(&original_dcid, Side::Client, version)?;
+        let local_max_data = local_tp.initial_max_data.unwrap_or(0);
+        let client_tp = local_tp.clone();
+        let initial_odcid = original_dcid.clone();
+        let encoded_tp = local_tp
+            .encode()
+            .map_err(|error| QuicError::Protocol(error.to_string()))?
+            .to_vec();
+        let tls = TlsSession::client_with_version(
+            client_config.clone(),
+            server_name.clone(),
+            encoded_tp,
+            version,
+        )?;
         let mut core = Self {
             side: Side::Client,
             tls,
@@ -179,6 +219,8 @@ impl Core {
             send_max_data: 0,
             send_data: 0,
             recv_data: 0,
+            local_max_data,
+            recv_consumed: 0,
             send_level: Level::Initial,
             read_level: Level::Initial,
             established: false,
@@ -201,6 +243,18 @@ impl Core {
             bytes_in_flight: 0,
             peer_opened_bidi: 0,
             peer_opened_uni: 0,
+            peer_reset_token: None,
+            one_rtt: None,
+            one_rtt_packets: 0,
+            client_config: Some(client_config),
+            server_name: Some(server_name),
+            client_tp,
+            initial_token: Vec::new(),
+            initial_odcid,
+            retried: false,
+            retry_source_cid: None,
+            version,
+            supported_versions,
         };
         core.drain_tls()?;
         Ok(core)
@@ -212,8 +266,11 @@ impl Core {
         original_dcid: Vec<u8>,
         local_cid: Vec<u8>,
         local_tp: TransportParameters,
+        version: u32,
     ) -> Result<Self, QuicError> {
-        let initial = initial_keys(&original_dcid, Side::Server)?;
+        let initial = initial_keys_for_version(&original_dcid, Side::Server, version)?;
+        let local_max_data = local_tp.initial_max_data.unwrap_or(0);
+        let initial_odcid = original_dcid.clone();
         Ok(Self {
             side: Side::Server,
             tls,
@@ -239,6 +296,8 @@ impl Core {
             send_max_data: 0,
             send_data: 0,
             recv_data: 0,
+            local_max_data,
+            recv_consumed: 0,
             send_level: Level::Initial,
             read_level: Level::Initial,
             established: false,
@@ -261,6 +320,18 @@ impl Core {
             bytes_in_flight: 0,
             peer_opened_bidi: 0,
             peer_opened_uni: 0,
+            peer_reset_token: None,
+            one_rtt: None,
+            one_rtt_packets: 0,
+            client_config: None,
+            server_name: None,
+            client_tp: TransportParameters::default(),
+            initial_token: Vec::new(),
+            initial_odcid,
+            retried: false,
+            retry_source_cid: None,
+            version,
+            supported_versions: vec![version],
         })
     }
 
@@ -338,6 +409,202 @@ impl Core {
         self.srtt
     }
 
+    fn handle_version_negotiation(&mut self, bytes: &[u8]) -> Result<(), QuicError> {
+        let mut cursor = bytes;
+        let negotiation = VersionNegotiation::decode(&mut cursor)
+            .map_err(|error| QuicError::Protocol(error.to_string()))?;
+        if !cursor.is_empty() {
+            return Err(QuicError::Protocol(
+                "trailing bytes after Version Negotiation".to_string(),
+            ));
+        }
+        if negotiation.destination_connection_id != self.local_cid {
+            return Err(QuicError::Protocol(
+                "Version Negotiation destination CID mismatch".to_string(),
+            ));
+        }
+        if negotiation.versions.contains(&self.version) {
+            return Ok(());
+        }
+        let Some(version) = self
+            .supported_versions
+            .iter()
+            .copied()
+            .find(|version| *version != self.version && negotiation.versions.contains(version))
+        else {
+            return Err(QuicError::Protocol(
+                "no mutually supported QUIC version".to_string(),
+            ));
+        };
+        self.reset_for_version(version)
+    }
+
+    fn reset_for_version(&mut self, version: u32) -> Result<(), QuicError> {
+        let config = self
+            .client_config
+            .clone()
+            .ok_or_else(|| QuicError::Protocol("missing client TLS config".to_string()))?;
+        let server_name = self
+            .server_name
+            .clone()
+            .ok_or_else(|| QuicError::Protocol("missing server name".to_string()))?;
+        let encoded_tp = self
+            .client_tp
+            .encode()
+            .map_err(|error| QuicError::Protocol(error.to_string()))?
+            .to_vec();
+        self.version = version;
+        self.tls = TlsSession::client_with_version(config, server_name, encoded_tp, version)?;
+        self.spaces = [
+            Space::new(Some(initial_keys_for_version(
+                &self.original_dcid,
+                Side::Client,
+                version,
+            )?)),
+            Space::new(None),
+            Space::new(None),
+        ];
+        self.sent.clear();
+        self.retransmit = [Vec::new(), Vec::new(), Vec::new()];
+        self.one_rtt = None;
+        self.one_rtt_packets = 0;
+        self.send_level = Level::Initial;
+        self.read_level = Level::Initial;
+        self.established = false;
+        self.handshake_done = false;
+        self.peer_cid.clear();
+        self.srtt = None;
+        self.rttvar = Duration::ZERO;
+        self.pto = Duration::from_secs(1);
+        self.cwnd = 12_000;
+        self.ssthresh = u64::MAX;
+        self.bytes_in_flight = 0;
+        self.drain_tls()?;
+        Ok(())
+    }
+
+    fn handle_retry(&mut self, bytes: &[u8]) -> Result<(), QuicError> {
+        if self.server || self.retried {
+            return Err(QuicError::Protocol("unexpected Retry packet".to_string()));
+        }
+        let packet = decode_retry(bytes, &self.initial_odcid)
+            .map_err(|error| QuicError::Protocol(error.to_string()))?;
+        if packet.version != self.version {
+            return Err(QuicError::Protocol("Retry version mismatch".to_string()));
+        }
+        if packet.destination_connection_id != self.local_cid {
+            return Err(QuicError::Protocol(
+                "Retry destination CID does not match the local CID".to_string(),
+            ));
+        }
+        let retry_source = packet.source_connection_id.clone();
+        if retry_source.is_empty() {
+            return Err(QuicError::Protocol("Retry source CID is empty".to_string()));
+        }
+        let config = self
+            .client_config
+            .clone()
+            .ok_or_else(|| QuicError::Protocol("missing client TLS config".to_string()))?;
+        let server_name = self
+            .server_name
+            .clone()
+            .ok_or_else(|| QuicError::Protocol("missing server name".to_string()))?;
+        let encoded_tp = self
+            .client_tp
+            .encode()
+            .map_err(|error| QuicError::Protocol(error.to_string()))?
+            .to_vec();
+        self.tls = TlsSession::client_with_version(config, server_name, encoded_tp, self.version)?;
+        self.original_dcid = retry_source.clone();
+        self.initial_token = packet.token;
+        self.retried = true;
+        self.retry_source_cid = Some(retry_source.clone());
+        self.spaces = [
+            Space::new(Some(initial_keys_for_version(
+                &retry_source,
+                Side::Client,
+                self.version,
+            )?)),
+            Space::new(None),
+            Space::new(None),
+        ];
+        self.sent.clear();
+        self.retransmit = [Vec::new(), Vec::new(), Vec::new()];
+        self.one_rtt = None;
+        self.one_rtt_packets = 0;
+        self.send_level = Level::Initial;
+        self.read_level = Level::Initial;
+        self.established = false;
+        self.handshake_done = false;
+        self.peer_cid.clear();
+        self.srtt = None;
+        self.rttvar = Duration::ZERO;
+        self.pto = Duration::from_secs(1);
+        self.cwnd = 12_000;
+        self.ssthresh = u64::MAX;
+        self.bytes_in_flight = 0;
+        self.drain_tls()?;
+        Ok(())
+    }
+
+    fn commit_key_update(&mut self, phase: bool) -> Result<(), QuicError> {
+        self.ensure_next_one_rtt();
+        let Some(mut state) = self.one_rtt.take() else {
+            return Err(QuicError::Protocol("missing 1-RTT key state".to_string()));
+        };
+        let keys = self.spaces[Level::OneRtt as usize]
+            .keys
+            .as_mut()
+            .ok_or_else(|| QuicError::Protocol("missing 1-RTT keys".to_string()))?;
+        let next_local = state.next_local.take().ok_or_else(|| {
+            QuicError::Protocol("next local packet key is unavailable".to_string())
+        })?;
+        let next_remote = state.next_remote.take().ok_or_else(|| {
+            QuicError::Protocol("next remote packet key is unavailable".to_string())
+        })?;
+        let previous = std::mem::replace(&mut keys.remote.packet, next_remote);
+        keys.local.packet = next_local;
+        state.previous_remote = Some(previous);
+        state.key_phase = phase;
+        self.one_rtt = Some(state);
+        Ok(())
+    }
+
+    pub(crate) fn initiate_key_update(&mut self) -> Result<(), QuicError> {
+        self.ensure_next_one_rtt();
+        let Some(mut state) = self.one_rtt.take() else {
+            return Err(QuicError::Protocol(
+                "1-RTT keys are not available".to_string(),
+            ));
+        };
+        let keys = self.spaces[Level::OneRtt as usize]
+            .keys
+            .as_mut()
+            .ok_or_else(|| QuicError::Protocol("missing 1-RTT keys".to_string()))?;
+        let next_local = state.next_local.take().ok_or_else(|| {
+            QuicError::Protocol("next local packet key is unavailable".to_string())
+        })?;
+        let next_remote = state.next_remote.take().ok_or_else(|| {
+            QuicError::Protocol("next remote packet key is unavailable".to_string())
+        })?;
+        let previous = std::mem::replace(&mut keys.remote.packet, next_remote);
+        keys.local.packet = next_local;
+        state.previous_remote = Some(previous);
+        state.key_phase = !state.key_phase;
+        self.one_rtt = Some(state);
+        Ok(())
+    }
+
+    fn ensure_next_one_rtt(&mut self) {
+        if let Some(state) = &mut self.one_rtt
+            && state.next_local.is_none()
+        {
+            let next = state.secrets.next_packet_keys();
+            state.next_local = Some(next.local);
+            state.next_remote = Some(next.remote);
+        }
+    }
+
     fn handle_ack(&mut self, level: Level, ack: AckFrame) {
         let acked = acknowledged_packets(&ack);
         let now = Instant::now();
@@ -363,16 +630,41 @@ impl Core {
                 .max(Duration::from_millis(1));
         }
         let mut acked_bytes = 0u64;
+        let mut lost = Vec::new();
+        let loss_delay = self
+            .srtt
+            .unwrap_or(Duration::from_millis(100))
+            .saturating_mul(9)
+            / 8;
         self.sent.retain(|packet| {
-            if packet.level == level && acked.contains(&packet.packet_number) {
-                acked_bytes = acked_bytes.saturating_add(packet.size);
-                false
-            } else {
-                true
+            if packet.level != level {
+                return true;
             }
+            if acked.contains(&packet.packet_number) {
+                acked_bytes = acked_bytes.saturating_add(packet.size);
+                return false;
+            }
+            if packet.packet_number < ack.largest_acknowledged
+                && now.saturating_duration_since(packet.time) > loss_delay
+            {
+                lost.push((packet.size, packet.frames.clone()));
+                return false;
+            }
+            true
         });
-        if acked_bytes > 0 {
-            self.bytes_in_flight = self.bytes_in_flight.saturating_sub(acked_bytes);
+        self.bytes_in_flight = self.bytes_in_flight.saturating_sub(acked_bytes);
+        if !lost.is_empty() {
+            self.ssthresh = (self.cwnd / 2).max(2400);
+            self.cwnd = self.ssthresh;
+            for (size, frames) in lost {
+                self.bytes_in_flight = self.bytes_in_flight.saturating_sub(size);
+                for frame in frames {
+                    if !matches!(frame, Frame::Ack(_) | Frame::Padding { .. }) {
+                        self.retransmit[level as usize].push(frame);
+                    }
+                }
+            }
+        } else if acked_bytes > 0 {
             if self.cwnd < self.ssthresh {
                 self.cwnd = self.cwnd.saturating_add(acked_bytes);
             } else {
@@ -392,27 +684,100 @@ impl Core {
         while !cursor.is_empty() {
             let first = cursor[0];
             if first & 0x80 == 0 {
-                let keys = self.spaces[Level::OneRtt as usize]
-                    .keys
-                    .as_ref()
-                    .ok_or_else(|| {
-                        QuicError::Protocol("short packet before 1-RTT keys".to_string())
-                    })?;
                 let dcid_len = self.local_cid.len();
-                let mut packet = cursor.to_vec();
-                let (pn, _pn_len, payload) = unprotect_short(
-                    &mut packet,
-                    dcid_len,
-                    self.largest(Level::OneRtt),
-                    &keys.remote,
-                )?;
+                let largest = self.largest(Level::OneRtt);
+                let mut decrypted = None;
+                let mut used_next = false;
+                {
+                    let keys = self.spaces[Level::OneRtt as usize]
+                        .keys
+                        .as_ref()
+                        .ok_or_else(|| {
+                            QuicError::Protocol("short packet before 1-RTT keys".to_string())
+                        })?;
+                    let header = keys.remote.header.as_ref();
+                    if let Some(value) = try_short(
+                        cursor,
+                        dcid_len,
+                        largest,
+                        header,
+                        keys.remote.packet.as_ref(),
+                    ) {
+                        decrypted = Some(value);
+                    }
+                    if decrypted.is_none()
+                        && let Some(state) = &self.one_rtt
+                        && let Some(previous) = &state.previous_remote
+                        && let Some(value) =
+                            try_short(cursor, dcid_len, largest, header, previous.as_ref())
+                    {
+                        decrypted = Some(value);
+                    }
+                }
+                if decrypted.is_none() {
+                    self.ensure_next_one_rtt();
+                    if let Some(keys) = self.spaces[Level::OneRtt as usize].keys.as_ref()
+                        && let Some(state) = &self.one_rtt
+                        && let Some(next) = &state.next_remote
+                        && let Some(value) = try_short(
+                            cursor,
+                            dcid_len,
+                            largest,
+                            keys.remote.header.as_ref(),
+                            next.as_ref(),
+                        )
+                    {
+                        decrypted = Some(value);
+                        used_next = true;
+                    }
+                }
+                let Some((pn, _pn_len, phase, payload)) = decrypted else {
+                    if cursor.len() >= 16
+                        && self.peer_reset_token
+                            == Some(cursor[cursor.len() - 16..].try_into().unwrap_or([0; 16]))
+                    {
+                        self.closed = Some((0, "stateless reset".to_string()));
+                        return Err(QuicError::Closed("stateless reset".to_string()));
+                    }
+                    return Err(QuicError::Protocol(
+                        "short packet could not be decrypted".to_string(),
+                    ));
+                };
+                if used_next {
+                    self.commit_key_update(phase)?;
+                }
                 self.record(Level::OneRtt, pn);
                 self.process_frames(Level::OneRtt, &payload)?;
                 cursor = &[];
             } else {
+                if cursor.len() >= 5 {
+                    let version = u32::from_be_bytes([cursor[1], cursor[2], cursor[3], cursor[4]]);
+                    if version == 0 {
+                        if !self.server {
+                            self.handle_version_negotiation(cursor)?;
+                        }
+                        cursor = &[];
+                        continue;
+                    }
+                }
+                let ty = LongType::from_bits_for(
+                    u32::from_be_bytes([
+                        cursor.get(1).copied().unwrap_or(0),
+                        cursor.get(2).copied().unwrap_or(0),
+                        cursor.get(3).copied().unwrap_or(0),
+                        cursor.get(4).copied().unwrap_or(0),
+                    ]),
+                    first,
+                );
+                if ty == LongType::Retry {
+                    if !self.server {
+                        self.handle_retry(cursor)?;
+                    }
+                    cursor = &[];
+                    continue;
+                }
                 let (_, packet_end) = long_header_info(cursor)?;
                 let mut packet = cursor[..packet_end].to_vec();
-                let ty = LongType::from_bits(first);
                 let level = match ty {
                     LongType::Initial => Level::Initial,
                     LongType::Handshake => Level::Handshake,
@@ -508,6 +873,7 @@ impl Core {
                     read: 0,
                     fin: None,
                     max_data: self.local_stream_window(true),
+                    window: self.local_stream_window(true),
                     consumed: 0,
                     stopped: false,
                 }),
@@ -595,6 +961,20 @@ impl Core {
         }
         if !data.is_empty() {
             recv.consumed += data.len() as u64;
+            self.recv_consumed = self.recv_consumed.saturating_add(data.len() as u64);
+            if recv.consumed.saturating_add(recv.window / 2) > recv.max_data {
+                recv.max_data = recv.consumed.saturating_add(recv.window);
+                self.control_frames.push(Frame::MaxStreamData {
+                    stream_id: id,
+                    maximum: recv.max_data,
+                });
+            }
+            let initial = self.local_tp.initial_max_data.unwrap_or(0);
+            if self.recv_consumed.saturating_add(initial / 2) > self.local_max_data {
+                self.local_max_data = self.recv_consumed.saturating_add(initial);
+                self.control_frames
+                    .push(Frame::MaxData(self.local_max_data));
+            }
             return Ok(ReadResult::Data(data.freeze()));
         }
         if recv.fin == Some(recv.read) {
@@ -616,10 +996,16 @@ impl Core {
     }
 
     pub(crate) fn reset(&mut self, id: u64, code: u64) {
+        let final_size = self
+            .streams
+            .get(&id)
+            .and_then(|stream| stream.send.as_ref())
+            .map(|send| send.data.len() as u64)
+            .unwrap_or(0);
         self.control_frames.push(Frame::ResetStream {
             stream_id: id,
             error_code: code,
-            final_size: 0,
+            final_size,
         });
         if let Some(stream) = self.streams.get_mut(&id)
             && let Some(send) = stream.send.as_mut()
@@ -654,8 +1040,15 @@ impl Core {
                         self.send_level = Level::Handshake;
                         self.read_level = Level::Handshake;
                     }
-                    KeyChange::OneRtt { keys, .. } => {
+                    KeyChange::OneRtt { keys, next } => {
                         self.spaces[Level::OneRtt as usize].keys = Some(keys);
+                        self.one_rtt = Some(OneRttKeys {
+                            secrets: next,
+                            key_phase: false,
+                            next_local: None,
+                            next_remote: None,
+                            previous_remote: None,
+                        });
                         self.send_level = Level::OneRtt;
                         self.read_level = Level::OneRtt;
                     }
@@ -669,10 +1062,27 @@ impl Core {
         if let Some(peer) = self.tls.peer_transport_parameters() {
             let parameters = TransportParameters::decode(&peer)
                 .map_err(|error| QuicError::Protocol(error.to_string()))?;
+            if self.retried {
+                if parameters.retry_source_connection_id.as_deref()
+                    != self.retry_source_cid.as_deref()
+                {
+                    return Err(QuicError::Protocol(
+                        "Retry source CID transport parameter is invalid".to_string(),
+                    ));
+                }
+                if parameters.original_destination_connection_id.as_deref()
+                    != Some(self.initial_odcid.as_slice())
+                {
+                    return Err(QuicError::Protocol(
+                        "original destination CID transport parameter is invalid".to_string(),
+                    ));
+                }
+            }
             self.peer_max_bidi = parameters.initial_max_streams_bidi.unwrap_or(0);
             self.peer_max_uni = parameters.initial_max_streams_uni.unwrap_or(0);
             self.send_max_data = parameters.initial_max_data.unwrap_or(0);
             self.peer_max_datagram = parameters.max_datagram_frame_size;
+            self.peer_reset_token = parameters.stateless_reset_token;
             self.peer_tp = Some(parameters);
         }
         Ok(())
@@ -745,9 +1155,11 @@ impl Core {
                 | Frame::StreamsBlocked { .. }
                 | Frame::NewConnectionId { .. }
                 | Frame::RetireConnectionId(_)
-                | Frame::PathChallenge(_)
-                | Frame::PathResponse(_)
                 | Frame::NewToken { .. } => {}
+                Frame::PathChallenge(data) => {
+                    self.control_frames.push(Frame::PathResponse(data));
+                }
+                Frame::PathResponse(_) => {}
                 Frame::Datagram { data } => {
                     if self.recv_datagrams.len() < 64 {
                         self.recv_datagrams.push_back(data);
@@ -805,6 +1217,7 @@ impl Core {
                     read: 0,
                     fin: None,
                     max_data: self.local_stream_window(bidi),
+                    window: self.local_stream_window(bidi),
                     consumed: 0,
                     stopped: false,
                 }),
@@ -834,7 +1247,7 @@ impl Core {
             ));
         }
         if !data.is_empty() {
-            let limit = self.local_tp.initial_max_data.unwrap_or(u64::MAX);
+            let limit = self.local_max_data;
             if self.recv_data.saturating_add(data.len() as u64) > limit {
                 return Err(QuicError::Protocol(
                     "connection receive window exceeded".to_string(),
@@ -933,6 +1346,13 @@ impl Core {
         }
 
         self.spaces[level as usize].next_pn += 1;
+        if level == Level::OneRtt {
+            self.one_rtt_packets = self.one_rtt_packets.saturating_add(1);
+            if self.one_rtt_packets >= 1_000_000 {
+                self.one_rtt_packets = 0;
+                let _ = self.initiate_key_update();
+            }
+        }
         let ack_eliciting = frames.iter().any(|frame| {
             !matches!(
                 frame,
@@ -986,10 +1406,14 @@ impl Core {
                 };
                 let packet = LongPacket {
                     ty,
-                    version: VERSION_1,
+                    version: self.version,
                     destination_connection_id: dcid,
                     source_connection_id: self.local_cid.clone(),
-                    token: Vec::new(),
+                    token: if level == Level::Initial {
+                        self.initial_token.clone()
+                    } else {
+                        Vec::new()
+                    },
                     packet_number,
                     packet_number_len: 4,
                     payload,
@@ -999,7 +1423,7 @@ impl Core {
             Level::OneRtt => {
                 let packet = ShortPacket {
                     spin: false,
-                    key_phase: false,
+                    key_phase: self.one_rtt.as_ref().is_some_and(|state| state.key_phase),
                     destination_connection_id: self.peer_cid.clone(),
                     packet_number,
                     packet_number_len: 4,
@@ -1102,6 +1526,17 @@ impl Core {
             self.local_tp.initial_max_stream_data_uni.unwrap_or(1 << 20)
         }
     }
+}
+
+fn try_short(
+    packet: &[u8],
+    dcid_len: usize,
+    largest: u64,
+    header: &dyn rustls::quic::HeaderProtectionKey,
+    key: &dyn PacketKey,
+) -> Option<(u64, u8, bool, Bytes)> {
+    let mut packet = packet.to_vec();
+    unprotect_short_with(&mut packet, dcid_len, largest, header, key).ok()
 }
 
 fn acknowledged_packets(ack: &AckFrame) -> BTreeSet<u64> {

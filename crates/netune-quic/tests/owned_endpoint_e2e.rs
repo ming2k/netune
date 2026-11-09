@@ -134,6 +134,7 @@ async fn owned_endpoint_exchanges_a_bidi_stream_with_quinn() {
             ClientConfigOwned {
                 tls: client_config(),
                 transport: transport(),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
             },
         )
         .await

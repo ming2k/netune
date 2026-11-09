@@ -93,6 +93,7 @@ async fn make_server_endpoint() -> (Endpoint, std::net::SocketAddr) {
         ServerConfigOwned {
             tls: Arc::new(tls),
             transport,
+            retry: true,
         },
     )
     .await
@@ -203,4 +204,72 @@ async fn datagrams_echo_and_enforce_the_peer_mtu() {
         session.send(&oversized).await,
         Err(QuicError::DatagramTooLarge { .. })
     ));
+}
+
+#[tokio::test]
+async fn unknown_short_header_gets_a_stateless_reset() {
+    let (_server, addr) = make_server_endpoint().await;
+    let probe = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("probe socket");
+    let mut packet = vec![0u8; 64];
+    packet[0] = 0x40;
+    packet[1..9].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4]);
+    probe.send_to(&packet, addr).await.expect("send probe");
+    let mut buffer = [0u8; 128];
+    let (len, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        probe.recv_from(&mut buffer),
+    )
+    .await
+    .expect("reset timeout")
+    .expect("reset receive");
+    assert!(len >= 21);
+    assert_eq!(buffer[0] & 0x80, 0, "stateless reset uses a short header");
+    assert_ne!(&buffer[len - 16..len], &[0u8; 16]);
+}
+
+#[tokio::test]
+async fn unsupported_version_gets_version_negotiation() {
+    let (_server, addr) = make_server_endpoint().await;
+    let probe = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("probe socket");
+    let mut packet = vec![0u8; 1200];
+    packet[0] = 0xc0;
+    packet[1..5].copy_from_slice(&0x0a0a_0a0au32.to_be_bytes());
+    packet[5] = 8;
+    packet[6..14].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    packet[14] = 8;
+    packet[15..23].copy_from_slice(&[9, 10, 11, 12, 13, 14, 15, 16]);
+    probe.send_to(&packet, addr).await.expect("send probe");
+    let mut buffer = [0u8; 256];
+    let (len, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        probe.recv_from(&mut buffer),
+    )
+    .await
+    .expect("vn timeout")
+    .expect("vn receive");
+    let mut cursor = &buffer[..len];
+    let negotiation = netune_quic::wire::packet::VersionNegotiation::decode(&mut cursor)
+        .expect("version negotiation");
+    assert_eq!(
+        negotiation.destination_connection_id,
+        vec![9, 10, 11, 12, 13, 14, 15, 16]
+    );
+    assert_eq!(
+        negotiation.source_connection_id,
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
+    );
+    assert!(
+        negotiation
+            .versions
+            .contains(&netune_quic::wire::packet::VERSION_1)
+    );
+    assert!(
+        negotiation
+            .versions
+            .contains(&netune_quic::wire::packet::VERSION_2)
+    );
 }

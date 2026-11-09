@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   9001 client Initial vector decrypts and re-protects byte-for-byte.
   `quinn`/`quinn-proto` are dev-only interop oracles; the H3 client and ingress
   now run over the owned transport.
+- **QUIC lifecycle hardening.** The owned engine now validates addresses with
+  stateless Retry tokens, emits keyed stateless resets, rotates 1-RTT keys with
+  key-phase reordering, performs fast loss detection, tops up `MAX_DATA` /
+  `MAX_STREAM_DATA`, speaks QUIC v2 and handles Version Negotiation (ADR-0029).
 
 ### Changed
 
@@ -24,8 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state machine and the RFC 9204 QPACK codec, including the static table,
   Huffman coding, dynamic table, critical streams, acknowledgements and blocked
   streams. `h3` and `h3-quinn` are no longer production dependencies, and the
-  `vendor/h3` / `vendor/h3-quinn` trees are deleted. `quinn` remains the
-  approved QUIC runtime (ADR-0027).
+  `vendor/h3` / `vendor/h3-quinn` trees are deleted. QUIC is owned by
+  `netune-quic` (ADR-0028, ADR-0029).
 - **H3 interop is differential.** `crates/netune-http3/tests/h3_interop.rs`
   exercises the owned stack against crates.io `h3`/`h3-quinn` in both
   directions while keeping both crates dev-only.

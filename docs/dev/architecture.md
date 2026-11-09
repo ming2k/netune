@@ -95,6 +95,7 @@ This document codifies the workspace topology, dependency direction, and non-neg
 - **Red-line**: `netune-quic` owns the RFC 9000 state machine, RFC 9001 packet-protection wiring and RFC 9002 recovery; `quinn`/`quinn-proto` never appear in the production graph.
 - **Engine**: `wire` (varints, packet headers, frames, transport parameters), `crypto` (rustls packet protection and TLS handshake), `owned::core` (spaces, streams, ACK, flow control) and `owned::endpoint` (UDP routing and async handles).
 - **Crypto**: Initial/Handshake/1-RTT keys and packet/header protection come from `rustls::quic` backed by `aws-lc-rs`; no owned cipher or HKDF.
+- **Lifecycle**: Retry/address validation, keyed stateless reset, 1-RTT key update, fast loss detection, receive-window top-up, QUIC v2 and Version Negotiation are owned by `netune-quic` (ADR-0029).
 - **Enforcement**: `crates/netune-quic/src/{wire,crypto,owned}/`, `ARCH-005` with an empty `ALLOWED_RUNTIME_DEPS`, and the quinn differential tests.
 
 ### 2.5 Codecs Never Open Sockets

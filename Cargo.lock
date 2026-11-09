@@ -829,6 +829,7 @@ dependencies = [
 name = "netune-quic"
 version = "0.0.10"
 dependencies = [
+ "aws-lc-rs",
  "bytes",
  "netune-egress",
  "netune-trace",

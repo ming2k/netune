@@ -22,6 +22,7 @@ tokio = { version = "1", default-features = false }
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "logging", "std", "tls12"] }
 rustls-platform-verifier = "0.6"
+aws-lc-rs = "1.18"
 base64 = "0.22"
 brotli = "8"
 flate2 = { version = "1.1", features = ["zlib-rs"] }

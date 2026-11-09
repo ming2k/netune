@@ -113,6 +113,10 @@ impl QuicConnector {
                 ClientConfigOwned {
                     tls: Arc::new(tls),
                     transport,
+                    versions: vec![
+                        crate::wire::packet::VERSION_1,
+                        crate::wire::packet::VERSION_2,
+                    ],
                 },
             )
             .await

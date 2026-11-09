@@ -6,7 +6,7 @@
 //! `aws-lc-rs`; this module owns the QUIC header/packet protection order and
 //! packet-number recovery.
 
-use rustls::quic::DirectionalKeys;
+use rustls::quic::{DirectionalKeys, HeaderProtectionKey, PacketKey};
 
 use crate::wire::WireError;
 use crate::wire::packet::{LongPacket, ShortPacket};
@@ -39,6 +39,19 @@ pub fn initial_keys(
     destination_connection_id: &[u8],
     side: rustls::Side,
 ) -> Result<rustls::quic::Keys, CryptoError> {
+    initial_keys_for_version(
+        destination_connection_id,
+        side,
+        crate::wire::packet::VERSION_1,
+    )
+}
+
+/// Derive Initial keys for a specific QUIC version.
+pub fn initial_keys_for_version(
+    destination_connection_id: &[u8],
+    side: rustls::Side,
+    version: u32,
+) -> Result<rustls::quic::Keys, CryptoError> {
     use rustls::SupportedCipherSuite;
     use rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256;
 
@@ -46,11 +59,12 @@ pub fn initial_keys(
         return Err(CryptoError::NoQuicSuite);
     };
     let quic = suite.quic.ok_or(CryptoError::NoQuicSuite)?;
-    Ok(rustls::quic::Suite { suite, quic }.keys(
-        destination_connection_id,
-        side,
-        rustls::quic::Version::V1,
-    ))
+    let rustls_version = match version {
+        crate::wire::packet::VERSION_1 => rustls::quic::Version::V1,
+        crate::wire::packet::VERSION_2 => rustls::quic::Version::V2,
+        _ => return Err(CryptoError::NoQuicSuite),
+    };
+    Ok(rustls::quic::Suite { suite, quic }.keys(destination_connection_id, side, rustls_version))
 }
 
 /// Apply packet protection and header protection to a long-header packet.
@@ -69,7 +83,8 @@ pub fn protect_long(
     let header_len = packet.packet_number_len as u64 + plaintext.len() as u64 + tag_len as u64;
     let header = encode_long_header(packet, header_len)?;
     protect(
-        keys,
+        keys.header.as_ref(),
+        keys.packet.as_ref(),
         header,
         packet.packet_number,
         packet.packet_number_len,
@@ -92,7 +107,8 @@ pub fn protect_short(
     );
     let header = encode_short_header(packet)?;
     protect(
-        keys,
+        keys.header.as_ref(),
+        keys.packet.as_ref(),
         header,
         packet.packet_number,
         packet.packet_number_len,
@@ -110,8 +126,14 @@ pub fn unprotect_long(
     keys: &DirectionalKeys,
 ) -> Result<(u64, u8, bytes::Bytes), CryptoError> {
     let (pn_offset, packet_end) = long_header_info(packet)?;
-    let (packet_number, packet_number_len, payload) =
-        unprotect(packet, pn_offset, packet_end, largest_packet_number, keys)?;
+    let (packet_number, packet_number_len, _phase, payload) = unprotect(
+        packet,
+        pn_offset,
+        packet_end,
+        largest_packet_number,
+        keys.header.as_ref(),
+        keys.packet.as_ref(),
+    )?;
     Ok((packet_number, packet_number_len, payload))
 }
 
@@ -124,19 +146,75 @@ pub fn unprotect_short(
 ) -> Result<(u64, u8, bytes::Bytes), CryptoError> {
     let pn_offset = 1 + destination_connection_id_len;
     let packet_end = packet.len();
-    unprotect(packet, pn_offset, packet_end, largest_packet_number, keys)
+    let (packet_number, packet_number_len, _phase, payload) = unprotect(
+        packet,
+        pn_offset,
+        packet_end,
+        largest_packet_number,
+        keys.header.as_ref(),
+        keys.packet.as_ref(),
+    )?;
+    Ok((packet_number, packet_number_len, payload))
+}
+
+/// Protect a short-header packet with separately supplied packet and header keys.
+///
+/// Header-protection keys are stable across 1-RTT key updates; only the packet
+/// protection key changes.
+pub fn protect_short_with(
+    packet: &ShortPacket,
+    header_key: &dyn HeaderProtectionKey,
+    packet_key: &dyn PacketKey,
+) -> Result<bytes::Bytes, CryptoError> {
+    let tag_len = packet_key.tag_len();
+    let mut plaintext = packet.payload.to_vec();
+    pad_for_sample(
+        packet.packet_number_len,
+        tag_len,
+        header_key.sample_len(),
+        &mut plaintext,
+    );
+    let header = encode_short_header(packet)?;
+    protect(
+        header_key,
+        packet_key,
+        header,
+        packet.packet_number,
+        packet.packet_number_len,
+        plaintext,
+    )
+}
+
+/// Unprotect a short-header packet with separately supplied packet and header keys.
+pub fn unprotect_short_with(
+    packet: &mut [u8],
+    destination_connection_id_len: usize,
+    largest_packet_number: u64,
+    header_key: &dyn HeaderProtectionKey,
+    packet_key: &dyn PacketKey,
+) -> Result<(u64, u8, bool, bytes::Bytes), CryptoError> {
+    let pn_offset = 1 + destination_connection_id_len;
+    let packet_end = packet.len();
+    unprotect(
+        packet,
+        pn_offset,
+        packet_end,
+        largest_packet_number,
+        header_key,
+        packet_key,
+    )
 }
 
 fn protect(
-    keys: &DirectionalKeys,
+    header_key: &dyn HeaderProtectionKey,
+    packet_key: &dyn PacketKey,
     header: Vec<u8>,
     packet_number: u64,
     packet_number_len: u8,
     plaintext: Vec<u8>,
 ) -> Result<bytes::Bytes, CryptoError> {
     let mut ciphertext = plaintext;
-    let tag = keys
-        .packet
+    let tag = packet_key
         .encrypt_in_place(packet_number, &header, &mut ciphertext)
         .map_err(|error| CryptoError::Rustls(error.to_string()))?;
     ciphertext.extend_from_slice(tag.as_ref());
@@ -146,14 +224,14 @@ fn protect(
     packet.extend_from_slice(&ciphertext);
 
     let sample_start = pn_offset + 4;
-    let sample_end = sample_start + keys.header.sample_len();
+    let sample_end = sample_start + header_key.sample_len();
     if packet.len() < sample_end {
         return Err(CryptoError::SampleTooShort);
     }
     let sample = packet[sample_start..sample_end].to_vec();
     let mut first = packet[0];
     let mut pn_bytes = packet[pn_offset..pn_offset + packet_number_len as usize].to_vec();
-    keys.header
+    header_key
         .encrypt_in_place(&sample, &mut first, &mut pn_bytes)
         .map_err(|error| CryptoError::Rustls(error.to_string()))?;
     packet[0] = first;
@@ -166,12 +244,13 @@ fn unprotect(
     pn_offset: usize,
     packet_end: usize,
     largest_packet_number: u64,
-    keys: &DirectionalKeys,
-) -> Result<(u64, u8, bytes::Bytes), CryptoError> {
+    header_key: &dyn HeaderProtectionKey,
+    packet_key: &dyn PacketKey,
+) -> Result<(u64, u8, bool, bytes::Bytes), CryptoError> {
     if packet_end > packet.len() || packet_end < pn_offset {
         return Err(CryptoError::PacketTooShort);
     }
-    let sample_len = keys.header.sample_len();
+    let sample_len = header_key.sample_len();
     let sample_start = pn_offset + 4;
     let sample_end = sample_start + sample_len;
     if packet_end < sample_end {
@@ -182,7 +261,7 @@ fn unprotect(
     let mut pn_bytes = [0u8; 4];
     let available = packet_end.saturating_sub(pn_offset).min(4);
     pn_bytes[..available].copy_from_slice(&packet[pn_offset..pn_offset + available]);
-    keys.header
+    header_key
         .decrypt_in_place(&sample, &mut first, &mut pn_bytes[..available])
         .map_err(|error| CryptoError::Rustls(error.to_string()))?;
     let packet_number_len = (first & 0x03) + 1;
@@ -201,11 +280,16 @@ fn unprotect(
     let mut header = packet[..header_len].to_vec();
     header[0] = first;
     header[pn_offset..header_len].copy_from_slice(&pn_bytes[..packet_number_len as usize]);
-    let payload = keys
-        .packet
+    let key_phase = first & 0x04 != 0;
+    let payload = packet_key
         .decrypt_in_place(packet_number, &header, &mut packet[header_len..packet_end])
         .map_err(|error| CryptoError::Rustls(error.to_string()))?;
-    Ok((packet_number, packet_number_len, payload.to_vec().into()))
+    Ok((
+        packet_number,
+        packet_number_len,
+        key_phase,
+        payload.to_vec().into(),
+    ))
 }
 
 fn pad_for_sample(
@@ -226,17 +310,12 @@ fn encode_long_header(packet: &LongPacket, length: u64) -> Result<Vec<u8>, Crypt
     use bytes::BufMut;
 
     let mut header = bytes::BytesMut::new();
-    let first =
-        0xc0 | (match packet.ty {
-            LongType::Initial => 0x00,
-            LongType::ZeroRtt => 0x10,
-            LongType::Handshake => 0x20,
-            LongType::Retry => {
-                return Err(CryptoError::Wire(WireError::InvalidPacket(
-                    "Retry packets are not protected here".to_string(),
-                )));
-            }
-        }) | (packet.packet_number_len - 1);
+    if packet.ty == LongType::Retry {
+        return Err(CryptoError::Wire(WireError::InvalidPacket(
+            "Retry packets are not protected here".to_string(),
+        )));
+    }
+    let first = 0xc0 | packet.ty.bits_for(packet.version) | (packet.packet_number_len - 1);
     header.put_u8(first);
     header.put_u32(packet.version);
     header.put_u8(packet.destination_connection_id.len() as u8);
@@ -297,7 +376,7 @@ pub fn long_header_info(packet: &[u8]) -> Result<(usize, usize), CryptoError> {
     cursor = &cursor[4..];
     cursor = skip_cid(cursor)?;
     cursor = skip_cid(cursor)?;
-    let ty = LongType::from_bits(first);
+    let ty = LongType::from_bits_for(version, first);
     if ty == LongType::Retry {
         return Err(CryptoError::Wire(WireError::InvalidPacket(
             "Retry packets are not protected packets".to_string(),

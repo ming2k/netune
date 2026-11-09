@@ -103,6 +103,7 @@ async fn owned_server_exchanges_a_bidi_stream_with_owned_client() {
         ServerConfigOwned {
             tls: server_tls(),
             transport: transport(),
+            retry: true,
         },
     )
     .await
@@ -113,6 +114,7 @@ async fn owned_server_exchanges_a_bidi_stream_with_owned_client() {
         let (mut send, mut recv) = connection.accept_bi().await.expect("accept bi");
         let data = recv.read(1024).await.expect("read").expect("data");
         assert_eq!(data.as_ref(), b"hello");
+        connection.initiate_key_update().expect("server key update");
         send.write_all(b"world").await.expect("write");
         send.finish().await.expect("finish");
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -126,10 +128,12 @@ async fn owned_server_exchanges_a_bidi_stream_with_owned_client() {
             ClientConfigOwned {
                 tls: client_tls(),
                 transport: transport(),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
             },
         )
         .await
         .expect("connect");
+    connection.initiate_key_update().expect("client key update");
     let (mut send, mut recv) = connection.open_bi().await.expect("open bi");
     send.write_all(b"hello").await.expect("write");
     send.finish().await.expect("finish");
@@ -139,5 +143,55 @@ async fn owned_server_exchanges_a_bidi_stream_with_owned_client() {
         .expect("read")
         .expect("data");
     assert_eq!(response.as_ref(), b"world");
+    server_task.await.expect("server task");
+}
+
+#[tokio::test]
+async fn owned_server_speaks_quic_v2_with_owned_client() {
+    use netune_quic::wire::packet::VERSION_2;
+
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport(),
+            retry: true,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+    let server_task = tokio::spawn(async move {
+        let connection = server.accept().await.expect("accept");
+        let (mut send, mut recv) = connection.accept_bi().await.expect("accept bi");
+        let data = recv.read(1024).await.expect("read").expect("data");
+        assert_eq!(data.as_ref(), b"v2");
+        send.write_all(b"two").await.expect("write");
+        send.finish().await.expect("finish");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    });
+
+    let client = Endpoint::client().await.expect("client endpoint");
+    let connection = client
+        .connect(
+            addr,
+            "localhost",
+            ClientConfigOwned {
+                tls: client_tls(),
+                transport: transport(),
+                versions: vec![VERSION_2],
+            },
+        )
+        .await
+        .expect("connect");
+    let (mut send, mut recv) = connection.open_bi().await.expect("open bi");
+    send.write_all(b"v2").await.expect("write");
+    send.finish().await.expect("finish");
+    let response = tokio::time::timeout(Duration::from_secs(2), recv.read(1024))
+        .await
+        .expect("read timeout")
+        .expect("read")
+        .expect("data");
+    assert_eq!(response.as_ref(), b"two");
     server_task.await.expect("server task");
 }

@@ -27,9 +27,24 @@ impl TlsSession {
         server_name: rustls::pki_types::ServerName<'static>,
         transport_parameters: Vec<u8>,
     ) -> Result<Self, CryptoError> {
+        Self::client_with_version(
+            config,
+            server_name,
+            transport_parameters,
+            crate::wire::packet::VERSION_1,
+        )
+    }
+
+    /// Create a client TLS session for a specific QUIC version.
+    pub fn client_with_version(
+        config: Arc<ClientConfig>,
+        server_name: rustls::pki_types::ServerName<'static>,
+        transport_parameters: Vec<u8>,
+        version: u32,
+    ) -> Result<Self, CryptoError> {
         let session = rustls::quic::ClientConnection::new(
             config,
-            Version::V1,
+            rustls_version(version)?,
             server_name,
             transport_parameters,
         )
@@ -42,9 +57,21 @@ impl TlsSession {
         config: Arc<ServerConfig>,
         transport_parameters: Vec<u8>,
     ) -> Result<Self, CryptoError> {
-        let session =
-            rustls::quic::ServerConnection::new(config, Version::V1, transport_parameters)
-                .map_err(CryptoError::from)?;
+        Self::server_with_version(config, transport_parameters, crate::wire::packet::VERSION_1)
+    }
+
+    /// Create a server TLS session for a specific QUIC version.
+    pub fn server_with_version(
+        config: Arc<ServerConfig>,
+        transport_parameters: Vec<u8>,
+        version: u32,
+    ) -> Result<Self, CryptoError> {
+        let session = rustls::quic::ServerConnection::new(
+            config,
+            rustls_version(version)?,
+            transport_parameters,
+        )
+        .map_err(CryptoError::from)?;
         Ok(Self::Server(session))
     }
 
@@ -88,6 +115,14 @@ impl TlsSession {
             Self::Client(session) => session.alert(),
             Self::Server(session) => session.alert(),
         }
+    }
+}
+
+fn rustls_version(version: u32) -> Result<Version, CryptoError> {
+    match version {
+        crate::wire::packet::VERSION_1 => Ok(Version::V1),
+        crate::wire::packet::VERSION_2 => Ok(Version::V2),
+        _ => Err(CryptoError::NoQuicSuite),
     }
 }
 

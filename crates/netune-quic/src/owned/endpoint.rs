@@ -27,6 +27,8 @@ use super::core::{Core, ReadResult, TIMER_INTERVAL};
 pub struct ClientConfigOwned {
     pub tls: Arc<ClientConfig>,
     pub transport: TransportParameters,
+    /// Preferred QUIC version first; later entries are Version Negotiation fallbacks.
+    pub versions: Vec<u32>,
 }
 
 /// A server configuration for the owned endpoint.
@@ -34,6 +36,8 @@ pub struct ClientConfigOwned {
 pub struct ServerConfigOwned {
     pub tls: Arc<ServerConfig>,
     pub transport: TransportParameters,
+    /// Require a Retry token before allocating connection state.
+    pub retry: bool,
 }
 
 /// A bound owned QUIC endpoint.
@@ -49,6 +53,9 @@ struct EndpointInner {
     accept_tx: mpsc::Sender<Connection>,
     accept_rx: Mutex<mpsc::Receiver<Connection>>,
     server: Option<ServerConfigOwned>,
+    reset_key: [u8; 32],
+    retry_key: [u8; 32],
+    cid_len: usize,
     closed: AtomicBool,
 }
 
@@ -80,6 +87,8 @@ impl Endpoint {
         let local = udp.local_addr().map_err(QuicError::Socket)?;
         let udp = Arc::new(udp);
         let (accept_tx, accept_rx) = mpsc::channel(64);
+        let reset_key = random_bytes::<32>()?;
+        let retry_key = random_bytes::<32>()?;
         let inner = Arc::new(EndpointInner {
             udp: udp.clone(),
             local,
@@ -87,6 +96,9 @@ impl Endpoint {
             accept_tx,
             accept_rx: Mutex::new(accept_rx),
             server,
+            reset_key,
+            retry_key,
+            cid_len: 8,
             closed: AtomicBool::new(false),
         });
         let driver = tokio::spawn(endpoint_driver(inner.clone()));
@@ -111,16 +123,23 @@ impl Endpoint {
         let original_dcid = random_cid(8)?;
         let mut local_tp = config.transport;
         local_tp.initial_source_connection_id = Some(local_cid.clone());
-        let tls = TlsSession::client(
+        let server_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
+            .map_err(|error| QuicError::Config(error.to_string()))?;
+        let versions = if config.versions.is_empty() {
+            vec![crate::wire::packet::VERSION_1]
+        } else {
+            config.versions.clone()
+        };
+        let version = versions[0];
+        let core = Core::client(
             config.tls,
-            rustls::pki_types::ServerName::try_from(server_name.to_string())
-                .map_err(|error| QuicError::Config(error.to_string()))?,
-            local_tp
-                .encode()
-                .map_err(|error| QuicError::Config(error.to_string()))?
-                .to_vec(),
+            server_name,
+            original_dcid,
+            local_cid.clone(),
+            local_tp,
+            version,
+            versions,
         )?;
-        let core = Core::client(tls, original_dcid, local_cid.clone(), local_tp)?;
         let (connection, outgoing) =
             spawn_connection(self.inner.clone(), target, core, None).await?;
         if let Some(sender) = connection.inner.incoming.clone() {
@@ -177,7 +196,14 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
             Err(_) => break,
         };
         let datagram = buffer[..received.0].to_vec();
-        let Some(dcid) = parse_dcid(&datagram, &inner.routes) else {
+        let Some(dcid) = parse_dcid(&datagram, &inner.routes, inner.cid_len) else {
+            if inner.server.is_some()
+                && datagram.len() >= 21
+                && datagram[0] & 0x80 == 0
+                && datagram.len() > 1 + inner.cid_len
+            {
+                send_stateless_reset(&inner, received.1, &datagram[1..1 + inner.cid_len]).await;
+            }
             continue;
         };
         let route = inner
@@ -190,26 +216,81 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
             let _ = route.send(datagram).await;
             continue;
         }
-        if let Some(server) = &inner.server
-            && is_initial(&datagram)
+        if inner.server.is_some()
+            && datagram.len() >= 1200
+            && datagram[0] & 0x80 != 0
+            && let Some((version, dcid, scid)) = parse_long_cids(&datagram)
+            && !matches!(
+                version,
+                crate::wire::packet::VERSION_1 | crate::wire::packet::VERSION_2
+            )
         {
-            let Ok(local_cid) = random_cid(8) else {
-                continue;
+            let negotiation = crate::wire::packet::VersionNegotiation {
+                destination_connection_id: scid,
+                source_connection_id: dcid,
+                versions: vec![
+                    crate::wire::packet::VERSION_1,
+                    crate::wire::packet::VERSION_2,
+                ],
+            };
+            if let Ok(packet) = negotiation.encode() {
+                let _ = inner.udp.send_to(&packet, received.1).await;
+            }
+            continue;
+        }
+        if let Some(server) = &inner.server
+            && let Some(initial) = parse_initial(&datagram)
+        {
+            let (version, client_dcid, client_scid, token) = initial;
+            let (original_dcid, local_cid) = if server.retry {
+                if let Some(validated) = validate_retry_token(&inner.retry_key, received.1, &token)
+                {
+                    validated
+                } else {
+                    let Ok(retry_scid) = random_cid(8) else {
+                        continue;
+                    };
+                    let token =
+                        issue_retry_token(&inner.retry_key, received.1, &client_dcid, &retry_scid);
+                    if let Ok(packet) = crate::crypto::encode_retry(
+                        version,
+                        client_scid.clone(),
+                        retry_scid,
+                        token,
+                        &client_dcid,
+                    ) {
+                        let _ = inner.udp.send_to(&packet, received.1).await;
+                    }
+                    continue;
+                }
+            } else {
+                (client_dcid.clone(), client_scid)
             };
             let mut local_tp = server.transport.clone();
             local_tp.initial_source_connection_id = Some(local_cid.clone());
-            local_tp.original_destination_connection_id = Some(dcid.clone());
-            let tls = match TlsSession::server(
+            local_tp.original_destination_connection_id = Some(original_dcid.clone());
+            if server.retry {
+                local_tp.retry_source_connection_id = Some(local_cid.clone());
+            }
+            local_tp.stateless_reset_token = Some(reset_token(&inner.reset_key, &local_cid));
+            let tls = match TlsSession::server_with_version(
                 server.tls.clone(),
                 local_tp
                     .encode()
                     .map(|parameters| parameters.to_vec())
                     .unwrap_or_default(),
+                version,
             ) {
                 Ok(tls) => tls,
                 Err(_) => continue,
             };
-            let core = match Core::server(tls, dcid.clone(), local_cid.clone(), local_tp) {
+            let core = match Core::server(
+                tls,
+                client_dcid.clone(),
+                local_cid.clone(),
+                local_tp,
+                version,
+            ) {
                 Ok(core) => core,
                 Err(_) => continue,
             };
@@ -221,7 +302,7 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
             {
                 let mut routes = inner.routes.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(sender) = connection.inner.incoming.clone() {
-                    routes.insert(dcid.clone(), sender.clone());
+                    routes.insert(client_dcid, sender.clone());
                     routes.insert(local_cid, sender);
                 }
             }
@@ -320,6 +401,16 @@ impl Connection {
             return;
         }
         let _ = closed.changed().await;
+    }
+
+    /// Initiate a 1-RTT key update (RFC 9001 Section 6).
+    pub fn initiate_key_update(&self) -> Result<(), QuicError> {
+        {
+            let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());
+            core.initiate_key_update()?;
+        }
+        self.inner.notify.notify_one();
+        Ok(())
     }
 
     pub fn close(&self, code: u64, reason: &str) {
@@ -585,6 +676,7 @@ async fn send_outgoing(udp: &UdpSocket, peer: SocketAddr, outgoing: Vec<Vec<u8>>
 fn parse_dcid(
     datagram: &[u8],
     routes: &StdMutex<HashMap<Vec<u8>, mpsc::Sender<Vec<u8>>>>,
+    cid_len: usize,
 ) -> Option<Vec<u8>> {
     if datagram.len() < 5 {
         return None;
@@ -596,19 +688,189 @@ fn parse_dcid(
         }
         return Some(datagram[6..6 + dcid_len].to_vec());
     }
+    if datagram.len() <= 1 + cid_len {
+        return None;
+    }
+    let candidate = datagram[1..1 + cid_len].to_vec();
     let routes = routes.lock().unwrap_or_else(|e| e.into_inner());
-    routes
-        .keys()
-        .filter(|cid| datagram.get(1..1 + cid.len()) == Some(cid.as_slice()))
-        .max_by_key(|cid| cid.len())
-        .cloned()
+    routes.contains_key(&candidate).then_some(candidate)
 }
 
-fn is_initial(datagram: &[u8]) -> bool {
-    datagram.len() >= 6
-        && datagram[0] & 0x80 != 0
-        && datagram[1..5] == [0, 0, 0, 1]
-        && datagram[0] & 0x30 == 0
+fn parse_long_cids(datagram: &[u8]) -> Option<(u32, Vec<u8>, Vec<u8>)> {
+    if datagram.len() < 6 || datagram[0] & 0x80 == 0 {
+        return None;
+    }
+    let version = u32::from_be_bytes([datagram[1], datagram[2], datagram[3], datagram[4]]);
+    let mut cursor = &datagram[5..];
+    let dcid_len = usize::from(*cursor.first()?);
+    if dcid_len > 20 || cursor.len() < 1 + dcid_len + 1 {
+        return None;
+    }
+    let dcid = cursor[1..1 + dcid_len].to_vec();
+    cursor = &cursor[1 + dcid_len..];
+    let scid_len = usize::from(*cursor.first()?);
+    if scid_len > 20 || cursor.len() < 1 + scid_len {
+        return None;
+    }
+    let scid = cursor[1..1 + scid_len].to_vec();
+    Some((version, dcid, scid))
+}
+
+type InitialHeader = (u32, Vec<u8>, Vec<u8>, Vec<u8>);
+
+fn parse_initial(datagram: &[u8]) -> Option<InitialHeader> {
+    if datagram.len() < 6 || datagram[0] & 0x80 == 0 {
+        return None;
+    }
+    let version = u32::from_be_bytes([datagram[1], datagram[2], datagram[3], datagram[4]]);
+    let ty = (datagram[0] & 0x30) >> 4;
+    let initial_type = match version {
+        crate::wire::packet::VERSION_1 => 0,
+        crate::wire::packet::VERSION_2 => 1,
+        _ => return None,
+    };
+    if ty != initial_type {
+        return None;
+    }
+    let mut cursor = &datagram[5..];
+    let dcid_len = usize::from(*cursor.first()?);
+    if dcid_len > 20 || cursor.len() < 1 + dcid_len + 1 {
+        return None;
+    }
+    let dcid = cursor[1..1 + dcid_len].to_vec();
+    cursor = &cursor[1 + dcid_len..];
+    let scid_len = usize::from(*cursor.first()?);
+    if scid_len > 20 || cursor.len() < 1 + scid_len + 1 {
+        return None;
+    }
+    let scid = cursor[1..1 + scid_len].to_vec();
+    cursor = &cursor[1 + scid_len..];
+    let token_len = usize::try_from(crate::wire::varint::decode(&mut cursor).ok()?).ok()?;
+    if cursor.len() < token_len {
+        return None;
+    }
+    let token = cursor[..token_len].to_vec();
+    Some((version, dcid, scid, token))
+}
+
+fn ip_octets(ip: std::net::IpAddr) -> [u8; 16] {
+    match ip {
+        std::net::IpAddr::V4(ip) => ip.to_ipv6_mapped().octets(),
+        std::net::IpAddr::V6(ip) => ip.octets(),
+    }
+}
+
+fn issue_retry_token(
+    key: &[u8; 32],
+    peer: SocketAddr,
+    original_dcid: &[u8],
+    retry_scid: &[u8],
+) -> Vec<u8> {
+    use aws_lc_rs::hmac;
+    let mut payload = Vec::new();
+    payload.push(1u8);
+    payload.extend_from_slice(&ip_octets(peer.ip()));
+    payload.extend_from_slice(&peer.port().to_be_bytes());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    payload.extend_from_slice(&now.to_be_bytes());
+    payload.push(original_dcid.len() as u8);
+    payload.extend_from_slice(original_dcid);
+    payload.push(retry_scid.len() as u8);
+    payload.extend_from_slice(retry_scid);
+    let hmac_key = hmac::Key::new(hmac::HMAC_SHA256, key);
+    let tag = hmac::sign(&hmac_key, &payload);
+    payload.extend_from_slice(&tag.as_ref()[..16]);
+    payload
+}
+
+fn validate_retry_token(
+    key: &[u8; 32],
+    peer: SocketAddr,
+    token: &[u8],
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    use aws_lc_rs::hmac;
+    if token.len() < 1 + 16 + 2 + 8 + 1 + 1 + 16 || token[0] != 1 {
+        return None;
+    }
+    let payload_len = token.len() - 16;
+    let (payload, tag) = token.split_at(payload_len);
+    let hmac_key = hmac::Key::new(hmac::HMAC_SHA256, key);
+    let expected = hmac::sign(&hmac_key, payload);
+    if aws_lc_rs::constant_time::verify_slices_are_equal(&expected.as_ref()[..16], tag).is_err() {
+        return None;
+    }
+    let mut cursor = &payload[1..];
+    let ip = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&cursor[..16]).ok()?);
+    cursor = &cursor[16..];
+    let port = u16::from_be_bytes([cursor[0], cursor[1]]);
+    cursor = &cursor[2..];
+    let timestamp = u64::from_be_bytes(<[u8; 8]>::try_from(&cursor[..8]).ok()?);
+    cursor = &cursor[8..];
+    let expected = std::net::Ipv6Addr::from(ip_octets(peer.ip()));
+    if ip != expected || port != peer.port() {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if now.saturating_sub(timestamp) > 60 || timestamp > now.saturating_add(5) {
+        return None;
+    }
+    let odcid_len = usize::from(*cursor.first()?);
+    if cursor.len() < 1 + odcid_len + 1 {
+        return None;
+    }
+    let odcid = cursor[1..1 + odcid_len].to_vec();
+    cursor = &cursor[1 + odcid_len..];
+    let scid_len = usize::from(*cursor.first()?);
+    if cursor.len() < 1 + scid_len {
+        return None;
+    }
+    let retry_scid = cursor[1..1 + scid_len].to_vec();
+    Some((odcid, retry_scid))
+}
+
+async fn send_stateless_reset(
+    inner: &EndpointInner,
+    peer: SocketAddr,
+    destination_connection_id: &[u8],
+) {
+    let len = 64usize;
+    let mut reset = vec![0u8; len];
+    if random_bytes_into(&mut reset).is_err() {
+        return;
+    }
+    reset[0] = 0x40 | (reset[0] & 0x3f);
+    let token = reset_token(&inner.reset_key, destination_connection_id);
+    reset[len - 16..].copy_from_slice(&token);
+    let _ = inner.udp.send_to(&reset, peer).await;
+}
+
+fn reset_token(key: &[u8; 32], connection_id: &[u8]) -> [u8; 16] {
+    use aws_lc_rs::hmac;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, key);
+    let tag = hmac::sign(&key, connection_id);
+    let mut token = [0u8; 16];
+    token.copy_from_slice(&tag.as_ref()[..16]);
+    token
+}
+
+fn random_bytes<const N: usize>() -> Result<[u8; N], QuicError> {
+    let mut bytes = [0u8; N];
+    random_bytes_into(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn random_bytes_into(bytes: &mut [u8]) -> Result<(), QuicError> {
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    provider
+        .secure_random
+        .fill(bytes)
+        .map_err(|_| QuicError::Config("secure random is unavailable".to_string()))
 }
 
 fn random_cid(len: usize) -> Result<Vec<u8>, QuicError> {

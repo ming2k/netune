@@ -133,6 +133,7 @@ async fn owned_server_endpoint() -> (Endpoint, std::net::SocketAddr) {
         ServerConfigOwned {
             tls: Arc::new(tls),
             transport,
+            retry: true,
         },
     )
     .await

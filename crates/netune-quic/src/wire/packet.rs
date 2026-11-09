@@ -24,22 +24,45 @@ pub enum LongType {
 }
 
 impl LongType {
-    fn bits(self) -> u8 {
-        match self {
-            Self::Initial => 0x00,
-            Self::ZeroRtt => 0x10,
-            Self::Handshake => 0x20,
-            Self::Retry => 0x30,
+    /// Long-header type bits for a QUIC version (RFC 9369 changes them in v2).
+    pub fn bits_for(self, version: u32) -> u8 {
+        if version == VERSION_2 {
+            match self {
+                Self::Retry => 0x00,
+                Self::Initial => 0x10,
+                Self::ZeroRtt => 0x20,
+                Self::Handshake => 0x30,
+            }
+        } else {
+            match self {
+                Self::Initial => 0x00,
+                Self::ZeroRtt => 0x10,
+                Self::Handshake => 0x20,
+                Self::Retry => 0x30,
+            }
+        }
+    }
+
+    pub fn from_bits_for(version: u32, bits: u8) -> Self {
+        if version == VERSION_2 {
+            match bits & 0x30 {
+                0x00 => Self::Retry,
+                0x10 => Self::Initial,
+                0x20 => Self::ZeroRtt,
+                _ => Self::Handshake,
+            }
+        } else {
+            match bits & 0x30 {
+                0x00 => Self::Initial,
+                0x10 => Self::ZeroRtt,
+                0x20 => Self::Handshake,
+                _ => Self::Retry,
+            }
         }
     }
 
     pub fn from_bits(bits: u8) -> Self {
-        match bits & 0x30 {
-            0x00 => Self::Initial,
-            0x10 => Self::ZeroRtt,
-            0x20 => Self::Handshake,
-            _ => Self::Retry,
-        }
+        Self::from_bits_for(VERSION_1, bits)
     }
 }
 
@@ -84,7 +107,7 @@ impl LongPacket {
         }
         validate_packet_number_len(self.packet_number_len)?;
         let mut out = BytesMut::new();
-        let first = 0xc0 | self.ty.bits() | (self.packet_number_len - 1);
+        let first = 0xc0 | self.ty.bits_for(self.version) | (self.packet_number_len - 1);
         out.put_u8(first);
         out.put_u32(self.version);
         put_cid(&mut out, &self.destination_connection_id)?;
@@ -106,12 +129,6 @@ impl LongPacket {
                 "long header requires the fixed bit".to_string(),
             ));
         }
-        let ty = LongType::from_bits(first);
-        if ty == LongType::Retry {
-            return Err(WireError::InvalidPacket(
-                "Retry packets require an integrity tag and are not decoded here".to_string(),
-            ));
-        }
         if first & 0x0c != 0 {
             return Err(WireError::InvalidPacket(
                 "reserved bits are not zero".to_string(),
@@ -121,6 +138,12 @@ impl LongPacket {
         if version == 0 {
             return Err(WireError::InvalidPacket(
                 "version negotiation is not a data packet".to_string(),
+            ));
+        }
+        let ty = LongType::from_bits_for(version, first);
+        if ty == LongType::Retry {
+            return Err(WireError::InvalidPacket(
+                "Retry packets require an integrity tag and are not decoded here".to_string(),
             ));
         }
         let destination_connection_id = read_cid(buf)?;
@@ -235,6 +258,66 @@ impl ShortPacket {
             packet_number_len,
             payload,
         })
+    }
+}
+
+/// A Retry packet, including its integrity tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryPacket {
+    pub version: u32,
+    pub destination_connection_id: Vec<u8>,
+    pub source_connection_id: Vec<u8>,
+    pub token: Vec<u8>,
+    pub integrity_tag: [u8; 16],
+}
+
+impl RetryPacket {
+    pub fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
+        let first = buf.try_get_u8().map_err(|_| WireError::UnexpectedEnd)?;
+        if first & 0x80 == 0 {
+            return Err(WireError::InvalidPacket(
+                "Retry requires a long header".to_string(),
+            ));
+        }
+        let version = buf.try_get_u32().map_err(|_| WireError::UnexpectedEnd)?;
+        if version == 0 {
+            return Err(WireError::InvalidPacket(
+                "Retry requires a nonzero version".to_string(),
+            ));
+        }
+        let destination_connection_id = read_cid(buf)?;
+        let source_connection_id = read_cid(buf)?;
+        if buf.len() < 16 {
+            return Err(WireError::UnexpectedEnd);
+        }
+        let token_end = buf.len() - 16;
+        let token = Bytes::copy_from_slice(&buf[..token_end]);
+        let mut integrity_tag = [0u8; 16];
+        integrity_tag.copy_from_slice(&buf[token_end..]);
+        *buf = &[];
+        Ok(Self {
+            version,
+            destination_connection_id,
+            source_connection_id,
+            token: token.to_vec(),
+            integrity_tag,
+        })
+    }
+
+    pub fn encode_without_tag(&self) -> Result<Bytes, WireError> {
+        let mut out = BytesMut::new();
+        out.put_u8(0xc0 | LongType::Retry.bits_for(self.version));
+        out.put_u32(self.version);
+        put_cid(&mut out, &self.destination_connection_id)?;
+        put_cid(&mut out, &self.source_connection_id)?;
+        out.put_slice(&self.token);
+        Ok(out.freeze())
+    }
+
+    pub fn encode(&self) -> Result<Bytes, WireError> {
+        let mut out = BytesMut::from(self.encode_without_tag()?.as_ref());
+        out.put_slice(&self.integrity_tag);
+        Ok(out.freeze())
     }
 }
 
@@ -455,6 +538,20 @@ mod tests {
     fn packet_number_reconstruction_matches_the_rfc_example() {
         // RFC 9000 A.3: largest 0xa82f30ea, truncated 0x9b32, length 2.
         assert_eq!(decode_packet_number(0xa82f30ea, 0x9b32, 2), 0xa82f9b32);
+    }
+
+    #[test]
+    fn retry_round_trips() {
+        let packet = RetryPacket {
+            version: VERSION_1,
+            destination_connection_id: vec![1, 2, 3, 4],
+            source_connection_id: vec![5, 6, 7, 8],
+            token: b"retry token".to_vec(),
+            integrity_tag: [9; 16],
+        };
+        let wire = packet.encode().expect("encode");
+        let mut read: &[u8] = &wire;
+        assert_eq!(RetryPacket::decode(&mut read).expect("decode"), packet);
     }
 
     #[test]

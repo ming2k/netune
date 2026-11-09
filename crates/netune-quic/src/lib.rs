@@ -25,6 +25,10 @@ pub mod wire;
 #[cfg(feature = "owned-quic")]
 pub mod crypto;
 
+/// The owned QUIC engine (ADR-0028).
+#[cfg(feature = "owned-quic")]
+pub mod owned;
+
 pub use connector::{QuicConnection, QuicConnector};
 pub use datagram::QuicDatagramSession;
 pub use error::QuicError;

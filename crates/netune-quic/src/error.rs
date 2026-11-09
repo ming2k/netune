@@ -40,4 +40,18 @@ pub enum QuicError {
     /// General configuration or parameter error.
     #[error("quic configuration error: {0}")]
     Config(String),
+
+    /// Protocol violation or malformed owned-QUIC state.
+    #[error("quic protocol error: {0}")]
+    Protocol(String),
+
+    /// The connection has been closed.
+    #[error("quic connection closed: {0}")]
+    Closed(String),
+}
+
+impl From<crate::crypto::CryptoError> for QuicError {
+    fn from(error: crate::crypto::CryptoError) -> Self {
+        Self::Protocol(error.to_string())
+    }
 }

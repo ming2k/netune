@@ -80,6 +80,7 @@ fn client_tls() -> Arc<rustls::ClientConfig> {
         .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
         .with_no_client_auth();
     config.alpn_protocols = vec![b"h3".to_vec()];
+    config.enable_early_data = true;
     Arc::new(config)
 }
 
@@ -105,6 +106,7 @@ async fn owned_server_exchanges_a_bidi_stream_with_owned_client() {
             transport: transport(),
             retry: true,
             congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
         },
     )
     .await
@@ -131,6 +133,8 @@ async fn owned_server_exchanges_a_bidi_stream_with_owned_client() {
                 transport: transport(),
                 versions: vec![netune_quic::wire::packet::VERSION_1],
                 congestion: netune_quic::CongestionAlgorithm::NewReno,
+                enable_early_data: false,
+                session_cache: None,
             },
         )
         .await
@@ -159,6 +163,7 @@ async fn owned_server_speaks_quic_v2_with_owned_client() {
             transport: transport(),
             retry: true,
             congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
         },
     )
     .await
@@ -184,6 +189,8 @@ async fn owned_server_speaks_quic_v2_with_owned_client() {
                 transport: transport(),
                 versions: vec![VERSION_2],
                 congestion: netune_quic::CongestionAlgorithm::NewReno,
+                enable_early_data: false,
+                session_cache: None,
             },
         )
         .await
@@ -209,6 +216,7 @@ async fn empty_stream_fin_is_delivered() {
             transport: transport(),
             retry: true,
             congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
         },
     )
     .await
@@ -234,11 +242,104 @@ async fn empty_stream_fin_is_delivered() {
                 transport: transport(),
                 versions: vec![netune_quic::wire::packet::VERSION_1],
                 congestion: netune_quic::CongestionAlgorithm::NewReno,
+                enable_early_data: false,
+                session_cache: None,
             },
         )
         .await
         .expect("connect");
     let (mut send, _recv) = connection.open_bi().await.expect("open bi");
     send.finish().await.expect("finish");
+    server_task.await.expect("server task");
+}
+
+#[tokio::test]
+async fn resumed_session_sends_early_data() {
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport(),
+            retry: true,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: true,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+    let server_task = tokio::spawn(async move {
+        for _ in 0..2 {
+            let connection = match server.accept().await {
+                Ok(connection) => connection,
+                Err(_) => return,
+            };
+            tokio::spawn(async move {
+                let Ok((mut send, mut recv)) = connection.accept_bi().await else {
+                    return;
+                };
+                let Ok(data) = recv.read(1024).await else {
+                    return;
+                };
+                let Some(data) = data else { return };
+                assert_eq!(data.as_ref(), b"early");
+                let _ = send.write_all(b"ok").await;
+                let _ = send.finish().await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            });
+        }
+    });
+    let client_endpoint = Endpoint::client().await.expect("client endpoint");
+    let cache = std::sync::Arc::new(netune_quic::owned::SessionCache::new());
+    let tls = client_tls();
+    let first = client_endpoint
+        .connect(
+            addr,
+            "localhost",
+            ClientConfigOwned {
+                tls: tls.clone(),
+                transport: transport(),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
+                enable_early_data: true,
+                session_cache: Some(cache.clone()),
+            },
+        )
+        .await
+        .expect("first connect");
+    // Let the server's NewSessionTicket flight reach rustls before reconnecting.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(first);
+
+    let second = client_endpoint
+        .connect_early(
+            addr,
+            "localhost",
+            ClientConfigOwned {
+                tls,
+                transport: transport(),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
+                enable_early_data: true,
+                session_cache: Some(cache),
+            },
+        )
+        .await
+        .expect("second connect");
+    assert!(
+        second.early_data_available(),
+        "session cache and early keys"
+    );
+    let (mut send, mut recv) = second.open_bi().await.expect("open early bi");
+    send.write_all(b"early").await.expect("early write");
+    send.finish().await.expect("early finish");
+    second.wait_established().await;
+    assert!(second.early_data_accepted(), "server accepted early data");
+    let response = tokio::time::timeout(Duration::from_secs(2), recv.read(16))
+        .await
+        .expect("response timeout")
+        .expect("response read")
+        .expect("response bytes");
+    assert_eq!(response.as_ref(), b"ok");
     server_task.await.expect("server task");
 }

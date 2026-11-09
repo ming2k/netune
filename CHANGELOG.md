@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   9001 client Initial vector decrypts and re-protects byte-for-byte.
   `quinn`/`quinn-proto` are dev-only interop oracles; the H3 client and ingress
   now run over the owned transport.
+- **Session resumption and 0-RTT.** The client caches authenticated QUIC
+  transport parameters alongside rustls tickets; the server enables early data
+  only with stateful single-use sessions; rejected early frames are replayed in
+  1-RTT; H3 can send early requests before the handshake completes (ADR-0031).
 - **HTTP/3 extension surfaces.** SETTINGS-gated RFC 9297 datagrams are routed
   to their request streams by Quarter Stream ID, and RFC 9220 extended CONNECT
   uses a typed `ExtendedConnectProtocol` request extension (ADR-0030).

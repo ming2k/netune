@@ -11,7 +11,7 @@ use netune_trace::{EventKind, TraceCollector};
 use rustls_platform_verifier::BuilderVerifierExt;
 
 use crate::error::QuicError;
-use crate::owned::{ClientConfigOwned, Connection, Endpoint};
+use crate::owned::{ClientConfigOwned, Connection, Endpoint, SessionCache};
 use crate::profile::{QuicProfile, QuicProfileRegistry};
 use crate::socket::QuicSocketConfig;
 use crate::wire::transport_parameters::TransportParameters;
@@ -23,6 +23,8 @@ pub struct QuicConnector {
     socket_config: QuicSocketConfig,
     confinement: EgressConfinement,
     custom_tls: Option<rustls::ClientConfig>,
+    session_cache: SessionCache,
+    client_tls: Arc<std::sync::Mutex<Option<Arc<rustls::ClientConfig>>>>,
 }
 
 impl std::fmt::Debug for QuicConnector {
@@ -48,6 +50,8 @@ impl QuicConnector {
             socket_config: QuicSocketConfig::default(),
             confinement: EgressConfinement::Unrestricted,
             custom_tls: None,
+            session_cache: SessionCache::new(),
+            client_tls: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -83,11 +87,37 @@ impl QuicConnector {
     /// Overrides the TLS client configuration (must use `aws-lc-rs`, [INV-QUIC-01]).
     pub fn with_tls_config(mut self, tls: rustls::ClientConfig) -> Self {
         self.custom_tls = Some(tls);
+        self.client_tls = Arc::new(std::sync::Mutex::new(None));
         self
     }
 
     /// Establishes a QUIC connection to the target address and server name.
+    ///
+    /// Resolves once the handshake completes. Use [`connect_early`](Self::connect_early)
+    /// when a resumed session may send 0-RTT data before the handshake.
     pub async fn connect(
+        &self,
+        target_addr: SocketAddr,
+        server_name: &str,
+        recorder: Option<TraceCollector>,
+    ) -> Result<QuicConnection, QuicError> {
+        let connection = self
+            .connect_early(target_addr, server_name, recorder.clone())
+            .await?;
+        connection.connection().wait_established().await;
+        if let Some(rec) = &recorder {
+            rec.mark(EventKind::QuicEnd, 1, 0);
+        }
+        Ok(connection)
+    }
+
+    /// Starts a QUIC connection without waiting for the handshake.
+    ///
+    /// When the connector has a resumed TLS session and a cached set of peer
+    /// transport parameters, streams can be opened and 0-RTT frames emitted
+    /// immediately. Use [`QuicConnection::connection`]`::early_data_available`
+    /// to decide whether to send early application data.
+    pub async fn connect_early(
         &self,
         target_addr: SocketAddr,
         server_name: &str,
@@ -107,27 +137,24 @@ impl QuicConnector {
         let udp = self.socket_config.create_tokio_socket(target_addr)?;
         let endpoint = Endpoint::client_with_udp(udp).await?;
         let connection = match endpoint
-            .connect(
+            .connect_early(
                 target_addr,
                 server_name,
                 ClientConfigOwned {
-                    tls: Arc::new(tls),
+                    tls,
                     transport,
                     versions: vec![
                         crate::wire::packet::VERSION_1,
                         crate::wire::packet::VERSION_2,
                     ],
                     congestion: self.profile.congestion,
+                    enable_early_data: self.profile.enable_0rtt,
+                    session_cache: Some(self.session_cache.clone().into()),
                 },
             )
             .await
         {
-            Ok(connection) => {
-                if let Some(rec) = &recorder {
-                    rec.mark(EventKind::QuicEnd, 1, 0);
-                }
-                connection
-            }
+            Ok(connection) => connection,
             Err(error) => {
                 if let Some(rec) = &recorder {
                     rec.mark(EventKind::QuicEnd, 0, 0);
@@ -143,7 +170,14 @@ impl QuicConnector {
         })
     }
 
-    fn build_tls_config(&self) -> Result<rustls::ClientConfig, QuicError> {
+    fn build_tls_config(&self) -> Result<Arc<rustls::ClientConfig>, QuicError> {
+        let mut cached = self
+            .client_tls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(tls) = cached.as_ref() {
+            return Ok(tls.clone());
+        }
         let mut tls = if let Some(tls) = &self.custom_tls {
             tls.clone()
         } else {
@@ -158,6 +192,9 @@ impl QuicConnector {
         if !self.profile.alpn.is_empty() {
             tls.alpn_protocols = self.profile.alpn.clone();
         }
+        tls.enable_early_data = self.profile.enable_0rtt;
+        let tls = Arc::new(tls);
+        *cached = Some(tls.clone());
         Ok(tls)
     }
 

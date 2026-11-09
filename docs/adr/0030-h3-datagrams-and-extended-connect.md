@@ -88,6 +88,6 @@ were unusable.
 
 ## Known gaps
 
-- 0-RTT remains open (ADR-0028/ADR-0029).
+
 - WebTransport capsules and stream-per-session semantics are not part of this
   decision.

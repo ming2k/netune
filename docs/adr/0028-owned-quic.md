@@ -142,10 +142,7 @@ window, dynamic flow-control windows, RFC 9221 datagrams, Retry, stateless
 reset, key update, QUIC v2 and Version Negotiation (ADR-0029). The following RFC 9000/9001 edges are not yet
 implemented and must not be inferred from the production switch:
 
-- 0-RTT and session resumption.
-
-
-They are separate capabilities, not hidden behaviour.
+None at the transport level after ADR-0031.
 
 ## Invariants & Behavioral Boundaries
 

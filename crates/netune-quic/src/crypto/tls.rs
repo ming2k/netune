@@ -101,6 +101,22 @@ impl TlsSession {
         .map(Vec::from)
     }
 
+    /// Early data keys if the resumed session offers 0-RTT.
+    pub fn zero_rtt_keys(&self) -> Option<rustls::quic::DirectionalKeys> {
+        match self {
+            Self::Client(session) => session.zero_rtt_keys(),
+            Self::Server(session) => session.zero_rtt_keys(),
+        }
+    }
+
+    /// Whether the server accepted the client's 0-RTT data.
+    pub fn is_early_data_accepted(&self) -> bool {
+        match self {
+            Self::Client(session) => session.is_early_data_accepted(),
+            Self::Server(session) => session.zero_rtt_keys().is_some(),
+        }
+    }
+
     /// True until TLS reports the handshake complete.
     pub fn is_handshaking(&self) -> bool {
         match self {

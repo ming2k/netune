@@ -355,10 +355,6 @@ impl Shared {
 
     /// Apply the peer's SETTINGS frame to the encoder.
     pub fn update_peer_settings(&self, settings: Settings) {
-        eprintln!(
-            "peer settings connect={} datagram={}",
-            settings.enable_connect_protocol, settings.h3_datagram
-        );
         self.peer_h3_datagram
             .store(settings.h3_datagram, Ordering::SeqCst);
         self.peer_connect_protocol

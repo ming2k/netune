@@ -8,7 +8,9 @@
 pub(crate) mod congestion;
 pub(crate) mod core;
 pub mod endpoint;
+pub mod session;
 
 pub use endpoint::{
     ClientConfigOwned, Connection, Endpoint, RecvStream, SendStream, ServerConfigOwned,
 };
+pub use session::SessionCache;

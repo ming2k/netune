@@ -470,6 +470,101 @@ impl H3Client {
         Ok(client)
     }
 
+    /// Connect without waiting for the QUIC handshake.
+    ///
+    /// This is only faster than [`H3Client::connect`] when the connector has a
+    /// resumed session and cached peer transport parameters; otherwise the
+    /// call waits for the handshake before starting H3. The returned client may
+    /// send early requests; if the server rejects 0-RTT, the QUIC core replays
+    /// the early stream frames after the handshake.
+    pub async fn connect_early(
+        connector: &netune_quic::QuicConnector,
+        target: SocketAddr,
+        server_name: &str,
+        recorder: Option<TraceCollector>,
+    ) -> Result<Self, H3Error> {
+        Self::connect_early_with_settings_and_config(
+            connector,
+            target,
+            server_name,
+            recorder,
+            H3SettingsProfile::default(),
+            H3ClientConfig::default(),
+        )
+        .await
+    }
+
+    /// Connect early with an explicit HTTP/3 SETTINGS profile.
+    pub async fn connect_early_with_settings(
+        connector: &netune_quic::QuicConnector,
+        target: SocketAddr,
+        server_name: &str,
+        recorder: Option<TraceCollector>,
+        settings: H3SettingsProfile,
+    ) -> Result<Self, H3Error> {
+        Self::connect_early_with_settings_and_config(
+            connector,
+            target,
+            server_name,
+            recorder,
+            settings,
+            H3ClientConfig::default(),
+        )
+        .await
+    }
+
+    /// Connect early with explicit SETTINGS and bounds.
+    pub async fn connect_early_with_settings_and_config(
+        connector: &netune_quic::QuicConnector,
+        target: SocketAddr,
+        server_name: &str,
+        recorder: Option<TraceCollector>,
+        settings: H3SettingsProfile,
+        config: H3ClientConfig,
+    ) -> Result<Self, H3Error> {
+        settings
+            .validate()
+            .map_err(|reason| H3Error::Profile(reason.to_string()))?;
+        let profile = connector.profile_name();
+        let quic = connector
+            .connect_early(target, server_name, recorder.clone())
+            .await?;
+        if !quic.connection().early_data_available() {
+            quic.connection().wait_established().await;
+        }
+        let settings_name = settings.name.clone();
+        let mut client =
+            Self::new_with_settings_and_config(quic.connection(), recorder, settings, config)
+                .await?;
+        client.quic = Some(quic);
+        client.quic_profile = Some(profile);
+        client.trace_context = Some(H3TraceContext {
+            authority: target.to_string(),
+            server_name: server_name.to_string(),
+            identity: ConnectionIdentity {
+                tls_server_name: Some(server_name.to_string()),
+                h3_profile: Some(profile.to_string()),
+                h3_settings_profile: Some(settings_name),
+                ..ConnectionIdentity::default()
+            },
+        });
+        Ok(client)
+    }
+
+    /// Wait for the underlying QUIC handshake to complete.
+    pub async fn wait_handshake(&self) {
+        if let Some(quic) = &self.quic {
+            quic.connection().wait_established().await;
+        }
+    }
+
+    /// Whether the server accepted this session's 0-RTT data.
+    pub fn early_data_accepted(&self) -> bool {
+        self.quic
+            .as_ref()
+            .is_some_and(|quic| quic.connection().early_data_accepted())
+    }
+
     /// The resolved QUIC profile that shapes this H3 connection.
     pub const fn quic_profile(&self) -> Option<&'static str> {
         self.quic_profile

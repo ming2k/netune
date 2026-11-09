@@ -95,6 +95,7 @@ async fn make_server_endpoint() -> (Endpoint, std::net::SocketAddr) {
             transport,
             retry: true,
             congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
         },
     )
     .await

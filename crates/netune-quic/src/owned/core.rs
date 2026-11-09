@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use rustls::pki_types::ServerName;
-use rustls::quic::{KeyChange, Keys, PacketKey, Secrets};
+use rustls::quic::{DirectionalKeys, KeyChange, Keys, PacketKey, Secrets};
 use rustls::{ClientConfig, Side};
 
 use crate::crypto::{
@@ -23,6 +23,7 @@ use crate::error::QuicError;
 use crate::profile::CongestionAlgorithm;
 
 use super::congestion::Congestion;
+use super::session::SessionCache;
 use crate::wire::frame::{AckFrame, AckRange, Frame};
 use crate::wire::packet::{LongPacket, LongType, ShortPacket, VersionNegotiation};
 use crate::wire::transport_parameters::TransportParameters;
@@ -113,6 +114,16 @@ struct SentPacket {
     frames: Vec<Frame>,
 }
 
+/// Client-side knobs that are not part of the QUIC wire parameters.
+pub(crate) struct ClientOptions {
+    pub version: u32,
+    pub supported_versions: Vec<u32>,
+    pub congestion: CongestionAlgorithm,
+    pub early_data: bool,
+    pub session_cache: Option<std::sync::Arc<SessionCache>>,
+    pub session_key: String,
+}
+
 /// The owned QUIC connection state.
 pub(crate) struct Core {
     side: Side,
@@ -173,6 +184,12 @@ pub(crate) struct Core {
     migration_disabled: bool,
     path_challenge: Option<[u8; 8]>,
     path_validated: bool,
+    early_keys: Option<DirectionalKeys>,
+    early_frames: Vec<Frame>,
+    early_data_accepted: bool,
+    early_data_available: bool,
+    session_cache: Option<std::sync::Arc<SessionCache>>,
+    session_key: String,
 }
 
 impl Core {
@@ -184,11 +201,9 @@ impl Core {
         original_dcid: Vec<u8>,
         local_cid: Vec<u8>,
         local_tp: TransportParameters,
-        version: u32,
-        supported_versions: Vec<u32>,
-        congestion: CongestionAlgorithm,
+        options: ClientOptions,
     ) -> Result<Self, QuicError> {
-        let initial = initial_keys_for_version(&original_dcid, Side::Client, version)?;
+        let initial = initial_keys_for_version(&original_dcid, Side::Client, options.version)?;
         let local_max_data = local_tp.initial_max_data.unwrap_or(0);
         let client_tp = local_tp.clone();
         let migration_disabled = local_tp.disable_active_migration;
@@ -201,8 +216,18 @@ impl Core {
             client_config.clone(),
             server_name.clone(),
             encoded_tp,
-            version,
+            options.version,
         )?;
+        let early_keys = if options.early_data {
+            tls.zero_rtt_keys()
+        } else {
+            None
+        };
+        let cached = options
+            .session_cache
+            .as_ref()
+            .and_then(|cache| cache.get(&options.session_key));
+        let early_data_available = early_keys.is_some() && cached.is_some();
         let mut core = Self {
             side: Side::Client,
             tls,
@@ -247,7 +272,7 @@ impl Core {
             peer_max_datagram: None,
             send_datagrams: VecDeque::new(),
             recv_datagrams: VecDeque::new(),
-            congestion: Congestion::new(congestion, Instant::now()),
+            congestion: Congestion::new(options.congestion, Instant::now()),
             bytes_in_flight: 0,
             peer_opened_bidi: 0,
             peer_opened_uni: 0,
@@ -261,12 +286,21 @@ impl Core {
             initial_odcid,
             retried: false,
             retry_source_cid: None,
-            version,
-            supported_versions,
+            version: options.version,
+            supported_versions: options.supported_versions,
             migration_disabled,
             path_challenge: None,
             path_validated: false,
+            early_keys,
+            early_frames: Vec::new(),
+            early_data_accepted: false,
+            early_data_available,
+            session_cache: options.session_cache,
+            session_key: options.session_key,
         };
+        if let Some(parameters) = cached {
+            core.apply_peer_parameters(parameters);
+        }
         core.drain_tls()?;
         Ok(core)
     }
@@ -347,6 +381,12 @@ impl Core {
             migration_disabled,
             path_challenge: None,
             path_validated: false,
+            early_keys: None,
+            early_frames: Vec::new(),
+            early_data_accepted: false,
+            early_data_available: false,
+            session_cache: None,
+            session_key: String::new(),
         })
     }
 
@@ -385,6 +425,14 @@ impl Core {
 
     pub(crate) fn path_validated(&self) -> bool {
         self.path_validated
+    }
+
+    pub(crate) fn early_data_available(&self) -> bool {
+        self.early_data_available && self.early_keys.is_some() && !self.established
+    }
+
+    pub(crate) fn early_data_accepted(&self) -> bool {
+        self.early_data_accepted
     }
 
     pub(crate) fn max_datagram_size(&self) -> Option<usize> {
@@ -483,6 +531,16 @@ impl Core {
             .to_vec();
         self.version = version;
         self.tls = TlsSession::client_with_version(config, server_name, encoded_tp, version)?;
+        self.early_keys = self.tls.zero_rtt_keys();
+        self.early_data_available = self.early_keys.is_some() && self.peer_tp.is_some();
+        self.early_frames.clear();
+        self.send_data = 0;
+        for stream in self.streams.values_mut() {
+            if let Some(send) = stream.send.as_mut() {
+                send.sent = 0;
+                send.fin_sent = false;
+            }
+        }
         self.spaces = [
             Space::new(Some(initial_keys_for_version(
                 &self.original_dcid,
@@ -541,6 +599,16 @@ impl Core {
             .map_err(|error| QuicError::Protocol(error.to_string()))?
             .to_vec();
         self.tls = TlsSession::client_with_version(config, server_name, encoded_tp, self.version)?;
+        self.early_keys = self.tls.zero_rtt_keys();
+        self.early_data_available = self.early_keys.is_some() && self.peer_tp.is_some();
+        self.early_frames.clear();
+        self.send_data = 0;
+        for stream in self.streams.values_mut() {
+            if let Some(send) = stream.send.as_mut() {
+                send.sent = 0;
+                send.fin_sent = false;
+            }
+        }
         self.original_dcid = retry_source.clone();
         self.initial_token = packet.token;
         self.retried = true;
@@ -793,6 +861,25 @@ impl Core {
                     cursor = &[];
                     continue;
                 }
+                if ty == LongType::ZeroRtt {
+                    if !self.server {
+                        return Err(QuicError::Protocol(
+                            "client received a 0-RTT packet".to_string(),
+                        ));
+                    }
+                    let (_, packet_end) = long_header_info(cursor)?;
+                    let Some(keys) = &self.early_keys else {
+                        cursor = &cursor[packet_end..];
+                        continue;
+                    };
+                    let mut packet = cursor[..packet_end].to_vec();
+                    let (pn, _pn_len, payload) =
+                        unprotect_long(&mut packet, self.largest(Level::OneRtt), keys)?;
+                    self.process_early_frames(&payload)?;
+                    self.record(Level::OneRtt, pn, true);
+                    cursor = &cursor[packet_end..];
+                    continue;
+                }
                 let (_, packet_end) = long_header_info(cursor)?;
                 let mut packet = cursor[..packet_end].to_vec();
                 let level = match ty {
@@ -818,7 +905,7 @@ impl Core {
                 cursor = &cursor[packet_end..];
             }
         }
-        self.update_established();
+        self.update_established()?;
         Ok(())
     }
 
@@ -861,6 +948,20 @@ impl Core {
                 continue;
             }
             self.queue_packet(level, frames)?;
+        }
+        if self.early_data_available
+            && self.early_keys.is_some()
+            && !self.established
+            && self.bytes_in_flight < self.congestion.window()
+        {
+            let mut frames = Vec::new();
+            self.append_stream_frames(&mut frames);
+            if let Some(data) = self.send_datagrams.pop_front() {
+                frames.push(Frame::Datagram { data });
+            }
+            if !frames.is_empty() {
+                self.queue_zero_rtt(frames)?;
+            }
         }
         Ok(())
     }
@@ -1041,6 +1142,15 @@ impl Core {
         self.accept_uni.pop_front()
     }
 
+    fn apply_peer_parameters(&mut self, parameters: TransportParameters) {
+        self.peer_max_bidi = parameters.initial_max_streams_bidi.unwrap_or(0);
+        self.peer_max_uni = parameters.initial_max_streams_uni.unwrap_or(0);
+        self.send_max_data = parameters.initial_max_data.unwrap_or(0);
+        self.peer_max_datagram = parameters.max_datagram_frame_size;
+        self.peer_reset_token = parameters.stateless_reset_token;
+        self.peer_tp = Some(parameters);
+    }
+
     fn drain_tls(&mut self) -> Result<(), QuicError> {
         loop {
             let level = self.send_level;
@@ -1081,28 +1191,62 @@ impl Core {
         if let Some(peer) = self.tls.peer_transport_parameters() {
             let parameters = TransportParameters::decode(&peer)
                 .map_err(|error| QuicError::Protocol(error.to_string()))?;
-            if self.retried {
-                if parameters.retry_source_connection_id.as_deref()
-                    != self.retry_source_cid.as_deref()
-                {
-                    return Err(QuicError::Protocol(
-                        "Retry source CID transport parameter is invalid".to_string(),
-                    ));
+            if self.server && self.early_keys.is_none() {
+                self.early_keys = self.tls.zero_rtt_keys();
+            }
+            let cacheable = !self.tls.is_handshaking();
+            self.apply_peer_parameters(parameters.clone());
+            if cacheable && let Some(cache) = &self.session_cache {
+                cache.insert(&self.session_key, parameters.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn process_early_frames(&mut self, payload: &[u8]) -> Result<(), QuicError> {
+        let mut cursor = payload;
+        while !cursor.is_empty() {
+            let frame = Frame::decode(&mut cursor)
+                .map_err(|error| QuicError::Protocol(error.to_string()))?;
+            match frame {
+                Frame::Stream {
+                    stream_id,
+                    offset,
+                    fin,
+                    data,
+                } => self.handle_stream(stream_id, offset, fin, &data)?,
+                Frame::Datagram { data } => {
+                    if self.recv_datagrams.len() < 64 {
+                        self.recv_datagrams.push_back(data);
+                    }
                 }
-                if parameters.original_destination_connection_id.as_deref()
-                    != Some(self.initial_odcid.as_slice())
-                {
+                Frame::Ping | Frame::Padding { .. } => {}
+                Frame::MaxData(maximum) => self.send_max_data = self.send_max_data.max(maximum),
+                Frame::MaxStreamData { stream_id, maximum } => {
+                    if let Some(send) = self
+                        .streams
+                        .get_mut(&stream_id)
+                        .and_then(|stream| stream.send.as_mut())
+                    {
+                        send.max_data = send.max_data.max(maximum);
+                    }
+                }
+                Frame::MaxStreams { bidi, maximum } => {
+                    if bidi {
+                        self.peer_max_bidi = self.peer_max_bidi.max(maximum);
+                    } else {
+                        self.peer_max_uni = self.peer_max_uni.max(maximum);
+                    }
+                }
+                Frame::DataBlocked(_)
+                | Frame::StreamDataBlocked { .. }
+                | Frame::StreamsBlocked { .. } => {}
+                _ => {
                     return Err(QuicError::Protocol(
-                        "original destination CID transport parameter is invalid".to_string(),
+                        "frame is not allowed in a 0-RTT packet".to_string(),
                     ));
                 }
             }
-            self.peer_max_bidi = parameters.initial_max_streams_bidi.unwrap_or(0);
-            self.peer_max_uni = parameters.initial_max_streams_uni.unwrap_or(0);
-            self.send_max_data = parameters.initial_max_data.unwrap_or(0);
-            self.peer_max_datagram = parameters.max_datagram_frame_size;
-            self.peer_reset_token = parameters.stateless_reset_token;
-            self.peer_tp = Some(parameters);
         }
         Ok(())
     }
@@ -1336,17 +1480,82 @@ impl Core {
         Ok(())
     }
 
-    fn update_established(&mut self) {
+    fn validate_retry_parameters(&mut self) -> Result<(), QuicError> {
+        if !self.retried {
+            return Ok(());
+        }
+        let peer = self
+            .tls
+            .peer_transport_parameters()
+            .ok_or_else(|| QuicError::Protocol("missing peer transport parameters".to_string()))?;
+        let parameters = TransportParameters::decode(&peer)
+            .map_err(|error| QuicError::Protocol(error.to_string()))?;
+        if parameters.retry_source_connection_id.as_deref() != self.retry_source_cid.as_deref() {
+            return Err(QuicError::Protocol(
+                "Retry source CID transport parameter is invalid".to_string(),
+            ));
+        }
+        if parameters.original_destination_connection_id.as_deref()
+            != Some(self.initial_odcid.as_slice())
+        {
+            return Err(QuicError::Protocol(
+                "original destination CID transport parameter is invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn update_established(&mut self) -> Result<(), QuicError> {
         if !self.established
             && self.spaces[Level::OneRtt as usize].keys.is_some()
             && !self.tls.is_handshaking()
         {
+            if !self.server {
+                self.validate_retry_parameters()?;
+            }
             self.established = true;
+            self.early_data_accepted = self.tls.is_early_data_accepted();
+            if !self.server && !self.early_data_accepted && !self.early_frames.is_empty() {
+                self.retransmit[Level::OneRtt as usize].append(&mut self.early_frames);
+            } else {
+                self.early_frames.clear();
+            }
+            self.early_keys = None;
             if self.server && !self.handshake_done {
                 self.control_frames.push(Frame::HandshakeDone);
                 self.handshake_done = true;
             }
         }
+        Ok(())
+    }
+
+    fn queue_zero_rtt(&mut self, frames: Vec<Frame>) -> Result<(), QuicError> {
+        let keys = self
+            .early_keys
+            .as_ref()
+            .ok_or_else(|| QuicError::Protocol("missing 0-RTT keys".to_string()))?;
+        let packet_number = self.spaces[Level::OneRtt as usize].next_pn;
+        let mut payload = BytesMut::new();
+        for frame in &frames {
+            frame
+                .encode(&mut payload)
+                .map_err(|error| QuicError::Protocol(error.to_string()))?;
+        }
+        let packet = LongPacket {
+            ty: LongType::ZeroRtt,
+            version: self.version,
+            destination_connection_id: self.original_dcid.clone(),
+            source_connection_id: self.local_cid.clone(),
+            token: Vec::new(),
+            packet_number,
+            packet_number_len: 4,
+            payload: payload.freeze(),
+        };
+        let protected = protect_long(&packet, keys)?;
+        self.spaces[Level::OneRtt as usize].next_pn += 1;
+        self.early_frames.extend(frames);
+        self.outgoing.push(protected.to_vec());
+        Ok(())
     }
 
     fn queue_packet(&mut self, level: Level, frames: Vec<Frame>) -> Result<(), QuicError> {
@@ -1678,9 +1887,14 @@ mod tests {
             vec![1; 8],
             vec![2; 8],
             TransportParameters::default(),
-            crate::wire::packet::VERSION_1,
-            vec![crate::wire::packet::VERSION_1],
-            CongestionAlgorithm::NewReno,
+            ClientOptions {
+                version: crate::wire::packet::VERSION_1,
+                supported_versions: vec![crate::wire::packet::VERSION_1],
+                congestion: CongestionAlgorithm::NewReno,
+                early_data: false,
+                session_cache: None,
+                session_key: "localhost".to_string(),
+            },
         )
         .expect("core")
     }

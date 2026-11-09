@@ -92,6 +92,7 @@ impl H3Server {
             transport,
             retry: true,
             congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: true,
         };
         let endpoint =
             netune_quic::owned::Endpoint::server(address.to_string().as_str(), server_config)

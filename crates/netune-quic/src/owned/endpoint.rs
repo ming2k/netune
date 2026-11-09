@@ -32,6 +32,10 @@ pub struct ClientConfigOwned {
     /// Preferred QUIC version first; later entries are Version Negotiation fallbacks.
     pub versions: Vec<u32>,
     pub congestion: crate::profile::CongestionAlgorithm,
+    /// Enable 0-RTT when a resumed TLS session offers early keys.
+    pub enable_early_data: bool,
+    /// QUIC transport parameters remembered from prior authenticated sessions.
+    pub session_cache: Option<Arc<super::session::SessionCache>>,
 }
 
 /// A server configuration for the owned endpoint.
@@ -42,6 +46,8 @@ pub struct ServerConfigOwned {
     /// Require a Retry token before allocating connection state.
     pub retry: bool,
     pub congestion: crate::profile::CongestionAlgorithm,
+    /// Accept 0-RTT tickets using a stateful, single-use resumption cache.
+    pub enable_early_data: bool,
 }
 
 /// A bound owned QUIC endpoint.
@@ -70,7 +76,13 @@ impl Endpoint {
     }
 
     /// Bind a server endpoint.
-    pub async fn server(address: &str, config: ServerConfigOwned) -> Result<Self, QuicError> {
+    pub async fn server(address: &str, mut config: ServerConfigOwned) -> Result<Self, QuicError> {
+        if config.enable_early_data {
+            let mut tls = (*config.tls).clone();
+            tls.max_early_data_size = u32::MAX;
+            tls.session_storage = rustls::server::ServerSessionMemoryCache::new(1024);
+            config.tls = Arc::new(tls);
+        }
         Self::bind(address, Some(config)).await
     }
 
@@ -123,10 +135,26 @@ impl Endpoint {
         server_name: &str,
         config: ClientConfigOwned,
     ) -> Result<Connection, QuicError> {
+        let connection = self.connect_early(target, server_name, config).await?;
+        connection.wait_established().await;
+        Ok(connection)
+    }
+
+    /// Start a connection without waiting for the handshake.
+    ///
+    /// When a resumed session and cached transport parameters are available,
+    /// the returned connection can open streams and emit 0-RTT data immediately.
+    pub async fn connect_early(
+        &self,
+        target: SocketAddr,
+        server_name: &str,
+        config: ClientConfigOwned,
+    ) -> Result<Connection, QuicError> {
         let local_cid = random_cid(8)?;
         let original_dcid = random_cid(8)?;
         let mut local_tp = config.transport;
         local_tp.initial_source_connection_id = Some(local_cid.clone());
+        let session_key = server_name.to_string();
         let server_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
             .map_err(|error| QuicError::Config(error.to_string()))?;
         let versions = if config.versions.is_empty() {
@@ -141,9 +169,14 @@ impl Endpoint {
             original_dcid,
             local_cid.clone(),
             local_tp,
-            version,
-            versions,
-            config.congestion,
+            super::core::ClientOptions {
+                version,
+                supported_versions: versions,
+                congestion: config.congestion,
+                early_data: config.enable_early_data,
+                session_cache: config.session_cache,
+                session_key,
+            },
         )?;
         let (connection, outgoing) =
             spawn_connection(self.inner.clone(), target, core, None).await?;
@@ -155,13 +188,6 @@ impl Endpoint {
                 .insert(local_cid, sender);
         }
         send_outgoing(&self.inner.udp, target, outgoing).await;
-        let mut established = connection.inner.established.subscribe();
-        if !*established.borrow() {
-            established
-                .changed()
-                .await
-                .map_err(|_| QuicError::Closed("connection driver stopped".to_string()))?;
-        }
         Ok(connection)
     }
 
@@ -391,6 +417,29 @@ impl Connection {
                 return Ok(datagram);
             }
             notified.await;
+        }
+    }
+
+    pub fn early_data_available(&self) -> bool {
+        self.inner
+            .core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .early_data_available()
+    }
+
+    pub fn early_data_accepted(&self) -> bool {
+        self.inner
+            .core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .early_data_accepted()
+    }
+
+    pub async fn wait_established(&self) {
+        let mut established = self.inner.established.subscribe();
+        if !*established.borrow() {
+            let _ = established.changed().await;
         }
     }
 

@@ -114,6 +114,8 @@ pub struct QuicProfile {
     pub transport_parameters: QuicTransportParameters,
     /// Congestion-control algorithm applied to recovery.
     pub congestion: CongestionAlgorithm,
+    /// Whether a resumed session may use 0-RTT early data.
+    pub enable_0rtt: bool,
     /// ALPN strings in wire preference order.
     pub alpn: Vec<Vec<u8>>,
 }
@@ -131,6 +133,7 @@ impl QuicProfile {
             name: "quic-default",
             transport_parameters: QuicTransportParameters::default(),
             congestion: CongestionAlgorithm::NewReno,
+            enable_0rtt: false,
             alpn: vec![b"h3".to_vec()],
         }
     }
@@ -152,6 +155,7 @@ impl QuicProfile {
                 enable_datagrams: true,
             },
             congestion: CongestionAlgorithm::Bbr,
+            enable_0rtt: true,
             alpn: vec![b"h3".to_vec()],
         }
     }
@@ -173,6 +177,7 @@ impl QuicProfile {
                 enable_datagrams: true,
             },
             congestion: CongestionAlgorithm::Bbr,
+            enable_0rtt: true,
             alpn: vec![b"h3".to_vec()],
         }
     }

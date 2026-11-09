@@ -50,6 +50,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-CUSTOM-18..19]` | H3 request-header order is enforced at the QPACK input boundary by the owned encoder; request order is request-scoped and never changes QUIC connection identity. `[INV-CUSTOM-20]` is retired with the fork it constrained. | ADR-0027 |
 | `[INV-H3-01..08]` | H3 request streaming is the primitive; SETTINGS profiles are typed and enforceable; decoded dynamic header sections are acknowledged and blocked streams wait on insertions; header order is independent of QPACK table state; no third-party H3/QPACK runtime ships; critical-stream closure is connection-fatal; QPACK references are bounded. | ADR-0024, ADR-0027 |
 | `[INV-H3-09..11]` | H3 datagrams require bilateral SETTINGS, route only by Quarter Stream ID and are bounded before registration; extended CONNECT is an opt-in typed `:protocol` extension. | ADR-0030 |
+| `[INV-H3-12]` | Early H3 request frames are retained until the handshake decision and replayed in 1-RTT after rejection. | ADR-0031 |
 | `[INV-SOCKET-01]` | A `SocketConfig` option is either applied or reported; no pre-connect option may be silently skipped by the fast path (`needs_manual_socket`). | ADR-0006, ADR-0010 |
 | `[INV-TRANSPORT-00..04]` | Replay safety: a pooled socket that drops before any response-head byte is replaced; after that point it is never retried. Idle bound, distinct `Incomplete`. | ADR-0001 (`00`), ADR-0005 (`01..04`) |
 | `[INV-EGRESS-01..03]` | Confinement is checked before connect; private, loopback, link-local and metadata ranges are refused. | ADR-0002 |
@@ -69,6 +70,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-QUIC-01..04]` | Crypto unification on `aws-lc-rs` (`ring` forbidden); pre-connect socket options and confinement precede QUIC initial packet; pure trace derivation; predictable datagram sizing failure. | ADR-0016 |
 | `[INV-QUIC-05..09]` | QUIC is owned by `netune-quic`: no quinn production path, delegated rustls/aws-lc-rs crypto, validate-before-mutate, timestamp-driven bounded recovery, and flow control before buffering. | ADR-0028 |
 | `[INV-QUIC-10..15]` | QUIC lifecycle hardening: Retry precedes server state, stateless reset tokens are keyed by CID, key update retains reordering keys, Version Negotiation never selects an unconfigured version, migration waits for path validation, and congestion policy is profile-selected. | ADR-0029 |
+| `[INV-QUIC-16..17]` | 0-RTT requires an authenticated cached transport-parameter set; server early-data tickets use stateful single-use storage. | ADR-0031 |
 
 The authoritative wording of each invariant lives in its ADR. This table is an index, not a second source of truth; if the two disagree, the ADR wins and this table is corrected.
 

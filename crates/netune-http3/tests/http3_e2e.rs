@@ -90,6 +90,7 @@ async fn make_server_endpoint() -> (Endpoint, std::net::SocketAddr) {
             transport,
             retry: true,
             congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: true,
         },
     )
     .await
@@ -508,4 +509,66 @@ async fn extended_connect_protocol_crosses_the_h3_boundary() {
         .await
         .expect("send");
     assert_eq!(response.head().status(), 200);
+}
+
+#[tokio::test]
+async fn resumed_h3_session_sends_early_request() {
+    let (server, addr) = make_server_endpoint().await;
+    tokio::spawn(async move {
+        for _ in 0..2 {
+            let Ok(conn) = server.accept().await else {
+                return;
+            };
+            let settings = netune_http3::H3SettingsProfile::default();
+            let Ok(mut h3_conn) = netune_http3::H3ServerConnection::new(conn, &settings).await
+            else {
+                continue;
+            };
+            tokio::spawn(async move {
+                while let Ok(Some(request)) = h3_conn.accept().await {
+                    let (_request, mut stream) = request.into_parts();
+                    while stream.recv_data().await.expect("body").is_some() {}
+                    let response = http::Response::builder()
+                        .status(200)
+                        .body(())
+                        .expect("response");
+                    stream.send_response(response).await.expect("head");
+                    let _ = stream.send_data(Bytes::from_static(b"ok")).await;
+                    let _ = stream.finish().await;
+                }
+            });
+        }
+    });
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let client_crypto = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("safe protocols")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    let connector = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto);
+    let request = || {
+        http::Request::builder()
+            .method("GET")
+            .uri("https://localhost/early")
+            .body(Bytes::new())
+            .expect("request")
+    };
+
+    let mut first = H3Client::connect(&connector, addr, "localhost", None)
+        .await
+        .expect("first h3 session");
+    let first_response = first.send(request()).await.expect("first response");
+    assert_eq!(first_response.head().status(), 200);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    drop(first);
+
+    let mut second = H3Client::connect_early(&connector, addr, "localhost", None)
+        .await
+        .expect("early h3 session");
+    let response = second.send(request()).await.expect("early response");
+    assert_eq!(response.head().status(), 200);
+    second.wait_handshake().await;
+    assert!(second.early_data_accepted(), "server accepted 0-RTT");
 }

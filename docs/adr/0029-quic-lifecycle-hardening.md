@@ -139,4 +139,4 @@ and whether peer implementations can negotiate a version at all.
 
 Still deliberately absent and not implied by this ADR:
 
-- 0-RTT and session resumption.
+None after ADR-0031.

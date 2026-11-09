@@ -17,11 +17,12 @@ superseded_by: null
 
 ---
 
-> Implementation status: phases 1-4 baseline is landed — WT wire model,
-> generic H3 extension SETTINGS/stream routing, session establishment,
-> bidi/uni streams, datagrams and close/drain capsules. Phase 3 reliable reset
-> (`RESET_STREAM_AT`) and full WT flow-control enforcement/browser interop are
-> still outstanding; this ADR does not claim complete draft-17 compliance yet.
+> Implementation status: phases 1-5 baseline is landed — WT wire model, generic
+> H3 extension SETTINGS/stream routing, session establishment, bidi/uni streams,
+> datagrams, close/drain, multi-session demux and WT stream/data flow-control
+> enforcement. Phase 3 reliable reset (`RESET_STREAM_AT`), full teardown/GOAWAY
+> semantics and browser interop are still outstanding; this ADR does not claim
+> complete draft-17 compliance yet.
 
 ## Context
 

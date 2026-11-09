@@ -371,6 +371,8 @@ pub enum WebTransportError {
     Http(String),
     #[error("WebTransport session closed: {0}")]
     SessionClosed(String),
+    #[error("WebTransport flow control error: {0}")]
+    FlowControl(String),
 }
 
 #[cfg(test)]

@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport parameters alongside rustls tickets; the server enables early data
   only with stateful single-use sessions; rejected early frames are replayed in
   1-RTT; H3 can send early requests before the handshake completes (ADR-0031).
+- **WebTransport flow control and multi-session routing.** WT sessions now
+  route streams by Session ID across multiple sessions on one H3 connection and
+  enforce cumulative WT stream/data limits in send/receive wrappers, including
+  `WT_MAX_STREAMS`/`WT_MAX_DATA` capsule updates. Reliable `RESET_STREAM_AT`
+  and teardown/browser interop remain outstanding.
 - **WebTransport runtime baseline.** `netune-webtransport` now establishes
   draft-17 sessions over extended CONNECT, routes `0x54`/`0x41` streams through
   generic H3 extension seams, and supports bidirectional/unidirectional

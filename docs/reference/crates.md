@@ -168,7 +168,7 @@ This document provides a factual overview of all crates comprising the `netune` 
 - **Draft pin**: `draft-ietf-webtrans-http3-17`; wire constants and API are draft-scoped, not RFC.
 - **Key Types**:
   - `WebTransportClient` / `WebTransportServer`: H3-backed session acceptance.
-  - `WebTransportSession`: session ID, bidi/uni stream open/accept, datagrams, WT control/close capsules.
+  - `WebTransportSession`: session ID, bidi/uni stream open/accept, datagrams, WT control/close capsules, multi-session routing and WT stream/data flow-control enforcement.
   - `SessionId`: a validated client-initiated bidirectional stream ID.
   - `WebTransportSettings`: `SETTINGS_WT_ENABLED` and initial WT stream/data limits.
   - `ControlCapsule`: `WT_CLOSE_SESSION`, `WT_DRAIN_SESSION`, `WT_MAX_STREAMS`, `WT_MAX_DATA`, `WT_STREAMS_BLOCKED`, `WT_DATA_BLOCKED`.

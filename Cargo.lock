@@ -870,6 +870,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "netune-webtransport"
+version = "0.0.10"
+dependencies = [
+ "bytes",
+ "netune-http3",
+ "netune-quic",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "netune-ws"
 version = "0.0.10"
 dependencies = [

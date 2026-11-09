@@ -54,6 +54,7 @@ pub struct Shared {
     peer_connect_protocol: AtomicBool,
     datagram_routes: Mutex<HashMap<u64, mpsc::UnboundedSender<Bytes>>>,
     pending_datagrams: Mutex<HashMap<u64, VecDeque<Bytes>>>,
+    peer_extra_settings: Mutex<HashMap<u64, u64>>,
 }
 
 impl Shared {
@@ -102,6 +103,7 @@ impl Shared {
             peer_connect_protocol: AtomicBool::new(false),
             datagram_routes: Mutex::new(HashMap::new()),
             pending_datagrams: Mutex::new(HashMap::new()),
+            peer_extra_settings: Mutex::new(HashMap::new()),
         })
     }
 
@@ -354,7 +356,25 @@ impl Shared {
     }
 
     /// Apply the peer's SETTINGS frame to the encoder.
+    pub fn peer_extra_setting(&self, id: u64) -> Option<u64> {
+        self.peer_extra_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .copied()
+    }
+
     pub fn update_peer_settings(&self, settings: Settings) {
+        {
+            let mut extra = self
+                .peer_extra_settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            extra.clear();
+            extra.extend(settings.grease.iter().copied());
+            extra.insert(0x08, u64::from(settings.enable_connect_protocol));
+            extra.insert(0x33, u64::from(settings.h3_datagram));
+        }
         self.peer_h3_datagram
             .store(settings.h3_datagram, Ordering::SeqCst);
         self.peer_connect_protocol

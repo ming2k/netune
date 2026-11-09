@@ -616,6 +616,11 @@ impl H3Client {
         body.into_duplex().await
     }
 
+    /// Look up a peer SETTINGS identifier, including extension settings.
+    pub fn peer_setting(&self, id: u64) -> Option<u64> {
+        self.connection.shared().peer_extra_setting(id)
+    }
+
     /// The resolved QUIC profile that shapes this H3 connection.
     pub const fn quic_profile(&self) -> Option<&'static str> {
         self.quic_profile

@@ -18,6 +18,7 @@ This document provides a factual overview of all crates comprising the `netune` 
 | `netune-server` | `crates/netune-server` | `0.0.10` | **Ingress** orchestrator: TCP accept loop, admission control, slow-peer bounds, per-connection ingress tracing, graceful drain, HTTP/1.1 + HTTP/2 + optional HTTP/3 over one handler |
 | `netune-quic` | `crates/netune-quic` | `0.0.10` | First-class QUIC transport (RFC 9000, RFC 9221) with `QuicProfile` handshake shaping, abstract socket stack, and unified `aws-lc-rs` crypto (`[INV-QUIC-01..04]`) |
 | `netune-http3` | `crates/netune-http3` | `0.0.10` | Owned HTTP/3 client and server transport (RFC 9114), owned dynamic QPACK (RFC 9204), and typed SETTINGS profiles |
+| `netune-webtransport` | `crates/netune-webtransport` | `0.0.10` | Owned WebTransport over HTTP/3 draft-17 wire model: session IDs, SETTINGS, stream signals, control/flow capsules and error mapping |
 | `netune-probe` | `crates/netune-probe` | `0.0.10` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
 
 ---
@@ -161,6 +162,16 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `H3RequestBody`: chunked upload, trailers, and transition to `H3ResponseStream`.
   - Dynamic QPACK: request/response head and trailer blocks use the owned encoder/decoder, acknowledge decoded sections, and wait for missing insertions. The encoder references a dynamic entry only after acknowledgement; the decoder enforces the advertised capacity and blocked-stream budget.
   - Request/response lifecycle with deterministic timing derivation in `netune-trace` (`[INV-QUIC-03]`).
+
+### `netune-webtransport`
+- **Dependencies**: `netune-http3`, `netune-quic`, `bytes`, `thiserror`. Dev-only tokio for tests. No third-party WebTransport runtime.
+- **Draft pin**: `draft-ietf-webtrans-http3-17`; wire constants and API are draft-scoped, not RFC.
+- **Key Types**:
+  - `SessionId`: a validated client-initiated bidirectional stream ID.
+  - `WebTransportSettings`: `SETTINGS_WT_ENABLED` and initial WT stream/data limits.
+  - `ControlCapsule`: `WT_CLOSE_SESSION`, `WT_DRAIN_SESSION`, `WT_MAX_STREAMS`, `WT_MAX_DATA`, `WT_STREAMS_BLOCKED`, `WT_DATA_BLOCKED`.
+  - `error_code`: WebTransport application-error range mapping with reserved HTTP/3 codepoints skipped.
+- **Architecture**: separate product leaf; H3/QUIC expose generic seams and never depend on this crate (ADR-0033).
 
 ### `netune-probe`
 - **Privilege Separation**:

@@ -1,0 +1,20 @@
+[package]
+name = "netune-webtransport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+readme.workspace = true
+description = "Owned WebTransport over HTTP/3 (draft-ietf-webtrans-http3-17) for netune."
+
+[dependencies]
+bytes = { workspace = true }
+netune-http3 = { path = "../netune-http3", version = "0.0.10" }
+netune-quic = { path = "../netune-quic", version = "0.0.10" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

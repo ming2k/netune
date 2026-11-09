@@ -69,6 +69,7 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     # QUIC and HTTP/3 client transport (ADR-0016).
     "netune-quic": {"netune-egress", "netune-io", "netune-trace"},
     "netune-http3": {"netune-quic", "netune-trace"},
+    "netune-webtransport": {"netune-http3", "netune-quic"},
     # egress orchestrator.
     "netune": {
         "netune-egress",

@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport parameters alongside rustls tickets; the server enables early data
   only with stateful single-use sessions; rejected early frames are replayed in
   1-RTT; H3 can send early requests before the handshake completes (ADR-0031).
+- **WebTransport over HTTP/3 ownership.** ADR-0033 establishes a separate
+  `netune-webtransport` product crate pinned to draft-17, with generic H3
+  extension seams, QUIC `RESET_STREAM_AT`, session/stream/datagram and WT
+  flow-control/close semantics. This is a separate web-capability layer, not an
+  RFC 9114 transport feature.
 - **RFC 9297 Capsule Protocol.** Capsules are framed inside HTTP/3 message
   bodies with bounded partial reads, exposed on request/response/server streams,
   and usable on duplex extended CONNECT sessions (ADR-0032).

@@ -36,6 +36,8 @@ Binding decisions for this repository. `Scope` tags identify the subsystems a re
 | [0030](0030-h3-datagrams-and-extended-connect.md) | Own HTTP/3 Datagrams and Extended CONNECT | accepted | protocol/http3, protocol/rfc9220, protocol/rfc9297, transport/quic, api/http3 | SETTINGS-gated RFC 9297 datagrams routed by Quarter Stream ID and RFC 9220 `:protocol` CONNECT through a typed request extension (`INV-H3-09..11`) | 2026-11-09 |
 | [0031](0031-quic-0rtt-and-session-resumption.md) | Own QUIC 0-RTT and Session Resumption | accepted | transport/quic, protocol/rfc9001, crypto/provider, api/http3, security/replay | Authenticated transport-parameter cache, stateful single-use server tickets, 0-RTT packet path, early replay and early H3 requests (`INV-QUIC-16..17`, `INV-H3-12`) | 2026-11-09 |
 | [0032](0032-h3-capsule-protocol.md) | Own the RFC 9297 Capsule Protocol | accepted | protocol/http3, protocol/rfc9297, api/http3 | Varint/type/length capsule codec in HTTP message bodies, bounded partial reads, duplex CONNECT surface; WebTransport session draft remains out of scope (`INV-H3-13..14`) | 2026-11-09 |
+| [0033](0033-webtransport-over-http3.md) | Own WebTransport over HTTP/3 as a Separate Product Layer | accepted | protocol/webtransport, protocol/http3, protocol/quic, api/webtransport, product/web | Pin draft-17, separate `netune-webtransport` crate, H3 extension seams, QUIC RESET_STREAM_AT, session/stream/datagram/flow-control/close model (`INV-WT-01..04`) | 2026-11-09 |
+
 
 
 

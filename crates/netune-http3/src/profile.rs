@@ -40,6 +40,8 @@ pub struct H3SettingsProfile {
     pub enable_connect_protocol: bool,
     /// `SETTINGS_H3_DATAGRAM` (RFC 9297).
     pub h3_datagram: bool,
+    /// Additional SETTINGS identifiers for extension profiles.
+    pub extra_settings: Vec<(u64, u64)>,
 }
 
 impl Default for H3SettingsProfile {
@@ -52,6 +54,7 @@ impl Default for H3SettingsProfile {
             qpack_blocked_streams: 0,
             enable_connect_protocol: false,
             h3_datagram: false,
+            extra_settings: Vec::new(),
         }
     }
 }
@@ -138,10 +141,12 @@ impl H3SettingsProfile {
             qpack_blocked_streams: self.qpack_blocked_streams,
             enable_connect_protocol: self.enable_connect_protocol,
             h3_datagram: self.h3_datagram,
-            grease: if self.send_grease {
-                vec![(0x21, 0)]
-            } else {
-                Vec::new()
+            grease: {
+                let mut grease = self.extra_settings.clone();
+                if self.send_grease {
+                    grease.push((0x21, 0));
+                }
+                grease
             },
         }
     }

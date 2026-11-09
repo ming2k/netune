@@ -117,6 +117,11 @@ impl H3ServerConnection {
         }
     }
 
+    /// Look up a peer SETTINGS identifier, including extension settings.
+    pub fn peer_setting(&self, id: u64) -> Option<u64> {
+        self.connection.shared().peer_extra_setting(id)
+    }
+
     /// Send a GOAWAY. The caller waits for in-flight requests to finish.
     pub async fn shutdown(&mut self) -> Result<(), H3Error> {
         self.connection.send_goaway(0);

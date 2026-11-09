@@ -134,6 +134,24 @@ tested against:
 - our H3 client and `H3Server` over the owned endpoint before the production
   switch.
 
+### Known gaps (not claimed as complete)
+
+The owned production path covers the handshake, packet protection, streams,
+ACK/RTT/PTO retransmission, a bounded AIMD congestion window, flow-control
+windows and RFC 9221 datagrams. The following RFC 9000/9001 edges are not yet
+implemented and must not be inferred from the production switch:
+
+- Retry packets and address-validation tokens.
+- Stateless reset.
+- Key update and 0-RTT.
+- Connection migration and path validation.
+- QUIC v2 and version-negotiation handling.
+- Fast loss detection and Cubic/BBR congestion-control parity.
+- Dynamic `MAX_DATA` / `MAX_STREAM_DATA` top-up beyond the initial receive
+  windows.
+
+They are separate capabilities, not hidden behaviour.
+
 ## Invariants & Behavioral Boundaries
 
 - **`[INV-QUIC-05]` Owned QUIC Production Path**: after the migration gate, the

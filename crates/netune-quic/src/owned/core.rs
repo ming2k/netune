@@ -91,6 +91,14 @@ struct Stream {
     recv: Option<RecvState>,
 }
 
+struct SentPacket {
+    level: Level,
+    packet_number: u64,
+    time: Instant,
+    size: u64,
+    frames: Vec<Frame>,
+}
+
 /// The owned QUIC connection state.
 pub(crate) struct Core {
     side: Side,
@@ -122,6 +130,19 @@ pub(crate) struct Core {
     control_frames: Vec<Frame>,
     closed: Option<(u64, String)>,
     last_activity: Instant,
+    sent: Vec<SentPacket>,
+    retransmit: [Vec<Frame>; 3],
+    srtt: Option<Duration>,
+    rttvar: Duration,
+    pto: Duration,
+    peer_max_datagram: Option<u64>,
+    send_datagrams: VecDeque<Bytes>,
+    recv_datagrams: VecDeque<Bytes>,
+    cwnd: u64,
+    ssthresh: u64,
+    bytes_in_flight: u64,
+    peer_opened_bidi: u64,
+    peer_opened_uni: u64,
 }
 
 impl Core {
@@ -150,7 +171,7 @@ impl Core {
             accept_bi: VecDeque::new(),
             accept_uni: VecDeque::new(),
             next_bidi: 0,
-            next_uni: 0,
+            next_uni: 2,
             opened_bidi: 0,
             opened_uni: 0,
             peer_max_bidi: 0,
@@ -167,6 +188,19 @@ impl Core {
             control_frames: Vec::new(),
             closed: None,
             last_activity: Instant::now(),
+            sent: Vec::new(),
+            retransmit: [Vec::new(), Vec::new(), Vec::new()],
+            srtt: None,
+            rttvar: Duration::ZERO,
+            pto: Duration::from_secs(1),
+            peer_max_datagram: None,
+            send_datagrams: VecDeque::new(),
+            recv_datagrams: VecDeque::new(),
+            cwnd: 12_000,
+            ssthresh: u64::MAX,
+            bytes_in_flight: 0,
+            peer_opened_bidi: 0,
+            peer_opened_uni: 0,
         };
         core.drain_tls()?;
         Ok(core)
@@ -196,8 +230,8 @@ impl Core {
             streams: HashMap::new(),
             accept_bi: VecDeque::new(),
             accept_uni: VecDeque::new(),
-            next_bidi: 0,
-            next_uni: 0,
+            next_bidi: 1,
+            next_uni: 3,
             opened_bidi: 0,
             opened_uni: 0,
             peer_max_bidi: 0,
@@ -214,6 +248,19 @@ impl Core {
             control_frames: Vec::new(),
             closed: None,
             last_activity: Instant::now(),
+            sent: Vec::new(),
+            retransmit: [Vec::new(), Vec::new(), Vec::new()],
+            srtt: None,
+            rttvar: Duration::ZERO,
+            pto: Duration::from_secs(1),
+            peer_max_datagram: None,
+            send_datagrams: VecDeque::new(),
+            recv_datagrams: VecDeque::new(),
+            cwnd: 12_000,
+            ssthresh: u64::MAX,
+            bytes_in_flight: 0,
+            peer_opened_bidi: 0,
+            peer_opened_uni: 0,
         })
     }
 
@@ -240,12 +287,100 @@ impl Core {
         });
     }
 
-    pub(crate) fn handle_timeout(&mut self) -> Result<(), QuicError> {
-        // The first production milestone has no retransmission timer yet. ACKs
-        // are generated immediately, which is sufficient for a lossless path;
-        // recovery is the next ADR-0028 gate.
-        let _ = self.last_activity;
+    pub(crate) fn max_datagram_size(&self) -> Option<usize> {
+        self.peer_max_datagram
+            .map(|size| usize::try_from(size.saturating_sub(2)).unwrap_or(usize::MAX))
+    }
+
+    pub(crate) fn send_datagram(&mut self, data: Bytes) -> Result<(), QuicError> {
+        let Some(maximum) = self.max_datagram_size() else {
+            return Err(QuicError::DatagramsNotSupported);
+        };
+        if data.len() > maximum {
+            return Err(QuicError::DatagramTooLarge {
+                max: maximum,
+                size: data.len(),
+            });
+        }
+        self.send_datagrams.push_back(data);
         Ok(())
+    }
+
+    pub(crate) fn recv_datagram(&mut self) -> Option<Bytes> {
+        self.recv_datagrams.pop_front()
+    }
+
+    pub(crate) fn handle_timeout(&mut self) -> Result<(), QuicError> {
+        let now = Instant::now();
+        let Some(earliest) = self.sent.iter().map(|packet| packet.time).min() else {
+            return Ok(());
+        };
+        if now.saturating_duration_since(earliest) < self.pto {
+            return Ok(());
+        }
+        self.ssthresh = self.cwnd / 2;
+        self.cwnd = 1200;
+        self.bytes_in_flight = 0;
+        let packets = std::mem::take(&mut self.sent);
+        for packet in packets {
+            for frame in packet.frames {
+                if matches!(frame, Frame::Ack(_) | Frame::Padding { .. }) {
+                    continue;
+                }
+                self.retransmit[packet.level as usize].push(frame);
+            }
+        }
+        self.pto = self.pto.saturating_mul(2).min(Duration::from_secs(60));
+        Ok(())
+    }
+
+    pub(crate) fn rtt(&self) -> Option<Duration> {
+        self.srtt
+    }
+
+    fn handle_ack(&mut self, level: Level, ack: AckFrame) {
+        let acked = acknowledged_packets(&ack);
+        let now = Instant::now();
+        if let Some(packet) = self.sent.iter().find(|packet| {
+            packet.level == level && packet.packet_number == ack.largest_acknowledged
+        }) {
+            let sample = now.saturating_duration_since(packet.time);
+            match self.srtt {
+                None => {
+                    self.srtt = Some(sample);
+                    self.rttvar = sample / 2;
+                }
+                Some(srtt) => {
+                    let difference = srtt.abs_diff(sample);
+                    self.rttvar = (self.rttvar * 3 + difference) / 4;
+                    self.srtt = Some((srtt * 7 + sample) / 8);
+                }
+            }
+            self.pto = self
+                .srtt
+                .unwrap_or(Duration::from_secs(1))
+                .saturating_add(4 * self.rttvar)
+                .max(Duration::from_millis(1));
+        }
+        let mut acked_bytes = 0u64;
+        self.sent.retain(|packet| {
+            if packet.level == level && acked.contains(&packet.packet_number) {
+                acked_bytes = acked_bytes.saturating_add(packet.size);
+                false
+            } else {
+                true
+            }
+        });
+        if acked_bytes > 0 {
+            self.bytes_in_flight = self.bytes_in_flight.saturating_sub(acked_bytes);
+            if self.cwnd < self.ssthresh {
+                self.cwnd = self.cwnd.saturating_add(acked_bytes);
+            } else {
+                self.cwnd = self
+                    .cwnd
+                    .saturating_add((1200u64.saturating_mul(acked_bytes)) / self.cwnd.max(1));
+            }
+        }
     }
 
     pub(crate) fn receive(&mut self, datagram: &[u8]) -> Result<(), QuicError> {
@@ -314,11 +449,9 @@ impl Core {
             if self.spaces[level as usize].keys.is_none() {
                 continue;
             }
-            let mut payload = BytesMut::new();
+            let mut frames = Vec::new();
             if self.spaces[level as usize].ack_pending {
-                let ack = self.ack_frame(level);
-                ack.encode(&mut payload)
-                    .map_err(|error| QuicError::Protocol(error.to_string()))?;
+                frames.push(self.ack_frame(level));
                 self.spaces[level as usize].ack_pending = false;
             }
             let crypto_pending = self.spaces[level as usize].crypto_sent
@@ -329,25 +462,23 @@ impl Core {
                 let end = (start + 1000).min(space.crypto_send.len());
                 let data = Bytes::copy_from_slice(&space.crypto_send[start..end]);
                 space.crypto_sent = end;
-                Frame::Crypto {
+                frames.push(Frame::Crypto {
                     offset: start as u64,
                     data,
-                }
-                .encode(&mut payload)
-                .map_err(|error| QuicError::Protocol(error.to_string()))?;
+                });
             }
-            if level == Level::OneRtt {
-                self.append_stream_frames(&mut payload)?;
-                for frame in self.control_frames.drain(..) {
-                    frame
-                        .encode(&mut payload)
-                        .map_err(|error| QuicError::Protocol(error.to_string()))?;
+            frames.append(&mut self.retransmit[level as usize]);
+            if level == Level::OneRtt && self.bytes_in_flight < self.cwnd {
+                self.append_stream_frames(&mut frames);
+                if let Some(data) = self.send_datagrams.pop_front() {
+                    frames.push(Frame::Datagram { data });
                 }
+                frames.append(&mut self.control_frames);
             }
-            if payload.is_empty() {
+            if frames.is_empty() {
                 continue;
             }
-            self.queue_packet(level, payload.freeze())?;
+            self.queue_packet(level, frames)?;
         }
         Ok(())
     }
@@ -464,7 +595,6 @@ impl Core {
         }
         if !data.is_empty() {
             recv.consumed += data.len() as u64;
-            self.recv_data += data.len() as u64;
             return Ok(ReadResult::Data(data.freeze()));
         }
         if recv.fin == Some(recv.read) {
@@ -542,6 +672,7 @@ impl Core {
             self.peer_max_bidi = parameters.initial_max_streams_bidi.unwrap_or(0);
             self.peer_max_uni = parameters.initial_max_streams_uni.unwrap_or(0);
             self.send_max_data = parameters.initial_max_data.unwrap_or(0);
+            self.peer_max_datagram = parameters.max_datagram_frame_size;
             self.peer_tp = Some(parameters);
         }
         Ok(())
@@ -606,8 +737,8 @@ impl Core {
                         let _ = error_code;
                     }
                 }
-                Frame::Ack(_)
-                | Frame::Padding { .. }
+                Frame::Ack(ack) => self.handle_ack(level, ack),
+                Frame::Padding { .. }
                 | Frame::Ping
                 | Frame::DataBlocked(_)
                 | Frame::StreamDataBlocked { .. }
@@ -616,8 +747,12 @@ impl Core {
                 | Frame::RetireConnectionId(_)
                 | Frame::PathChallenge(_)
                 | Frame::PathResponse(_)
-                | Frame::NewToken { .. }
-                | Frame::Datagram { .. } => {}
+                | Frame::NewToken { .. } => {}
+                Frame::Datagram { data } => {
+                    if self.recv_datagrams.len() < 64 {
+                        self.recv_datagrams.push_back(data);
+                    }
+                }
             }
         }
         self.feed_tls()
@@ -637,6 +772,22 @@ impl Core {
                 ));
             }
             let bidi = id & 0x2 == 0;
+            let limit = if bidi {
+                self.local_tp.initial_max_streams_bidi.unwrap_or(0)
+            } else {
+                self.local_tp.initial_max_streams_uni.unwrap_or(0)
+            };
+            let opened = if bidi {
+                &mut self.peer_opened_bidi
+            } else {
+                &mut self.peer_opened_uni
+            };
+            if *opened >= limit {
+                return Err(QuicError::Protocol(
+                    "peer exceeded the stream limit".to_string(),
+                ));
+            }
+            *opened += 1;
             let stream = Stream {
                 send: if bidi {
                     Some(SendState {
@@ -683,6 +834,13 @@ impl Core {
             ));
         }
         if !data.is_empty() {
+            let limit = self.local_tp.initial_max_data.unwrap_or(u64::MAX);
+            if self.recv_data.saturating_add(data.len() as u64) > limit {
+                return Err(QuicError::Protocol(
+                    "connection receive window exceeded".to_string(),
+                ));
+            }
+            self.recv_data = self.recv_data.saturating_add(data.len() as u64);
             recv.chunks.insert(offset, Bytes::copy_from_slice(data));
         }
         if fin {
@@ -750,8 +908,65 @@ impl Core {
         }
     }
 
-    fn queue_packet(&mut self, level: Level, payload: Bytes) -> Result<(), QuicError> {
-        let packet = match level {
+    fn queue_packet(&mut self, level: Level, frames: Vec<Frame>) -> Result<(), QuicError> {
+        let packet_number = self.spaces[level as usize].next_pn;
+        let mut frames = frames;
+        let mut payload = BytesMut::new();
+        for frame in &frames {
+            frame
+                .encode(&mut payload)
+                .map_err(|error| QuicError::Protocol(error.to_string()))?;
+        }
+
+        let mut protected = self.protect(level, packet_number, payload.freeze())?;
+        if level == Level::Initial && protected.len() < MAX_DATAGRAM {
+            frames.push(Frame::Padding {
+                len: MAX_DATAGRAM - protected.len(),
+            });
+            let mut payload = BytesMut::new();
+            for frame in &frames {
+                frame
+                    .encode(&mut payload)
+                    .map_err(|error| QuicError::Protocol(error.to_string()))?;
+            }
+            protected = self.protect(level, packet_number, payload.freeze())?;
+        }
+
+        self.spaces[level as usize].next_pn += 1;
+        let ack_eliciting = frames.iter().any(|frame| {
+            !matches!(
+                frame,
+                Frame::Ack(_)
+                    | Frame::Padding { .. }
+                    | Frame::ConnectionCloseApplication { .. }
+                    | Frame::ConnectionCloseTransport { .. }
+            )
+        });
+        if ack_eliciting {
+            self.bytes_in_flight = self.bytes_in_flight.saturating_add(protected.len() as u64);
+            self.sent.push(SentPacket {
+                level,
+                packet_number,
+                time: Instant::now(),
+                size: protected.len() as u64,
+                frames,
+            });
+        }
+        self.outgoing.push(protected.to_vec());
+        Ok(())
+    }
+
+    fn protect(
+        &self,
+        level: Level,
+        packet_number: u64,
+        payload: Bytes,
+    ) -> Result<Bytes, QuicError> {
+        let keys = self.spaces[level as usize]
+            .keys
+            .as_ref()
+            .ok_or_else(|| QuicError::Protocol("missing send keys".to_string()))?;
+        match level {
             Level::Initial | Level::Handshake => {
                 let ty = if level == Level::Initial {
                     LongType::Initial
@@ -775,48 +990,27 @@ impl Core {
                     destination_connection_id: dcid,
                     source_connection_id: self.local_cid.clone(),
                     token: Vec::new(),
-                    packet_number: self.spaces[level as usize].next_pn,
+                    packet_number,
                     packet_number_len: 4,
                     payload,
                 };
-                self.spaces[level as usize].next_pn += 1;
-                let keys = self.spaces[level as usize]
-                    .keys
-                    .as_ref()
-                    .ok_or_else(|| QuicError::Protocol("missing send keys".to_string()))?;
-                let protected = protect_long(&packet, &keys.local)?;
-                if level == Level::Initial && protected.len() < MAX_DATAGRAM {
-                    let mut padded = packet;
-                    let mut data = padded.payload.to_vec();
-                    data.resize(data.len() + (MAX_DATAGRAM - protected.len()), 0);
-                    padded.payload = Bytes::from(data);
-                    protect_long(&padded, &keys.local)?
-                } else {
-                    protected
-                }
+                Ok(protect_long(&packet, &keys.local)?)
             }
             Level::OneRtt => {
                 let packet = ShortPacket {
                     spin: false,
                     key_phase: false,
                     destination_connection_id: self.peer_cid.clone(),
-                    packet_number: self.spaces[level as usize].next_pn,
+                    packet_number,
                     packet_number_len: 4,
                     payload,
                 };
-                self.spaces[level as usize].next_pn += 1;
-                let keys = self.spaces[level as usize]
-                    .keys
-                    .as_ref()
-                    .ok_or_else(|| QuicError::Protocol("missing send keys".to_string()))?;
-                protect_short(&packet, &keys.local)?
+                Ok(protect_short(&packet, &keys.local)?)
             }
-        };
-        self.outgoing.push(packet.to_vec());
-        Ok(())
+        }
     }
 
-    fn append_stream_frames(&mut self, payload: &mut BytesMut) -> Result<(), QuicError> {
+    fn append_stream_frames(&mut self, frames: &mut Vec<Frame>) {
         let send_max_data = self.send_max_data;
         let mut ids: Vec<u64> = self.streams.keys().copied().collect();
         ids.sort_unstable();
@@ -850,12 +1044,9 @@ impl Core {
                 }
             }
             if let Some(frame) = frame {
-                frame
-                    .encode(payload)
-                    .map_err(|error| QuicError::Protocol(error.to_string()))?;
+                frames.push(frame);
             }
         }
-        Ok(())
     }
 
     fn ack_frame(&self, level: Level) -> Frame {
@@ -911,6 +1102,24 @@ impl Core {
             self.local_tp.initial_max_stream_data_uni.unwrap_or(1 << 20)
         }
     }
+}
+
+fn acknowledged_packets(ack: &AckFrame) -> BTreeSet<u64> {
+    let mut acked = BTreeSet::new();
+    let mut lowest = ack.largest_acknowledged.saturating_sub(ack.first_ack_range);
+    for packet in lowest..=ack.largest_acknowledged {
+        acked.insert(packet);
+    }
+    for range in &ack.ranges {
+        let Some(largest) = lowest.checked_sub(range.gap + 2) else {
+            break;
+        };
+        lowest = largest.saturating_sub(range.range);
+        for packet in lowest..=largest {
+            acked.insert(packet);
+        }
+    }
+    acked
 }
 
 fn parse_scid(datagram: &[u8], packet_end: usize) -> Option<Vec<u8>> {

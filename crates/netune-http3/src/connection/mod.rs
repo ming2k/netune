@@ -9,7 +9,7 @@ mod stream;
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use netune_quic::quinn;
+use netune_quic::owned::{Connection as QuicConnection, RecvStream, SendStream};
 use tokio::sync::mpsc;
 
 use crate::error::H3Error;
@@ -30,8 +30,8 @@ pub enum Role {
 
 /// A server-accepted request stream.
 pub(crate) struct IncomingBi {
-    pub send: quinn::SendStream,
-    pub recv: quinn::RecvStream,
+    pub send: SendStream,
+    pub recv: RecvStream,
     pub id: u64,
 }
 
@@ -45,7 +45,7 @@ pub(crate) struct Connection {
 impl Connection {
     /// Open the critical streams, send SETTINGS, and start the driver.
     pub async fn start(
-        quic: quinn::Connection,
+        quic: QuicConnection,
         settings: &H3SettingsProfile,
         role: Role,
     ) -> Result<Self, H3Error> {
@@ -122,7 +122,7 @@ impl Connection {
             .open_bi()
             .await
             .map_err(|error| H3Error::H3(format!("open request stream: {error}")))?;
-        let id = u64::from(send.id());
+        let id = send.id();
         Ok(H3Stream::new(self.shared.clone(), id, send, recv))
     }
 
@@ -148,7 +148,7 @@ impl Drop for Connection {
     }
 }
 
-async fn write_stream_type(send: &mut quinn::SendStream, stream_type: u64) -> Result<(), H3Error> {
+async fn write_stream_type(send: &mut SendStream, stream_type: u64) -> Result<(), H3Error> {
     let mut header = BytesMut::new();
     varint::encode(&mut header, stream_type)
         .map_err(|_| H3Error::H3("invalid stream type".to_string()))?;

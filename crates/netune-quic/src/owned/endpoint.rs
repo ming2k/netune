@@ -63,8 +63,20 @@ impl Endpoint {
         Self::bind(address, Some(config)).await
     }
 
+    /// Bind a client endpoint over an already-configured tokio UDP socket.
+    pub async fn client_with_udp(udp: UdpSocket) -> Result<Self, QuicError> {
+        Self::from_udp(udp, None).await
+    }
+
     async fn bind(address: &str, server: Option<ServerConfigOwned>) -> Result<Self, QuicError> {
         let udp = UdpSocket::bind(address).await.map_err(QuicError::Socket)?;
+        Self::from_udp(udp, server).await
+    }
+
+    async fn from_udp(
+        udp: UdpSocket,
+        server: Option<ServerConfigOwned>,
+    ) -> Result<Self, QuicError> {
         let local = udp.local_addr().map_err(QuicError::Socket)?;
         let udp = Arc::new(udp);
         let (accept_tx, accept_rx) = mpsc::channel(64);
@@ -251,6 +263,47 @@ impl Connection {
 
     pub fn local_address(&self) -> SocketAddr {
         self.inner.local
+    }
+
+    pub fn rtt(&self) -> Option<std::time::Duration> {
+        self.inner
+            .core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rtt()
+    }
+
+    pub fn max_datagram_size(&self) -> Option<usize> {
+        self.inner
+            .core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_datagram_size()
+    }
+
+    pub async fn send_datagram(&self, data: Bytes) -> Result<(), QuicError> {
+        {
+            let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());
+            core.send_datagram(data)?;
+        }
+        self.inner.notify.notify_one();
+        Ok(())
+    }
+
+    pub async fn recv_datagram(&self) -> Result<Bytes, QuicError> {
+        loop {
+            let notified = self.inner.readable.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let datagram = {
+                let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());
+                core.recv_datagram()
+            };
+            if let Some(datagram) = datagram {
+                return Ok(datagram);
+            }
+            notified.await;
+        }
     }
 
     pub fn is_established(&self) -> bool {

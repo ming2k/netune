@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 
-#![cfg(feature = "owned-quic")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Handshake integration: the owned wire/crypto/TLS layers drive a real QUIC
@@ -587,21 +586,18 @@ async fn owned_client_handshakes_with_quinn_server() {
     let (server, addr) = server_endpoint();
     let (established_tx, established_rx) = tokio::sync::oneshot::channel();
     let server_task = tokio::spawn(async move {
-        if let Some(connecting) = server.accept().await {
-            match connecting.await {
-                Ok(connection) => {
-                    let _ = established_tx.send(());
-                    if let Ok((mut send, mut recv)) = connection.accept_bi().await
-                        && let Ok(data) = recv.read_to_end(1024).await
-                    {
-                        assert_eq!(data, b"hello");
-                        let _ = send.write_all(b"world").await;
-                        let _ = send.finish();
-                    }
-                    let _ = connection.closed().await;
-                }
-                Err(error) => eprintln!("server handshake failed: {error}"),
+        if let Some(connecting) = server.accept().await
+            && let Ok(connection) = connecting.await
+        {
+            let _ = established_tx.send(());
+            if let Ok((mut send, mut recv)) = connection.accept_bi().await
+                && let Ok(data) = recv.read_to_end(1024).await
+            {
+                assert_eq!(data, b"hello");
+                let _ = send.write_all(b"world").await;
+                let _ = send.finish();
             }
+            let _ = connection.closed().await;
         }
     });
 

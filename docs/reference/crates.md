@@ -135,18 +135,18 @@ This document provides a factual overview of all crates comprising the `netune` 
 - **Not implemented, by decision**: WebSocket upgrade serving is a separate, later decision ([ADR-0011](../adr/0011-server-side-ingress-transport.md)); client certificates and resumption tuning belong to the deployment's `rustls::ServerConfig`.
 
 ### `netune-quic`
-- **Dependencies**: `netune-io`, `netune-trace`, `bytes`, `libc`, `quinn`, `quinn-proto`, `rustls`, `rustls-platform-verifier`, `socket2`, `tokio`. Compiles strictly against `aws-lc-rs` (`[INV-QUIC-01]`).
-- **Owned QUIC foundation (ADR-0028)**: the `owned-quic` feature compiles the owned wire codec (`wire`), transport parameters, and packet-protection layer (`crypto`). It is not yet the production path; `quinn` remains the runtime until the ADR-0028 parity gate.
+- **Dependencies**: `netune-egress`, `netune-trace`, `bytes`, `rustls`, `rustls-platform-verifier`, `socket2`, `thiserror`, `tokio`. Compiles strictly against `aws-lc-rs` (`[INV-QUIC-01]`). Dev-only oracles: `quinn`.
+- **Owned QUIC engine (ADR-0028)**: `wire` owns the packet/frame/transport-parameter codec, `crypto` owns rustls packet protection and TLS key changes, and `owned::{core,endpoint}` owns handshake, stream, ACK, flow-control, UDP routing and async handles. `quinn` is dev-only.
 - **Key Types**:
   - `QuicConnector`: Coordinates egress confinement (`with_confinement` / `strict_public`), manual socket pre-configuration, and QUIC client endpoint creation. Confinement is checked on the resolved address **before** the UDP socket is created ([INV-QUIC-02](../adr/0016-quic-and-http3-transport.md)).
   - `QuicConnection`: Established QUIC session with bidirectional and unidirectional stream allocation.
-  - `QuicProfile` / `QuicTransportParameters`: Explicit declarative control over QUIC initial packet sizing, transport parameters, and congestion control algorithm.
+  - `QuicProfile` / `QuicTransportParameters`: Explicit declarative control over QUIC transport parameters and ALPN. Recovery and congestion policy live in the owned engine.
   - `QuicProfileRegistry`: one resolution path for built-in and caller-supplied profiles; `QuicConnector::from_registry` fails loudly on unknown names ([ADR-0021](../adr/0021-named-quic-profiles.md)).
   - `QuicDatagramSession`: RFC 9221 unreliable datagram session with MTU bound checks (`[INV-QUIC-04]`).
-  - `AsyncUdpSocket` / `QuicSocketConfig`: Pluggable UDP socket abstraction seam for consumer proxy obfuscation and port-hopping.
+  - `QuicSocketConfig`: L3/L4 socket options applied before the first packet ([INV-SOCKET-01]).
 
 ### `netune-http3`
-- **Dependencies**: `netune-quic`, `netune-trace`, `bytes`, `http`, `tokio`. Dev-only interop oracles: `h3`, `h3-quinn` (never linked into the shipping crate).
+- **Dependencies**: `netune-quic`, `netune-trace`, `bytes`, `http`, `thiserror`, `tokio`. Dev-only interop oracles: `h3`, `h3-quinn`, `quinn` (never linked into the shipping crate).
 - **Key Types**:
   - `H3Client`: Dispatches RFC 9114 HTTP/3 requests over `netune-quic` connections. `open_request` returns a streaming `H3RequestBody`; `send` composes it; `execute` buffers with a configured body ceiling ([ADR-0024](../adr/0024-h3-streaming-request-bodies.md)).
   - `H3Client::connect` / `connect_with_config`: resolves a `QuicConnector` profile, retains the `QuicConnection` (and endpoint) for the H3 driver's lifetime, and exposes `quic_profile()` as the connection identity ([ADR-0022](../adr/0022-http3-connection-identity.md)).

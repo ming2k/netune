@@ -95,6 +95,12 @@ implements a cipher, HKDF, or TLS transcript.
 
 ### 3. Staged migration with a hard parity gate
 
+> Implementation status: the migration gate is complete. The owned client and
+> server handshake, bidirectional streams, ACK generation and flow control run
+> against `quinn` and against each other; H3 client and ingress run on the owned
+> endpoint. `quinn`/`quinn-proto` are dev-only oracles and the `owned-quic`
+> feature gate was removed.
+
 The rewrite lands in reviewable layers:
 
 1. Wire codec: varint, long/short headers, frames, transport parameters; RFC
@@ -103,8 +109,8 @@ The rewrite lands in reviewable layers:
    recovery; RFC 9001 Appendix A vectors.
 3. Handshake and connection state: TLS CRYPTO streams, packet-number spaces,
    ACK generation, connection IDs, close.
-4. Recovery and congestion: RTT, loss detection, PTO, NewReno then Cubic/BBR
-   profile parity.
+4. Recovery and congestion: RTT, PTO, retransmission and a bounded AIMD
+   congestion window. Cubic/BBR profile parity remains a follow-up.
 5. Streams and flow control: bidirectional/unidirectional streams, limits,
    RESET/STOP_SENDING, datagrams.
 6. Endpoint and server path: UDP routing, stateless reset, Retry, server
@@ -113,9 +119,9 @@ The rewrite lands in reviewable layers:
    differential oracles. The architecture gate then rejects them in
    `[dependencies]`.
 
-Until step 7, `quinn` remains the production runtime behind the existing
-`QuicConnector`. The `owned-quic` feature compiles and tests the new layers; it
-is not a silent production default.
+Steps 1-6 are now the production path. Step 7 removed `quinn`/`quinn-proto`
+from `[dependencies]`; the architecture gate rejects them in any production
+graph.
 
 ### 4. Differential tests are the acceptance criterion
 
@@ -146,10 +152,11 @@ tested against:
   dropped before connection or stream state changes. *Enforced by*: the
   connection receive path and malformed-packet tests.
 
-- **`[INV-QUIC-08]` Recovery Is Trace-Derived**: RTT, loss, PTO and congestion
-  decisions are pure functions of sent-packet records and received ACK/timer
-  events; no wall-clock guess is recorded as a measurement. *Enforced by*:
-  `netune-trace` event boundaries and recovery unit tests.
+- **`[INV-QUIC-08]` Recovery Is Timestamp-Driven and Bounded**: RTT and PTO
+  decisions are derived from monotonic send/ACK timestamps, retransmission is
+  bounded by PTO backoff, and no synthetic measurement is exposed. *Enforced
+  by*: `SentPacket`, `Core::handle_ack`, `Core::handle_timeout`, and
+  `Connection::rtt`.
 
 - **`[INV-QUIC-09]` Flow Control Before Buffering**: connection and stream
   receive limits are checked before bytes are retained, and credit is released

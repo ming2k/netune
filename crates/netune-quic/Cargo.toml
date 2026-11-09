@@ -8,20 +8,10 @@ repository = "https://github.com/ming2k/netune"
 license.workspace = true
 readme = false
 
-[features]
-default = []
-# The owned QUIC engine (ADR-0028). It becomes the production path only after
-# the handshake, recovery and stream parity gates pass.
-owned-quic = []
-
 [dependencies]
 bytes = { workspace = true }
-libc = { workspace = true }
 netune-egress = { path = "../netune-egress", version = "0.0.10" }
-netune-io = { path = "../netune-io", version = "0.0.10" }
 netune-trace = { path = "../netune-trace", version = "0.0.10" }
-quinn = { workspace = true }
-quinn-proto = { workspace = true }
 rustls = { workspace = true }
 rustls-platform-verifier = { workspace = true }
 socket2 = { workspace = true }
@@ -29,6 +19,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt", "macros"] }
 
 [dev-dependencies]
+quinn = { workspace = true }
 rcgen = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

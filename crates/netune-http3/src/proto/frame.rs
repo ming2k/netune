@@ -3,11 +3,22 @@
 //! HTTP/3 frame framing and asynchronous readers (RFC 9114 Section 7.2).
 
 use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::code::frame_type;
 use super::settings::{Settings, SettingsError};
 use super::varint;
+
+/// Async byte source used by the frame reader.
+#[allow(async_fn_in_trait)]
+pub trait FrameRead {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, FrameError>;
+}
+
+/// Async byte sink used by the frame writer.
+#[allow(async_fn_in_trait)]
+pub trait FrameWrite {
+    async fn write_all(&mut self, buf: &[u8]) -> Result<(), FrameError>;
+}
 
 /// A frame read from a request, response, or control stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +68,7 @@ impl Frame {
 
 /// Read one frame. `Ok(None)` means the stream ended cleanly at a frame
 /// boundary. A DATA frame is returned as a length; its payload remains unread.
-pub async fn read_frame<R: AsyncRead + Unpin>(
+pub async fn read_frame<R: FrameRead + Unpin>(
     reader: &mut R,
     max_payload: usize,
 ) -> Result<Option<Frame>, FrameError> {
@@ -114,48 +125,50 @@ fn parse_single_varint(payload: &[u8]) -> Result<u64, FrameError> {
     Ok(value)
 }
 
-pub(crate) async fn read_varint<R: AsyncRead + Unpin>(
+pub(crate) async fn read_varint<R: FrameRead + Unpin>(
     reader: &mut R,
 ) -> Result<Option<u64>, FrameError> {
     let mut first = [0u8; 1];
-    let read = reader
-        .read(&mut first)
-        .await
-        .map_err(|error| FrameError::Io(error.to_string()))?;
+    let read = reader.read(&mut first).await?;
+    let Some(read) = read else {
+        return Ok(None);
+    };
     if read == 0 {
         return Ok(None);
     }
     let length = 1usize << (first[0] >> 6);
     let mut value = u64::from(first[0] & 0x3f);
-    let mut rest = [0u8; 7];
-    let rest = &mut rest[..length - 1];
-    reader
-        .read_exact(rest)
-        .await
-        .map_err(|_| FrameError::UnexpectedEnd)?;
+    let rest = read_exact(reader, length - 1).await?;
     for byte in rest {
-        value = (value << 8) | u64::from(*byte);
+        value = (value << 8) | u64::from(byte);
     }
     Ok(Some(value))
 }
 
-async fn read_exact<R: AsyncRead + Unpin>(reader: &mut R, len: usize) -> Result<Bytes, FrameError> {
+async fn read_exact<R: FrameRead + Unpin>(reader: &mut R, len: usize) -> Result<Bytes, FrameError> {
     let mut payload = BytesMut::zeroed(len);
-    reader
-        .read_exact(&mut payload)
-        .await
-        .map_err(|_| FrameError::UnexpectedEnd)?;
+    let mut filled = 0;
+    while filled < len {
+        let read = reader
+            .read(&mut payload[filled..])
+            .await?
+            .ok_or(FrameError::UnexpectedEnd)?;
+        if read == 0 {
+            return Err(FrameError::UnexpectedEnd);
+        }
+        filled += read;
+    }
     Ok(payload.freeze())
 }
 
-async fn skip_exact<R: AsyncRead + Unpin>(reader: &mut R, mut len: u64) -> Result<(), FrameError> {
+async fn skip_exact<R: FrameRead + Unpin>(reader: &mut R, mut len: u64) -> Result<(), FrameError> {
     let mut buffer = [0u8; 8192];
     while len > 0 {
         let take = usize::try_from(len.min(buffer.len() as u64)).unwrap_or(buffer.len());
         let read = reader
             .read(&mut buffer[..take])
-            .await
-            .map_err(|error| FrameError::Io(error.to_string()))?;
+            .await?
+            .ok_or(FrameError::UnexpectedEnd)?;
         if read == 0 {
             return Err(FrameError::UnexpectedEnd);
         }
@@ -165,19 +178,16 @@ async fn skip_exact<R: AsyncRead + Unpin>(reader: &mut R, mut len: u64) -> Resul
 }
 
 /// Write a HEADERS frame and its QPACK block.
-pub async fn write_headers<W: AsyncWrite + Unpin>(
+pub async fn write_headers<W: FrameWrite + Unpin>(
     writer: &mut W,
     block: &[u8],
 ) -> Result<(), FrameError> {
     write_header(writer, frame_type::HEADERS, block.len() as u64).await?;
-    writer
-        .write_all(block)
-        .await
-        .map_err(|error| FrameError::Io(error.to_string()))
+    writer.write_all(block).await
 }
 
 /// Write a DATA frame header; the caller follows with exactly `len` bytes.
-pub async fn write_data_header<W: AsyncWrite + Unpin>(
+pub async fn write_data_header<W: FrameWrite + Unpin>(
     writer: &mut W,
     len: u64,
 ) -> Result<(), FrameError> {
@@ -185,33 +195,27 @@ pub async fn write_data_header<W: AsyncWrite + Unpin>(
 }
 
 /// Write a complete SETTINGS frame.
-pub async fn write_settings<W: AsyncWrite + Unpin>(
+pub async fn write_settings<W: FrameWrite + Unpin>(
     writer: &mut W,
     settings: &Settings,
 ) -> Result<(), FrameError> {
     let mut frame = BytesMut::new();
     settings.encode(&mut frame);
-    writer
-        .write_all(&frame)
-        .await
-        .map_err(|error| FrameError::Io(error.to_string()))
+    writer.write_all(&frame).await
 }
 
 /// Write a GOAWAY frame.
-pub async fn write_goaway<W: AsyncWrite + Unpin>(
+pub async fn write_goaway<W: FrameWrite + Unpin>(
     writer: &mut W,
     stream_id: u64,
 ) -> Result<(), FrameError> {
     let mut payload = BytesMut::new();
     varint::encode(&mut payload, stream_id).map_err(|_| FrameError::VarInt)?;
     write_header(writer, frame_type::GOAWAY, payload.len() as u64).await?;
-    writer
-        .write_all(&payload)
-        .await
-        .map_err(|error| FrameError::Io(error.to_string()))
+    writer.write_all(&payload).await
 }
 
-async fn write_header<W: AsyncWrite + Unpin>(
+async fn write_header<W: FrameWrite + Unpin>(
     writer: &mut W,
     ty: u64,
     len: u64,
@@ -219,16 +223,30 @@ async fn write_header<W: AsyncWrite + Unpin>(
     let mut header = BytesMut::new();
     varint::encode(&mut header, ty).map_err(|_| FrameError::VarInt)?;
     varint::encode(&mut header, len).map_err(|_| FrameError::VarInt)?;
-    writer
-        .write_all(&header)
-        .await
-        .map_err(|error| FrameError::Io(error.to_string()))
+    writer.write_all(&header).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::duplex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+
+    impl FrameRead for tokio::io::DuplexStream {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, FrameError> {
+            let read = AsyncReadExt::read(self, buf)
+                .await
+                .map_err(|error| FrameError::Io(error.to_string()))?;
+            Ok((read > 0).then_some(read))
+        }
+    }
+
+    impl FrameWrite for tokio::io::DuplexStream {
+        async fn write_all(&mut self, buf: &[u8]) -> Result<(), FrameError> {
+            AsyncWriteExt::write_all(self, buf)
+                .await
+                .map_err(|error| FrameError::Io(error.to_string()))
+        }
+    }
 
     #[tokio::test]
     async fn frames_round_trip_over_an_async_stream() {
@@ -240,7 +258,9 @@ mod tests {
             write_headers(&mut client, b"block").await.expect("headers");
             write_goaway(&mut client, 12).await.expect("goaway");
             write_data_header(&mut client, 3).await.expect("data");
-            client.write_all(b"abc").await.expect("data payload");
+            AsyncWriteExt::write_all(&mut client, b"abc")
+                .await
+                .expect("data payload");
         });
 
         assert!(matches!(
@@ -285,7 +305,7 @@ mod tests {
             let mut bytes = BytesMut::new();
             varint::encode(&mut bytes, frame_type::HEADERS).expect("type");
             varint::encode(&mut bytes, 2048).expect("len");
-            let _ = client.write_all(&bytes).await;
+            let _ = AsyncWriteExt::write_all(&mut client, &bytes).await;
         });
         assert!(matches!(
             read_frame(&mut server, 1024).await,

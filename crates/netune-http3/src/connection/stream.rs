@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::HeaderMap;
-use netune_quic::quinn;
+use netune_quic::owned::{RecvStream, SendStream};
 
 use crate::error::H3Error;
 use crate::proto::code::{error_code, frame_type};
@@ -21,8 +21,8 @@ use super::shared::Shared;
 pub(crate) struct H3Stream {
     shared: Arc<Shared>,
     id: u64,
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
+    send: SendStream,
+    recv: RecvStream,
     data_remaining: u64,
     trailers: Option<HeaderMap>,
     head_sent: bool,
@@ -43,12 +43,7 @@ impl std::fmt::Debug for H3Stream {
 }
 
 impl H3Stream {
-    pub fn new(
-        shared: Arc<Shared>,
-        id: u64,
-        send: quinn::SendStream,
-        recv: quinn::RecvStream,
-    ) -> Self {
+    pub fn new(shared: Arc<Shared>, id: u64, send: SendStream, recv: RecvStream) -> Self {
         Self {
             shared,
             id,
@@ -105,10 +100,10 @@ impl H3Stream {
         let block = self.shared.encode_headers(self.id, fields)?;
         frame::write_headers(&mut self.send, &block).await?;
         self.trailers_sent = true;
-        self.finish_send()
+        self.finish_send().await
     }
 
-    pub fn finish_send(&mut self) -> Result<(), H3Error> {
+    pub async fn finish_send(&mut self) -> Result<(), H3Error> {
         if self.writer_done {
             return Ok(());
         }
@@ -119,6 +114,7 @@ impl H3Stream {
         }
         self.send
             .finish()
+            .await
             .map_err(|error| H3Error::H3(format!("finish request stream: {error}")))?;
         self.writer_done = true;
         Ok(())
@@ -231,18 +227,16 @@ impl H3Stream {
     async fn read_data_chunk(&mut self, max_bytes: usize) -> Result<Option<Bytes>, H3Error> {
         let remaining = usize::try_from(self.data_remaining).unwrap_or(usize::MAX);
         let length = remaining.min(max_bytes.max(1));
-        let mut buffer = vec![0u8; length];
-        match self.recv.read(&mut buffer).await {
-            Ok(Some(read)) => {
-                if read == 0 {
+        match self.recv.read(length).await {
+            Ok(Some(data)) => {
+                if data.is_empty() {
                     return Err(self.connection_error(
                         error_code::H3_FRAME_ERROR,
                         "stream ended in the middle of a DATA frame",
                     ));
                 }
-                self.data_remaining -= read as u64;
-                buffer.truncate(read);
-                Ok(Some(Bytes::from(buffer)))
+                self.data_remaining -= data.len() as u64;
+                Ok(Some(data))
             }
             Ok(None) => Err(self.connection_error(
                 error_code::H3_FRAME_ERROR,
@@ -264,9 +258,7 @@ impl H3Stream {
     /// usable.
     pub fn cancel_body(&mut self) {
         if !self.reader_done {
-            let _ = self.recv.stop(quinn::VarInt::from_u32(
-                error_code::H3_REQUEST_CANCELLED as u32,
-            ));
+            self.recv.stop(error_code::H3_REQUEST_CANCELLED);
             self.reader_done = true;
             self.queue_cancellation();
         }
@@ -300,15 +292,36 @@ impl H3Stream {
 impl Drop for H3Stream {
     fn drop(&mut self) {
         if !self.writer_done {
-            let _ = self.send.reset(quinn::VarInt::from_u32(
-                error_code::H3_REQUEST_CANCELLED as u32,
-            ));
+            self.send.reset(error_code::H3_REQUEST_CANCELLED);
         }
         if !self.reader_done {
-            let _ = self.recv.stop(quinn::VarInt::from_u32(
-                error_code::H3_REQUEST_CANCELLED as u32,
-            ));
+            self.recv.stop(error_code::H3_REQUEST_CANCELLED);
             self.queue_cancellation();
+        }
+    }
+}
+
+impl crate::proto::frame::FrameWrite for netune_quic::owned::SendStream {
+    async fn write_all(&mut self, buf: &[u8]) -> Result<(), crate::proto::frame::FrameError> {
+        netune_quic::owned::SendStream::write_all(self, buf)
+            .await
+            .map_err(|error| crate::proto::frame::FrameError::Io(error.to_string()))
+    }
+}
+
+impl crate::proto::frame::FrameRead for netune_quic::owned::RecvStream {
+    async fn read(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, crate::proto::frame::FrameError> {
+        match netune_quic::owned::RecvStream::read(self, buf.len()).await {
+            Ok(Some(data)) => {
+                let len = data.len().min(buf.len());
+                buf[..len].copy_from_slice(&data[..len]);
+                Ok(Some(len))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => Err(crate::proto::frame::FrameError::Io(error.to_string())),
         }
     }
 }

@@ -14,10 +14,10 @@
 //! model uses.
 //!
 //! Congestion-window and packet-loss counters are deliberately not derived: they are
-//! transport *state*, sampled from [`quinn::Connection::stats`](https://docs.rs/quinn) on
-//! demand, not ordered boundaries. Recording them as events would mean inventing a
-//! sampling clock and would put non-reproducible numbers inside a trace whose value is
-//! that it is reproducible.
+//! transport *state*, sampled from the owned connection on demand, not ordered
+//! boundaries. Recording them as events would mean inventing a sampling clock and
+//! would put non-reproducible numbers inside a trace whose value is that it is
+//! reproducible.
 
 use std::collections::BTreeMap;
 

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 
-#![cfg(feature = "owned-quic")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! End-to-end: owned async endpoint against a quinn server.

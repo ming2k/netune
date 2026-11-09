@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use bytes::{Buf, BytesMut};
-use netune_quic::quinn;
+use netune_quic::owned::{RecvStream, SendStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -20,9 +20,9 @@ use super::shared::{ControlCommand, Shared};
 const CONTROL_FRAME_LIMIT: usize = 64 * 1024;
 
 pub(crate) struct CriticalStreams {
-    pub control: quinn::SendStream,
-    pub encoder: quinn::SendStream,
-    pub decoder: quinn::SendStream,
+    pub control: SendStream,
+    pub encoder: SendStream,
+    pub decoder: SendStream,
 }
 
 pub(crate) struct DriverChannels {
@@ -112,22 +112,14 @@ pub(crate) async fn drive(
             accepted = connection.accept_bi() => {
                 match accepted {
                     Ok((send, recv)) => {
-                        let id = u64::from(send.id());
+                        let id = send.id();
                         if let Some(incoming) = &incoming_tx {
                             let accepted = IncomingBi { send, recv, id };
                             match incoming.try_send(accepted) {
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(mut rejected)) => {
-                                    let _ = rejected.send.reset(
-                                        quinn::VarInt::from_u32(
-                                            error_code::H3_REQUEST_REJECTED as u32,
-                                        ),
-                                    );
-                                    let _ = rejected.recv.stop(
-                                        quinn::VarInt::from_u32(
-                                            error_code::H3_REQUEST_REJECTED as u32,
-                                        ),
-                                    );
+                                    rejected.send.reset(error_code::H3_REQUEST_REJECTED);
+                                    rejected.recv.stop(error_code::H3_REQUEST_REJECTED);
                                 }
                                 Err(mpsc::error::TrySendError::Closed(_)) => break,
                             }
@@ -149,7 +141,7 @@ pub(crate) async fn drive(
     while tasks.join_next().await.is_some() {}
 }
 
-async fn handle_uni_stream(shared: Arc<Shared>, mut recv: quinn::RecvStream) {
+async fn handle_uni_stream(shared: Arc<Shared>, mut recv: RecvStream) {
     let stream_type = match frame::read_varint(&mut recv).await {
         Ok(Some(stream_type)) => stream_type,
         Ok(None) | Err(_) => {
@@ -199,7 +191,7 @@ async fn handle_uni_stream(shared: Arc<Shared>, mut recv: quinn::RecvStream) {
             );
         }
         _ => {
-            let _ = recv.stop(quinn::VarInt::from_u32(error_code::H3_NO_ERROR as u32));
+            recv.stop(error_code::H3_NO_ERROR);
         }
     }
 }
@@ -211,7 +203,7 @@ fn control_frame_error_code(error: &frame::FrameError) -> u64 {
     }
 }
 
-async fn read_control(shared: Arc<Shared>, mut recv: quinn::RecvStream) {
+async fn read_control(shared: Arc<Shared>, mut recv: RecvStream) {
     let first = match frame::read_frame(&mut recv, CONTROL_FRAME_LIMIT).await {
         Ok(Some(frame)) => frame,
         Ok(None) => {
@@ -292,20 +284,19 @@ async fn read_control(shared: Arc<Shared>, mut recv: quinn::RecvStream) {
     }
 }
 
-async fn read_qpack_encoder(shared: Arc<Shared>, mut recv: quinn::RecvStream) {
+async fn read_qpack_encoder(shared: Arc<Shared>, mut recv: RecvStream) {
     let limit = shared.max_qpack_instruction();
     let mut buffer = BytesMut::new();
-    let mut chunk = [0u8; 8192];
     loop {
-        let read = match recv.read(&mut chunk).await {
-            Ok(Some(0)) | Ok(None) => {
+        let chunk = match recv.read(8192).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => {
                 shared.set_error(
                     error_code::H3_CLOSED_CRITICAL_STREAM,
                     "QPACK encoder stream closed",
                 );
                 return;
             }
-            Ok(Some(read)) => read,
             Err(error) => {
                 shared.set_error(
                     error_code::QPACK_ENCODER_STREAM_ERROR,
@@ -314,7 +305,7 @@ async fn read_qpack_encoder(shared: Arc<Shared>, mut recv: quinn::RecvStream) {
                 return;
             }
         };
-        buffer.extend_from_slice(&chunk[..read]);
+        buffer.extend_from_slice(&chunk);
 
         loop {
             match decode_encoder_instruction(&buffer, limit) {
@@ -345,19 +336,18 @@ async fn read_qpack_encoder(shared: Arc<Shared>, mut recv: quinn::RecvStream) {
     }
 }
 
-async fn read_qpack_decoder(shared: Arc<Shared>, mut recv: quinn::RecvStream) {
+async fn read_qpack_decoder(shared: Arc<Shared>, mut recv: RecvStream) {
     let mut buffer = BytesMut::new();
-    let mut chunk = [0u8; 8192];
     loop {
-        let read = match recv.read(&mut chunk).await {
-            Ok(Some(0)) | Ok(None) => {
+        let chunk = match recv.read(8192).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => {
                 shared.set_error(
                     error_code::H3_CLOSED_CRITICAL_STREAM,
                     "QPACK decoder stream closed",
                 );
                 return;
             }
-            Ok(Some(read)) => read,
             Err(error) => {
                 shared.set_error(
                     error_code::QPACK_DECODER_STREAM_ERROR,
@@ -366,7 +356,7 @@ async fn read_qpack_decoder(shared: Arc<Shared>, mut recv: quinn::RecvStream) {
                 return;
             }
         };
-        buffer.extend_from_slice(&chunk[..read]);
+        buffer.extend_from_slice(&chunk);
 
         loop {
             match decode_decoder_instruction(&buffer) {

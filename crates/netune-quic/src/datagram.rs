@@ -1,56 +1,37 @@
 // SPDX-License-Identifier: MIT
 
-//! Unreliable datagram transport over QUIC (RFC 9221).
-//!
-//! Enforces `[INV-QUIC-04]`: an attempt to transmit a datagram payload exceeding the
-//! peer's advertised maximum datagram size fails predictably with
-//! `QuicError::DatagramTooLarge` rather than silently vanishing.
+//! RFC 9221 unreliable datagrams over the owned QUIC connection.
 
 use bytes::Bytes;
 
 use crate::error::QuicError;
+use crate::owned::Connection;
 
-/// Manages unreliable datagram transmission and reception for a QUIC connection.
-#[derive(Debug, Clone)]
+/// An unreliable datagram session bound to one connection.
+#[derive(Clone)]
 pub struct QuicDatagramSession {
-    connection: quinn::Connection,
+    connection: Connection,
 }
 
 impl QuicDatagramSession {
-    /// Creates a new datagram session wrapping an established connection.
-    pub fn new(connection: quinn::Connection) -> Self {
+    pub fn new(connection: Connection) -> Self {
         Self { connection }
     }
 
-    /// Maximum datagram payload size supported by the remote peer.
+    /// Maximum datagram payload accepted by the peer, if datagrams are enabled.
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.connection.max_datagram_size()
     }
 
-    /// Sends an unreliable datagram to the peer (RFC 9221).
-    pub fn send(&self, data: &[u8]) -> Result<(), QuicError> {
-        let max = self
-            .connection
-            .max_datagram_size()
-            .ok_or(QuicError::DatagramsNotSupported)?;
-
-        if data.len() > max {
-            return Err(QuicError::DatagramTooLarge {
-                max,
-                size: data.len(),
-            });
-        }
-
+    /// Send one unreliable datagram.
+    pub async fn send(&self, data: &[u8]) -> Result<(), QuicError> {
         self.connection
             .send_datagram(Bytes::copy_from_slice(data))
-            .map_err(|e| QuicError::Stream(format!("send datagram failed: {e}")))
+            .await
     }
 
-    /// Receives an unreliable datagram from the peer.
+    /// Receive one unreliable datagram.
     pub async fn recv(&self) -> Result<Bytes, QuicError> {
-        self.connection
-            .read_datagram()
-            .await
-            .map_err(|e| QuicError::Stream(format!("read datagram failed: {e}")))
+        self.connection.recv_datagram().await
     }
 }

@@ -31,7 +31,7 @@ use crate::service::{BindError, ServedProtocol, hand_over};
 
 /// A bound HTTP/3 ingress listener.
 pub struct H3Server {
-    endpoint: netune_quic::quinn::Endpoint,
+    endpoint: netune_quic::owned::Endpoint,
     config: ServerConfig,
     settings: H3SettingsProfile,
     handler: Arc<dyn Handler>,
@@ -75,14 +75,26 @@ impl H3Server {
 
         let mut tls = (*tls).clone();
         tls.alpn_protocols = vec![b"h3".to_vec()];
-        let crypto = netune_quic::quinn::crypto::rustls::QuicServerConfig::try_from(tls)
-            .map_err(|error| BindError::Transport(error.to_string()))?;
-        let server_config = netune_quic::quinn::ServerConfig::with_crypto(Arc::new(crypto));
-        let endpoint = netune_quic::quinn::Endpoint::server(server_config, address)
-            .map_err(|error| BindError::Transport(error.to_string()))?;
-        let local = endpoint
-            .local_addr()
-            .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+        let transport = netune_quic::wire::transport_parameters::TransportParameters {
+            max_idle_timeout: Some(30_000),
+            initial_max_data: Some(16 * 1024 * 1024),
+            initial_max_stream_data_bidi_local: Some(1 << 20),
+            initial_max_stream_data_bidi_remote: Some(1 << 20),
+            initial_max_stream_data_uni: Some(1 << 20),
+            initial_max_streams_bidi: Some(1024),
+            initial_max_streams_uni: Some(1024),
+            active_connection_id_limit: Some(4),
+            ..Default::default()
+        };
+        let server_config = netune_quic::owned::ServerConfigOwned {
+            tls: Arc::new(tls),
+            transport,
+        };
+        let endpoint =
+            netune_quic::owned::Endpoint::server(address.to_string().as_str(), server_config)
+                .await
+                .map_err(|error| BindError::Transport(error.to_string()))?;
+        let local = endpoint.local_addr();
         let permits = Arc::new(Semaphore::new(config.max_connections));
         Ok(Self {
             endpoint,
@@ -130,11 +142,11 @@ impl H3Server {
                 biased;
                 () = &mut shutdown => break,
                 accepted = endpoint.accept() => {
-                    let Some(incoming) = accepted else { break };
+                    let Ok(connection) = accepted else { break };
                     let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
                         // Admission is explicit: a peer learns now and may retry,
                         // rather than occupying an unbounded queue.
-                        incoming.refuse();
+                        connection.close(0x010b, "server busy");
                         continue;
                     };
                     let handler = Arc::clone(&handler);
@@ -142,7 +154,7 @@ impl H3Server {
                     let settings = Arc::clone(&settings);
                     let drain = drain_rx.clone();
                     connections.spawn(async move {
-                        serve_connection(incoming, local, config, settings, handler, permit, drain)
+                        serve_connection(connection, local, config, settings, handler, permit, drain)
                             .await;
                     });
                 }
@@ -157,19 +169,19 @@ impl H3Server {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 connections.shutdown().await;
-                endpoint.close(0u32.into(), b"server shutdown");
+                endpoint.close();
                 return;
             }
             tokio::select! {
                 joined = connections.join_next() => {
                     if joined.is_none() {
-                        endpoint.close(0u32.into(), b"server shutdown");
+                        endpoint.close();
                         return;
                     }
                 }
                 () = tokio::time::sleep(remaining) => {
                     connections.shutdown().await;
-                    endpoint.close(0u32.into(), b"server shutdown");
+                    endpoint.close();
                     return;
                 }
             }
@@ -178,7 +190,7 @@ impl H3Server {
 }
 
 async fn serve_connection(
-    incoming: netune_quic::quinn::Incoming,
+    connection: netune_quic::owned::Connection,
     local: SocketAddr,
     config: Arc<ServerConfig>,
     settings: Arc<H3SettingsProfile>,
@@ -186,13 +198,6 @@ async fn serve_connection(
     permit: OwnedSemaphorePermit,
     mut drain: watch::Receiver<bool>,
 ) {
-    let connection = match tokio::time::timeout(config.head_timeout, incoming).await {
-        Ok(Ok(connection)) => connection,
-        Ok(Err(_)) | Err(_) => {
-            drop(permit);
-            return;
-        }
-    };
     let peer = connection.remote_address();
     let recorder = if config.trace_sink.is_some() {
         TraceCollector::start_ingress(config.trace_capacity)
@@ -201,7 +206,7 @@ async fn serve_connection(
     };
     let handshake = tokio::time::timeout(
         config.head_timeout,
-        H3ServerConnection::new(connection.clone(), &settings),
+        H3ServerConnection::new(connection, &settings),
     )
     .await;
     let mut h3 = match handshake {

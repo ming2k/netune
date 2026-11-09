@@ -14,8 +14,6 @@
 use std::io;
 use std::net::SocketAddr;
 
-pub use quinn::udp::{RecvMeta, Transmit};
-pub use quinn::{AsyncUdpSocket, UdpPoller};
 use socket2::{Domain, Protocol, Socket, Type};
 
 /// L3/L4 pre-connect socket parameters for QUIC datagram endpoints.

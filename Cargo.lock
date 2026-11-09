@@ -830,12 +830,9 @@ name = "netune-quic"
 version = "0.0.10"
 dependencies = [
  "bytes",
- "libc",
  "netune-egress",
- "netune-io",
  "netune-trace",
  "quinn",
- "quinn-proto",
  "rcgen",
  "rustls",
  "rustls-platform-verifier",

@@ -8,15 +8,13 @@ use std::time::Duration;
 
 use netune_egress::EgressConfinement;
 use netune_trace::{EventKind, TraceCollector};
-use quinn::congestion::ControllerFactory;
-use quinn::{AsyncUdpSocket, Endpoint, EndpointConfig, TokioRuntime};
 use rustls_platform_verifier::BuilderVerifierExt;
 
-use crate::datagram::QuicDatagramSession;
 use crate::error::QuicError;
+use crate::owned::{ClientConfigOwned, Connection, Endpoint};
 use crate::profile::{QuicProfile, QuicProfileRegistry};
 use crate::socket::QuicSocketConfig;
-use crate::stream::QuicStream;
+use crate::wire::transport_parameters::TransportParameters;
 
 /// Establishes and shapes QUIC connections.
 #[derive(Clone)]
@@ -24,10 +22,7 @@ pub struct QuicConnector {
     profile: QuicProfile,
     socket_config: QuicSocketConfig,
     confinement: EgressConfinement,
-    custom_socket: Option<Arc<dyn AsyncUdpSocket>>,
-    custom_congestion: Option<Arc<dyn ControllerFactory + Send + Sync>>,
     custom_tls: Option<rustls::ClientConfig>,
-    custom_transport: Option<Arc<quinn::TransportConfig>>,
 }
 
 impl std::fmt::Debug for QuicConnector {
@@ -52,10 +47,7 @@ impl QuicConnector {
             profile,
             socket_config: QuicSocketConfig::default(),
             confinement: EgressConfinement::Unrestricted,
-            custom_socket: None,
-            custom_congestion: None,
             custom_tls: None,
-            custom_transport: None,
         }
     }
 
@@ -77,12 +69,6 @@ impl QuicConnector {
 
     /// Sets the egress confinement policy checked before any socket is created
     /// ([INV-EGRESS-01], [INV-QUIC-02]).
-    ///
-    /// Depth of defence matters here as much as on the TCP path: a caller that
-    /// reaches `netune-quic` with an attacker-influenced address must not be
-    /// able to open a QUIC socket to loopback or a cloud-metadata endpoint.
-    /// The check runs on the resolved address *before* `create_tokio_socket`,
-    /// so no packet can leave the host to a refused address.
     pub fn with_confinement(mut self, confinement: EgressConfinement) -> Self {
         self.confinement = confinement;
         self
@@ -94,65 +80,10 @@ impl QuicConnector {
         self.with_confinement(EgressConfinement::StrictPublic)
     }
 
-    /// Sets a custom `AsyncUdpSocket` implementation (e.g. for packet obfuscation or port hopping).
-    pub fn with_custom_socket(mut self, socket: Arc<dyn AsyncUdpSocket>) -> Self {
-        self.custom_socket = Some(socket);
-        self
-    }
-
-    /// Sets a custom congestion controller factory.
-    pub fn with_congestion_factory(
-        mut self,
-        factory: Arc<dyn ControllerFactory + Send + Sync>,
-    ) -> Self {
-        self.custom_congestion = Some(factory);
-        self
-    }
-
-    /// Overrides the low-level QUIC transport configuration directly.
-    pub fn with_transport_config(mut self, config: Arc<quinn::TransportConfig>) -> Self {
-        self.custom_transport = Some(config);
-        self
-    }
-
-    /// Overrides the TLS client configuration (must use `aws-lc-rs` provider, [INV-QUIC-01]).
+    /// Overrides the TLS client configuration (must use `aws-lc-rs`, [INV-QUIC-01]).
     pub fn with_tls_config(mut self, tls: rustls::ClientConfig) -> Self {
         self.custom_tls = Some(tls);
         self
-    }
-
-    /// Builds a Quinn `ClientConfig` matching this connector's profile and settings.
-    pub fn build_client_config(&self) -> Result<quinn::ClientConfig, QuicError> {
-        let transport_config = if let Some(tc) = &self.custom_transport {
-            tc.clone()
-        } else {
-            self.profile
-                .to_quinn_transport_config(self.custom_congestion.clone())?
-        };
-
-        let mut tls_config = if let Some(tls) = &self.custom_tls {
-            tls.clone()
-        } else {
-            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-            rustls::ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .map_err(|e| QuicError::Tls(e.to_string()))?
-                .with_platform_verifier()
-                .map_err(|e| QuicError::Tls(e.to_string()))?
-                .with_no_client_auth()
-        };
-
-        if !self.profile.alpn.is_empty() {
-            tls_config.alpn_protocols = self.profile.alpn.clone();
-        }
-
-        let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
-            .map_err(|e| QuicError::Tls(e.to_string()))?;
-
-        let mut client_config = quinn::ClientConfig::new(Arc::new(quic_crypto));
-        client_config.transport_config(transport_config);
-
-        Ok(client_config)
     }
 
     /// Establishes a QUIC connection to the target address and server name.
@@ -166,55 +97,37 @@ impl QuicConnector {
             rec.mark(EventKind::QuicStart, 0, 0);
         }
 
-        // Confinement strictly precedes socket creation ([INV-EGRESS-01], [INV-QUIC-02]):
-        // the refused address never reaches `create_tokio_socket`, so no packet is sent.
+        // Confinement strictly precedes socket creation ([INV-EGRESS-01], [INV-QUIC-02]).
         self.confinement
             .check(target_addr.ip())
             .map_err(|refused| QuicError::Connect(refused.to_string()))?;
 
-        let client_config = self.build_client_config()?;
-
-        let endpoint = if let Some(custom_sock) = &self.custom_socket {
-            Endpoint::new_with_abstract_socket(
-                EndpointConfig::default(),
-                None,
-                custom_sock.clone(),
-                Arc::new(TokioRuntime),
+        let tls = self.build_tls_config()?;
+        let transport = self.transport_parameters();
+        let udp = self.socket_config.create_tokio_socket(target_addr)?;
+        let endpoint = Endpoint::client_with_udp(udp).await?;
+        let connection = match endpoint
+            .connect(
+                target_addr,
+                server_name,
+                ClientConfigOwned {
+                    tls: Arc::new(tls),
+                    transport,
+                },
             )
-            .map_err(|e| QuicError::Connect(format!("create endpoint with custom socket: {e}")))?
-        } else {
-            let tokio_sock = self.socket_config.create_tokio_socket(target_addr)?;
-            let std_sock = tokio_sock.into_std()?;
-            Endpoint::new(
-                EndpointConfig::default(),
-                None,
-                std_sock,
-                Arc::new(TokioRuntime),
-            )
-            .map_err(|e| QuicError::Connect(format!("create client endpoint: {e}")))?
-        };
-
-        let connecting = endpoint
-            .connect_with(client_config, target_addr, server_name)
-            .map_err(|e| {
-                if let Some(rec) = &recorder {
-                    rec.mark(EventKind::QuicEnd, 0, 0);
-                }
-                QuicError::Connect(format!("quic dial init: {e}"))
-            })?;
-
-        let connection = match connecting.await {
-            Ok(conn) => {
+            .await
+        {
+            Ok(connection) => {
                 if let Some(rec) = &recorder {
                     rec.mark(EventKind::QuicEnd, 1, 0);
                 }
-                conn
+                connection
             }
-            Err(e) => {
+            Err(error) => {
                 if let Some(rec) = &recorder {
                     rec.mark(EventKind::QuicEnd, 0, 0);
                 }
-                return Err(QuicError::Connect(format!("quic handshake: {e}")));
+                return Err(error);
             }
         };
 
@@ -224,13 +137,55 @@ impl QuicConnector {
             recorder,
         })
     }
+
+    fn build_tls_config(&self) -> Result<rustls::ClientConfig, QuicError> {
+        let mut tls = if let Some(tls) = &self.custom_tls {
+            tls.clone()
+        } else {
+            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .map_err(|error| QuicError::Tls(error.to_string()))?
+                .with_platform_verifier()
+                .map_err(|error| QuicError::Tls(error.to_string()))?
+                .with_no_client_auth()
+        };
+        if !self.profile.alpn.is_empty() {
+            tls.alpn_protocols = self.profile.alpn.clone();
+        }
+        Ok(tls)
+    }
+
+    fn transport_parameters(&self) -> TransportParameters {
+        let parameters = &self.profile.transport_parameters;
+        TransportParameters {
+            max_idle_timeout: parameters
+                .max_idle_timeout
+                .map(|duration| duration.as_millis() as u64),
+            max_udp_payload_size: parameters.max_udp_payload_size.map(u64::from),
+            initial_max_data: Some(parameters.initial_max_data),
+            initial_max_stream_data_bidi_local: Some(parameters.initial_max_stream_data_bidi_local),
+            initial_max_stream_data_bidi_remote: Some(
+                parameters.initial_max_stream_data_bidi_remote,
+            ),
+            initial_max_stream_data_uni: Some(parameters.initial_max_stream_data_uni),
+            initial_max_streams_bidi: Some(parameters.initial_max_streams_bidi),
+            initial_max_streams_uni: Some(parameters.initial_max_streams_uni),
+            active_connection_id_limit: Some(parameters.active_connection_id_limit),
+            max_datagram_frame_size: if parameters.enable_datagrams {
+                Some(65_535)
+            } else {
+                None
+            },
+            ..TransportParameters::default()
+        }
+    }
 }
 
 /// An established QUIC connection.
-#[derive(Clone)]
 pub struct QuicConnection {
     _endpoint: Endpoint,
-    connection: quinn::Connection,
+    connection: Connection,
     recorder: Option<TraceCollector>,
 }
 
@@ -238,57 +193,39 @@ impl std::fmt::Debug for QuicConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QuicConnection")
             .field("remote_address", &self.connection.remote_address())
-            .field("rtt", &self.connection.rtt())
             .finish_non_exhaustive()
     }
 }
 
 impl QuicConnection {
-    /// Borrows the underlying Quinn `Connection`.
-    pub fn connection(&self) -> &quinn::Connection {
+    /// Borrows the owned QUIC connection.
+    pub fn connection(&self) -> &Connection {
         &self.connection
     }
 
-    /// Borrows the underlying Quinn `Endpoint`.
+    /// Borrows the endpoint that owns the UDP socket.
     pub fn endpoint(&self) -> &Endpoint {
         &self._endpoint
     }
 
-    /// Current smoothed round-trip time.
-    pub fn rtt(&self) -> Duration {
-        self.connection.rtt()
-    }
-
-    /// Transport counters for this connection.
-    ///
-    /// Congestion window and packet loss are *state*, not ordered boundaries, so they are
-    /// sampled here on demand rather than recorded as trace events; a trace stays a
-    /// reproducible sequence of phase boundaries.
-    pub fn stats(&self) -> quinn::ConnectionStats {
-        self.connection.stats()
-    }
-
-    /// Opens a new bidirectional stream satisfying `AsyncRead + AsyncWrite + Send + Unpin`.
-    pub async fn open_stream(&self) -> Result<QuicStream, QuicError> {
-        let (send, recv) = self
-            .connection
-            .open_bi()
-            .await
-            .map_err(|e| QuicError::Stream(format!("open bidirectional stream: {e}")))?;
-
-        if let Some(rec) = &self.recorder {
-            rec.mark(
-                EventKind::QuicStreamOpen,
-                send.id().index() as u32,
-                1, // 1 = bidi
-            );
-        }
-
-        Ok(QuicStream::new(send, recv))
-    }
-
     /// Obtains an RFC 9221 datagram session over this connection.
-    pub fn datagram_session(&self) -> QuicDatagramSession {
-        QuicDatagramSession::new(self.connection.clone())
+    pub fn datagram_session(&self) -> crate::datagram::QuicDatagramSession {
+        crate::datagram::QuicDatagramSession::new(self.connection.clone())
+    }
+
+    /// Opens a new bidirectional stream and records the trace boundary.
+    pub async fn open_stream(
+        &self,
+    ) -> Result<(crate::owned::SendStream, crate::owned::RecvStream), QuicError> {
+        let (send, recv) = self.connection.open_bi().await?;
+        if let Some(rec) = &self.recorder {
+            rec.mark(EventKind::QuicStreamOpen, send.id() as u32, 1);
+        }
+        Ok((send, recv))
+    }
+
+    /// Current smoothed round-trip time, when at least one ACK sample exists.
+    pub fn rtt(&self) -> Option<Duration> {
+        self.connection.rtt()
     }
 }

@@ -20,9 +20,8 @@ superseded_by: null
   [ADR-0008](0008-datagram-transport-and-socks5-udp-association.md)
 - Amended by: [ADR-0027](0027-owned-h3-qpack.md) — HTTP/3 and QPACK are owned
   by `netune-http3`; `quinn` remains the approved QUIC runtime.
-- Amended by: [ADR-0028](0028-owned-quic.md) — the QUIC engine migrates into
-  `netune-quic` behind the `owned-quic` feature; `quinn` remains the production
-  runtime until the parity gate.
+- Amended by: [ADR-0028](0028-owned-quic.md) — the QUIC engine is owned by
+  `netune-quic`; `quinn`/`quinn-proto` are dev-only differential oracles.
 
 ---
 

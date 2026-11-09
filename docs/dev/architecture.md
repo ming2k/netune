@@ -47,8 +47,8 @@ This document codifies the workspace topology, dependency direction, and non-neg
 
 ### 2.1 No Third-Party HTTP Runtime (ADR-0001)
 
-- **Red-line**: no third-party HTTP client, HTTP/2 implementation, HTTP/3 implementation, or WebSocket runtime may appear in the production dependency graph of any crate. HTTP/3 and QPACK are owned by `netune-http3` (ADR-0027); QUIC remains the approved `quinn` runtime (ADR-0016).
-- **Permitted exception**: differential-test oracles (`hyper`, `hyper-util`, `tungstenite`, `h3`, `h3-quinn`) as `dev-dependencies` only, so owned codecs can be compared byte-for-byte against a battle-tested implementation.
+- **Red-line**: no third-party HTTP client, HTTP/2 implementation, HTTP/3 implementation, or WebSocket runtime may appear in the production dependency graph of any crate. HTTP/3 and QPACK are owned by `netune-http3` (ADR-0027); QUIC is owned by `netune-quic` (ADR-0028).
+- **Permitted exception**: differential-test oracles (`hyper`, `hyper-util`, `tungstenite`, `h3`, `h3-quinn`, `quinn`, `quinn-proto`) as `dev-dependencies` only, so owned codecs can be compared byte-for-byte against a battle-tested implementation.
 - **Enforcement**: the architecture gate `.github/scripts/check-architecture.py` reads every `Cargo.toml` and fails on a forbidden runtime in any `[dependencies]` section (`ARCH-005`/`ARCH-006`), and fails if a `vendor/h3` or `vendor/h3-quinn` tree exists (`ARCH-010`); the differential suites fail if the owned encoder diverges from the oracle.
 
 ### 2.2 Structural Privilege Separation (ADR-0003)
@@ -90,12 +90,12 @@ This document codifies the workspace topology, dependency direction, and non-neg
 - **Exchange identity**: H3 wire stream `0` is a valid request, so ingress traces use non-zero exchange ids and record the wire stream id in the H3 start event (`[INV-SERVER-22..24]`).
 - **Enforcement**: `crates/netune-server/src/h3.rs`, `crates/netune-http3/src/server.rs`, and `crates/netune-server/tests/http3_ingress.rs`.
 
-### 2.4.3 QUIC Ownership Migration (ADR-0028)
+### 2.4.3 Owned QUIC (ADR-0028)
 
-- **Red-line (migration target)**: `netune-quic` owns the RFC 9000 state machine, RFC 9001 packet protection wiring and RFC 9002 recovery; `quinn`/`quinn-proto` disappear from the production graph after the parity gate.
-- **Current posture**: `quinn` remains the production runtime while the owned engine is built behind the non-default `owned-quic` feature. The wire codec, transport parameters and packet-protection layer are tested there, including the RFC 9001 client Initial vector.
+- **Red-line**: `netune-quic` owns the RFC 9000 state machine, RFC 9001 packet-protection wiring and RFC 9002 recovery; `quinn`/`quinn-proto` never appear in the production graph.
+- **Engine**: `wire` (varints, packet headers, frames, transport parameters), `crypto` (rustls packet protection and TLS handshake), `owned::core` (spaces, streams, ACK, flow control) and `owned::endpoint` (UDP routing and async handles).
 - **Crypto**: Initial/Handshake/1-RTT keys and packet/header protection come from `rustls::quic` backed by `aws-lc-rs`; no owned cipher or HKDF.
-- **Enforcement**: `crates/netune-quic/src/{wire,crypto}/`, `cargo test -p netune-quic --features owned-quic`, and the eventual `ARCH-005` switch that removes `quinn` from `ALLOWED_RUNTIME_DEPS`.
+- **Enforcement**: `crates/netune-quic/src/{wire,crypto,owned}/`, `ARCH-005` with an empty `ALLOWED_RUNTIME_DEPS`, and the quinn differential tests.
 
 ### 2.5 Codecs Never Open Sockets
 

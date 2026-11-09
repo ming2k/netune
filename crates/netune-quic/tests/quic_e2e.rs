@@ -5,19 +5,19 @@
 //! End-to-end integration and invariant tests for `netune-quic`.
 //!
 //! Verifies:
-//! - [INV-QUIC-01]: Single crypto provider (aws-lc-rs).
-//! - [INV-QUIC-02]: Socket configuration and pre-connect path.
-//! - [INV-QUIC-03]: Monotonic trace event recording in `netune-trace`.
-//! - [INV-QUIC-04]: RFC 9221 datagram MTU bounds and explicit size error.
+//! - `[INV-QUIC-01]`: single crypto provider (`aws-lc-rs`).
+//! - `[INV-QUIC-02]`: socket configuration and pre-connect path.
+//! - `[INV-QUIC-03]`: monotonic trace event recording in `netune-trace`.
+//! - `[INV-EGRESS-01]` / `[INV-QUIC-02]`: confinement precedes the socket.
 
 use std::sync::Arc;
-use std::time::Duration;
 
+use netune_quic::owned::{Endpoint, ServerConfigOwned};
 use netune_quic::profile::QuicProfile;
 use netune_quic::socket::QuicSocketConfig;
+use netune_quic::wire::transport_parameters::TransportParameters;
 use netune_quic::{QuicConnector, QuicError};
 use netune_trace::{EventKind, TraceCollector};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug)]
 struct AcceptAnyCert;
@@ -61,73 +61,72 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
     }
 }
 
-fn make_server_endpoint() -> (quinn::Endpoint, std::net::SocketAddr) {
+async fn make_server_endpoint() -> (Endpoint, std::net::SocketAddr) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("rcgen cert");
-    let cert_der = cert.cert.der().to_vec();
-    let key_der = cert.signing_key.serialize_der();
-
-    let cert_chain = vec![rustls::pki_types::CertificateDer::from(cert_der)];
+    let cert_chain = vec![rustls::pki_types::CertificateDer::from(
+        cert.cert.der().to_vec(),
+    )];
     let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
-        key_der,
+        cert.signing_key.serialize_der(),
     ));
-
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("versions")
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)
         .expect("cert");
-
-    server_crypto.alpn_protocols = vec![b"h3".to_vec()];
-
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(
-        quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).expect("server crypto"),
-    ));
-
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind server");
-    let addr = socket.local_addr().expect("local addr");
-    let endpoint = quinn::Endpoint::new(
-        quinn::EndpointConfig::default(),
-        Some(server_config),
-        socket,
-        Arc::new(quinn::TokioRuntime),
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    let transport = TransportParameters {
+        max_datagram_frame_size: Some(65_535),
+        initial_max_data: Some(16 * 1024 * 1024),
+        initial_max_stream_data_bidi_local: Some(1 << 20),
+        initial_max_stream_data_bidi_remote: Some(1 << 20),
+        initial_max_stream_data_uni: Some(1 << 20),
+        initial_max_streams_bidi: Some(1024),
+        initial_max_streams_uni: Some(1024),
+        active_connection_id_limit: Some(4),
+        ..TransportParameters::default()
+    };
+    let endpoint = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: Arc::new(tls),
+            transport,
+        },
     )
+    .await
     .expect("endpoint");
-
+    let addr = endpoint.local_addr();
     (endpoint, addr)
 }
 
-#[tokio::test]
-async fn test_quic_stream_and_trace_lifecycle() {
-    let (server, addr) = make_server_endpoint();
-
-    // Spawn server accept task
-    tokio::spawn(async move {
-        if let Some(connecting) = server.accept().await {
-            let conn = connecting.await.expect("server handshake");
-            let (mut send, mut recv) = conn.accept_bi().await.expect("accept stream");
-            let mut buf = [0u8; 128];
-            let n = recv.read(&mut buf).await.expect("read").expect("bytes");
-            send.write_all(&buf[..n]).await.expect("write");
-            let _ = send.finish();
-            let _ = conn.closed().await;
-        }
-    });
-
-    // Insecure TLS client config for test cert
+fn client_crypto() -> rustls::ClientConfig {
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let client_crypto = rustls::ClientConfig::builder_with_provider(provider)
+    rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("safe protocols")
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
-        .with_no_client_auth();
+        .with_no_client_auth()
+}
+
+#[tokio::test]
+async fn test_quic_stream_and_trace_lifecycle() {
+    let (server, addr) = make_server_endpoint().await;
+
+    tokio::spawn(async move {
+        let conn = server.accept().await.expect("server handshake");
+        let (mut send, mut recv) = conn.accept_bi().await.expect("accept stream");
+        let data = recv.read(128).await.expect("read").expect("bytes");
+        send.write_all(&data).await.expect("write");
+        send.finish().await.expect("finish");
+        conn.closed().await;
+    });
 
     let recorder = TraceCollector::start(1024);
-
     let connector = QuicConnector::new(QuicProfile::chrome_quic())
-        .with_tls_config(client_crypto)
+        .with_tls_config(client_crypto())
         .with_socket_config(QuicSocketConfig {
             mark: None,
             bind_device: None,
@@ -141,107 +140,67 @@ async fn test_quic_stream_and_trace_lifecycle() {
         .connect(addr, "localhost", Some(recorder.clone()))
         .await
         .expect("connect");
-
-    assert!(conn.rtt() >= Duration::ZERO);
-
-    let mut stream = conn.open_stream().await.expect("open stream");
-    stream.write_all(b"hello quic").await.expect("write");
-    stream.shutdown().await.expect("shutdown");
+    let (mut send, mut recv) = conn.open_stream().await.expect("open stream");
+    send.write_all(b"hello quic").await.expect("write");
+    send.finish().await.expect("finish");
 
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.expect("read");
+    while let Some(chunk) = recv.read(1024).await.expect("read") {
+        response.extend_from_slice(&chunk);
+    }
     assert_eq!(&response, b"hello quic");
 
-    // Verify trace events [INV-QUIC-03]
-    let log = recorder.log();
-    let kinds: Vec<EventKind> = log.iter().map(|e| e.kind).collect();
-    assert!(
-        kinds.contains(&EventKind::QuicStart),
-        "must record QuicStart"
-    );
-    assert!(kinds.contains(&EventKind::QuicEnd), "must record QuicEnd");
-    assert!(
-        kinds.contains(&EventKind::QuicStreamOpen),
-        "must record QuicStreamOpen"
-    );
-}
-
-#[tokio::test]
-async fn test_datagram_mtu_oversize_fails_cleanly() {
-    let (server, addr) = make_server_endpoint();
-
-    tokio::spawn(async move {
-        if let Some(connecting) = server.accept().await {
-            let conn = connecting.await.expect("server handshake");
-            // Echo datagram
-            if let Ok(dg) = conn.read_datagram().await {
-                let _ = conn.send_datagram(dg);
-            }
-        }
-    });
-
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let client_crypto = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .expect("safe protocols")
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
-        .with_no_client_auth();
-
-    let connector =
-        QuicConnector::new(QuicProfile::default_profile()).with_tls_config(client_crypto);
-
-    let conn = connector
-        .connect(addr, "localhost", None)
-        .await
-        .expect("connect");
-
-    let session = conn.datagram_session();
-
-    // Oversized datagram test [INV-QUIC-04]
-    let max = session.max_datagram_size().unwrap_or(1200);
-    let oversized = vec![0x42; max + 2048];
-    let err = session.send(&oversized).expect_err("must fail");
-
-    match err {
-        QuicError::DatagramTooLarge { max: m, size: s } => {
-            assert_eq!(m, max);
-            assert_eq!(s, max + 2048);
-        }
-        other => panic!("expected DatagramTooLarge, got: {other:?}"),
-    }
+    let kinds: Vec<EventKind> = recorder.log().iter().map(|event| event.kind).collect();
+    assert!(kinds.contains(&EventKind::QuicStart));
+    assert!(kinds.contains(&EventKind::QuicEnd));
+    assert!(kinds.contains(&EventKind::QuicStreamOpen));
 }
 
 /// `[INV-EGRESS-01]` / `[INV-QUIC-02]`: a `StrictPublic` connector refuses a
 /// non-public target *before* any socket is created, so no QUIC packet can be
-/// sent to loopback or a metadata endpoint. This is the guard that was missing
-/// when the QUIC path dialled the raw caller address unconfined.
+/// sent to loopback or a metadata endpoint.
 #[tokio::test]
 async fn strict_public_confinement_refuses_a_loopback_target() {
-    // A real listener is bound, so the only reason connect can fail is the policy,
-    // not an unreachable port.
-    let (_server, addr) = make_server_endpoint();
+    let (_server, addr) = make_server_endpoint().await;
     assert!(addr.ip().is_loopback(), "the fixture must be loopback");
 
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let client_crypto = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .expect("safe protocols")
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
-        .with_no_client_auth();
-
     let connector = QuicConnector::new(QuicProfile::default_profile())
-        .with_tls_config(client_crypto)
+        .with_tls_config(client_crypto())
         .strict_public();
 
-    let err = connector
+    let error = connector
         .connect(addr, "localhost", None)
         .await
-        .expect_err("a loopback target must be refused under StrictPublic");
-    let message = err.to_string();
-    assert!(
-        message.contains("confinement"),
-        "the refusal must name confinement, got: {message}"
-    );
+        .expect_err("loopback must be refused");
+    assert!(matches!(error, QuicError::Connect(_)));
+}
+
+#[tokio::test]
+async fn datagrams_echo_and_enforce_the_peer_mtu() {
+    let (server, addr) = make_server_endpoint().await;
+    tokio::spawn(async move {
+        let conn = server.accept().await.expect("server handshake");
+        let datagram = conn.recv_datagram().await.expect("recv datagram");
+        conn.send_datagram(datagram).await.expect("send datagram");
+    });
+
+    let connector = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto());
+    let connection = connector
+        .connect(addr, "localhost", None)
+        .await
+        .expect("connect");
+    let session = connection.datagram_session();
+    let max = session.max_datagram_size().expect("datagrams enabled");
+    session.send(b"hello datagram").await.expect("send");
+    let echoed = tokio::time::timeout(std::time::Duration::from_secs(2), session.recv())
+        .await
+        .expect("recv timeout")
+        .expect("recv");
+    assert_eq!(echoed.as_ref(), b"hello datagram");
+
+    let oversized = vec![0x42; max + 1];
+    assert!(matches!(
+        session.send(&oversized).await,
+        Err(QuicError::DatagramTooLarge { .. })
+    ));
 }

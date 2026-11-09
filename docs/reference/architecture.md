@@ -71,7 +71,7 @@ The architectural evolution is governed by the following decisions:
 | [ADR-0025](../adr/0025-h3-ingress-peer-transport.md) | H3 Ingress Peer Transport | Separate QUIC listener, non-zero exchange ids, shared handler and bounds (`INV-SERVER-22..24`). |
 | [ADR-0026](../adr/0026-controlled-dynamic-qpack.md) | Controlled Dynamic QPACK | Superseded by ADR-0027: owned QPACK critical streams, ACKs and blocked streams; typed SETTINGS profiles (`INV-H3-03..05`). |
 | [ADR-0027](../adr/0027-owned-h3-qpack.md) | Owned HTTP/3 and QPACK | `netune-http3` owns RFC 9114 and RFC 9204; no `h3`/`h3-quinn` production dependency or `vendor/` tree; `quinn` remains the QUIC runtime (`INV-H3-03..08`). |
-| [ADR-0028](../adr/0028-owned-quic.md) | Owned QUIC Transport | `netune-quic` owns RFC 9000/9001/9002/9221; `quinn` remains a dev-only oracle after the staged parity gate (`INV-QUIC-05..09`). |
+| [ADR-0028](../adr/0028-owned-quic.md) | Owned QUIC Transport | `netune-quic` owns RFC 9000/9001/9002; `quinn`/`quinn-proto` are dev-only oracles (`INV-QUIC-05..09`). |
 
 ---
 

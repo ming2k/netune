@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use bytes::{Bytes, BytesMut};
-use netune_quic::quinn;
+use netune_quic::owned::Connection;
 use tokio::sync::{mpsc, watch};
 
 use crate::error::H3Error;
@@ -31,7 +31,7 @@ pub enum ControlCommand {
 
 /// State shared by every stream on one connection.
 pub struct Shared {
-    pub connection: quinn::Connection,
+    pub connection: Connection,
     encoder: Mutex<Encoder>,
     decoder: Mutex<Decoder>,
     qpack_encoder_tx: mpsc::UnboundedSender<Bytes>,
@@ -51,7 +51,7 @@ pub struct Shared {
 impl Shared {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        connection: quinn::Connection,
+        connection: Connection,
         settings: &H3SettingsProfile,
         qpack_encoder_tx: mpsc::UnboundedSender<Bytes>,
         qpack_decoder_tx: mpsc::UnboundedSender<Bytes>,
@@ -118,9 +118,7 @@ impl Shared {
             message: message.clone(),
         });
         let _ = self.error_tx.send_replace(Some(error));
-        if let Ok(code) = quinn::VarInt::from_u64(code) {
-            self.connection.close(code, message.as_bytes());
-        }
+        self.connection.close(code, &message);
     }
 
     pub fn mark_control(&self) -> bool {

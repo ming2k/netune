@@ -230,6 +230,8 @@ they are not vendored, and a default build of `netune-http3` links neither.
   [ADR-0025](0025-h3-ingress-peer-transport.md)
 - Superseded: [ADR-0023](0023-h3-request-header-order.md),
   [ADR-0026](0026-controlled-dynamic-qpack.md)
+- Amended by: [ADR-0028](0028-owned-quic.md) — QUIC is now owned by
+  `netune-quic`; the H3/QPACK decision is unchanged.
 - RFCs: [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114),
   [RFC 9204](https://www.rfc-editor.org/rfc/rfc9204),
   [RFC 7541](https://www.rfc-editor.org/rfc/rfc7541)

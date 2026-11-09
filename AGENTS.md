@@ -2,7 +2,7 @@
 
 ## 1. Operational Guardrails (Hard Constraints)
 
-- **No third-party protocol runtime in pure crates.** Never add a third-party HTTP client, HTTP/2 implementation (`h2`), HTTP/3 implementation, or WebSocket runtime to an owned codec or orchestrator. The QUIC leaf uses the approved `quinn` runtime during the ADR-0028 migration; the owned engine is built behind `owned-quic` and becomes production only after its parity gate. HTTP/3 and QPACK are owned by `netune-http3` (ADR-0027). Oracles (`hyper`, `tungstenite`, `h3`) are `dev-dependencies` only.
+- **No third-party protocol runtime in pure crates.** Never add a third-party HTTP client, HTTP/2 implementation (`h2`), HTTP/3 implementation, or WebSocket runtime to an owned codec or orchestrator. The QUIC engine is owned by `netune-quic` (ADR-0028); `quinn`/`quinn-proto` are dev-only differential oracles. HTTP/3 and QPACK are owned by `netune-http3` (ADR-0027). Oracles (`hyper`, `tungstenite`, `h3`) are `dev-dependencies` only.
 - **Privilege boundary.** Never make `netune-probe`'s transmit path reachable in a default build. `Capture::send_frame` stays behind `--features inject` and requires `CAP_NET_RAW`.
 - **Directional exclusivity.** `netune` opens outbound connections and never listens; `netune-server` accepts inbound connections and never dials (ADR-0011).
 - **Confinement before connect.** Never open a socket before `EgressConfinement` has checked the resolved address (ADR-0002).

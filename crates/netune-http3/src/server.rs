@@ -32,7 +32,7 @@ impl std::fmt::Debug for H3ServerConnection {
 impl H3ServerConnection {
     /// Start HTTP/3 on an accepted QUIC connection.
     pub async fn new(
-        connection: netune_quic::quinn::Connection,
+        connection: netune_quic::owned::Connection,
         settings: &H3SettingsProfile,
     ) -> Result<Self, H3Error> {
         settings
@@ -183,6 +183,6 @@ impl H3ServerStream {
 
     /// Finish the response stream.
     pub async fn finish(&mut self) -> Result<(), H3Error> {
-        self.stream.finish_send()
+        self.stream.finish_send().await
     }
 }

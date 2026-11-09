@@ -9,7 +9,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use netune_http3::H3Client;
 use netune_quic::QuicConnector;
+use netune_quic::owned::{Endpoint, ServerConfigOwned};
 use netune_quic::profile::QuicProfile;
+use netune_quic::wire::transport_parameters::TransportParameters;
 use netune_trace::{EventKind, TraceCollector};
 
 #[derive(Debug)]
@@ -54,50 +56,52 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
     }
 }
 
-fn make_server_endpoint() -> (quinn::Endpoint, std::net::SocketAddr) {
+async fn make_server_endpoint() -> (Endpoint, std::net::SocketAddr) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("rcgen cert");
-    let cert_der = cert.cert.der().to_vec();
-    let key_der = cert.signing_key.serialize_der();
-
-    let cert_chain = vec![rustls::pki_types::CertificateDer::from(cert_der)];
+    let cert_chain = vec![rustls::pki_types::CertificateDer::from(
+        cert.cert.der().to_vec(),
+    )];
     let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
-        key_der,
+        cert.signing_key.serialize_der(),
     ));
-
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("versions")
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)
         .expect("cert");
-
-    server_crypto.alpn_protocols = vec![b"h3".to_vec()];
-
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(
-        quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).expect("server crypto"),
-    ));
-
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind server");
-    let addr = socket.local_addr().expect("local addr");
-    let endpoint = quinn::Endpoint::new(
-        quinn::EndpointConfig::default(),
-        Some(server_config),
-        socket,
-        Arc::new(quinn::TokioRuntime),
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    let transport = TransportParameters {
+        initial_max_data: Some(16 * 1024 * 1024),
+        initial_max_stream_data_bidi_local: Some(1 << 20),
+        initial_max_stream_data_bidi_remote: Some(1 << 20),
+        initial_max_stream_data_uni: Some(1 << 20),
+        initial_max_streams_bidi: Some(1024),
+        initial_max_streams_uni: Some(1024),
+        active_connection_id_limit: Some(4),
+        ..TransportParameters::default()
+    };
+    let endpoint = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: Arc::new(tls),
+            transport,
+        },
     )
+    .await
     .expect("endpoint");
-
+    let addr = endpoint.local_addr();
     (endpoint, addr)
 }
 
 #[tokio::test]
 async fn test_http3_client_request_response_and_trace() {
-    let (server, addr) = make_server_endpoint();
+    let (server, addr) = make_server_endpoint().await;
 
     tokio::spawn(async move {
-        if let Some(connecting) = server.accept().await {
-            let conn = connecting.await.expect("server handshake");
+        {
+            let conn = server.accept().await.expect("server handshake");
             let mut h3_conn = netune_http3::H3ServerConnection::new(
                 conn,
                 &netune_http3::H3SettingsProfile::dynamic(),

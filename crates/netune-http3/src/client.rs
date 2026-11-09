@@ -120,7 +120,7 @@ impl H3RequestBody {
     pub async fn finish(self) -> Result<H3ResponseStream, H3Error> {
         let mut stream = self.stream;
         deadline("request finish", self.config.request_timeout, async {
-            stream.finish_send()
+            stream.finish_send().await
         })
         .await?;
         await_response(
@@ -302,7 +302,7 @@ impl std::fmt::Debug for H3Client {
 impl H3Client {
     /// Creates a new HTTP/3 client session over an established QUIC connection.
     pub async fn new(
-        connection: &netune_quic::quinn::Connection,
+        connection: &netune_quic::owned::Connection,
         recorder: Option<TraceCollector>,
     ) -> Result<Self, H3Error> {
         Self::new_with_config(connection, recorder, H3ClientConfig::default()).await
@@ -310,7 +310,7 @@ impl H3Client {
 
     /// Creates a session with explicit bounds and the default SETTINGS.
     pub async fn new_with_config(
-        connection: &netune_quic::quinn::Connection,
+        connection: &netune_quic::owned::Connection,
         recorder: Option<TraceCollector>,
         config: H3ClientConfig,
     ) -> Result<Self, H3Error> {
@@ -325,7 +325,7 @@ impl H3Client {
 
     /// Creates a session with an explicit SETTINGS profile and default bounds.
     pub async fn new_with_settings(
-        connection: &netune_quic::quinn::Connection,
+        connection: &netune_quic::owned::Connection,
         recorder: Option<TraceCollector>,
         settings: H3SettingsProfile,
     ) -> Result<Self, H3Error> {
@@ -340,7 +340,7 @@ impl H3Client {
 
     /// Creates a session with explicit SETTINGS and bounds.
     pub async fn new_with_settings_and_config(
-        connection: &netune_quic::quinn::Connection,
+        connection: &netune_quic::owned::Connection,
         recorder: Option<TraceCollector>,
         settings: H3SettingsProfile,
         config: H3ClientConfig,

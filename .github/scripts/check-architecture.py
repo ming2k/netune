@@ -107,9 +107,7 @@ FORBIDDEN_QUIC_RUNTIME = {
     "h3",
     "h3-quinn",
 }
-ALLOWED_RUNTIME_DEPS: dict[str, set[str]] = {
-    "netune-quic": {"quinn", "quinn-proto"},
-}
+ALLOWED_RUNTIME_DEPS: dict[str, set[str]] = {}
 FORBIDDEN_WS_RUNTIME = {
     "tungstenite",
     "tokio-tungstenite",

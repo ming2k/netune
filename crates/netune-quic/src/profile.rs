@@ -7,21 +7,9 @@
 //! rather than hard-coded library defaults.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
-use quinn::VarInt;
-use quinn::congestion::{BbrConfig, ControllerFactory, CubicConfig, NewRenoConfig};
-
 use crate::error::QuicError;
-
-/// Congestion control algorithms available for QUIC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CongestionAlgorithm {
-    Bbr,
-    Cubic,
-    NewReno,
-}
 
 /// Transport parameters governing flow control, concurrency, and idle bounds (RFC 9000 §18.2).
 #[derive(Debug, Clone)]
@@ -115,14 +103,8 @@ pub struct QuicProfile {
     pub name: &'static str,
     /// Transport parameters applied to the QUIC state machine.
     pub transport_parameters: QuicTransportParameters,
-    /// Minimum initial packet size (must be at least 1200 bytes per RFC 9000).
-    pub initial_packet_size: u16,
     /// ALPN strings in wire preference order.
     pub alpn: Vec<Vec<u8>>,
-    /// Congestion control algorithm.
-    pub congestion: CongestionAlgorithm,
-    /// Keep-alive interval if background pinging is desired.
-    pub keep_alive_interval: Option<Duration>,
 }
 
 impl Default for QuicProfile {
@@ -137,10 +119,7 @@ impl QuicProfile {
         Self {
             name: "quic-default",
             transport_parameters: QuicTransportParameters::default(),
-            initial_packet_size: 1200,
             alpn: vec![b"h3".to_vec()],
-            congestion: CongestionAlgorithm::Bbr,
-            keep_alive_interval: Some(Duration::from_secs(10)),
         }
     }
 
@@ -160,10 +139,7 @@ impl QuicProfile {
                 active_connection_id_limit: 4,
                 enable_datagrams: true,
             },
-            initial_packet_size: 1250,
             alpn: vec![b"h3".to_vec()],
-            congestion: CongestionAlgorithm::Bbr,
-            keep_alive_interval: Some(Duration::from_secs(15)),
         }
     }
 
@@ -183,70 +159,13 @@ impl QuicProfile {
                 active_connection_id_limit: 8,
                 enable_datagrams: true,
             },
-            initial_packet_size: 1200,
             alpn: vec![b"h3".to_vec()],
-            congestion: CongestionAlgorithm::Bbr,
-            keep_alive_interval: Some(Duration::from_secs(5)),
         }
     }
 
     /// Resolves a named profile preset through the default registry.
     pub fn by_name(name: &str) -> Option<Self> {
         QuicProfileRegistry::default().resolve(name).ok().cloned()
-    }
-
-    /// Lowers this profile into a Quinn `TransportConfig`.
-    pub fn to_quinn_transport_config(
-        &self,
-        custom_congestion: Option<Arc<dyn ControllerFactory + Send + Sync>>,
-    ) -> Result<Arc<quinn::TransportConfig>, QuicError> {
-        let mut transport = quinn::TransportConfig::default();
-
-        let tp = &self.transport_parameters;
-
-        transport.receive_window(
-            VarInt::from_u64(tp.initial_max_data)
-                .map_err(|e| QuicError::Config(format!("initial_max_data invalid: {e}")))?,
-        );
-        transport.stream_receive_window(
-            VarInt::from_u64(tp.initial_max_stream_data_bidi_local)
-                .map_err(|e| QuicError::Config(format!("initial_max_stream_data invalid: {e}")))?,
-        );
-
-        if let Some(idle) = tp.max_idle_timeout {
-            let max_idle = quinn::IdleTimeout::try_from(idle)
-                .map_err(|e| QuicError::Config(format!("max_idle_timeout invalid: {e}")))?;
-            transport.max_idle_timeout(Some(max_idle));
-        } else {
-            transport.max_idle_timeout(None);
-        }
-
-        transport.initial_mtu(self.initial_packet_size);
-        transport.keep_alive_interval(self.keep_alive_interval);
-
-        if let Some(factory) = custom_congestion {
-            transport.congestion_controller_factory(factory);
-        } else {
-            match self.congestion {
-                CongestionAlgorithm::Bbr => {
-                    transport.congestion_controller_factory(Arc::new(BbrConfig::default()));
-                }
-                CongestionAlgorithm::Cubic => {
-                    transport.congestion_controller_factory(Arc::new(CubicConfig::default()));
-                }
-                CongestionAlgorithm::NewReno => {
-                    transport.congestion_controller_factory(Arc::new(NewRenoConfig::default()));
-                }
-            }
-        }
-
-        transport.datagram_receive_buffer_size(if tp.enable_datagrams {
-            Some(1024 * 1024)
-        } else {
-            None
-        });
-
-        Ok(Arc::new(transport))
     }
 }
 

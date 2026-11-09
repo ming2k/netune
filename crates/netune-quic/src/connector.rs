@@ -117,6 +117,7 @@ impl QuicConnector {
                         crate::wire::packet::VERSION_1,
                         crate::wire::packet::VERSION_2,
                     ],
+                    congestion: self.profile.congestion,
                 },
             )
             .await

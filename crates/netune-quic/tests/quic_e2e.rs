@@ -94,6 +94,7 @@ async fn make_server_endpoint() -> (Endpoint, std::net::SocketAddr) {
             tls: Arc::new(tls),
             transport,
             retry: true,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
         },
     )
     .await

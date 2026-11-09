@@ -104,6 +104,7 @@ async fn owned_server_exchanges_a_bidi_stream_with_owned_client() {
             tls: server_tls(),
             transport: transport(),
             retry: true,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
         },
     )
     .await
@@ -129,6 +130,7 @@ async fn owned_server_exchanges_a_bidi_stream_with_owned_client() {
                 tls: client_tls(),
                 transport: transport(),
                 versions: vec![netune_quic::wire::packet::VERSION_1],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
             },
         )
         .await
@@ -156,6 +158,7 @@ async fn owned_server_speaks_quic_v2_with_owned_client() {
             tls: server_tls(),
             transport: transport(),
             retry: true,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
         },
     )
     .await
@@ -180,6 +183,7 @@ async fn owned_server_speaks_quic_v2_with_owned_client() {
                 tls: client_tls(),
                 transport: transport(),
                 versions: vec![VERSION_2],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
             },
         )
         .await

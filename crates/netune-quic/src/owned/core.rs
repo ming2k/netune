@@ -20,6 +20,9 @@ use crate::crypto::{
     protect_short, unprotect_long, unprotect_short_with,
 };
 use crate::error::QuicError;
+use crate::profile::CongestionAlgorithm;
+
+use super::congestion::Congestion;
 use crate::wire::frame::{AckFrame, AckRange, Frame};
 use crate::wire::packet::{LongPacket, LongType, ShortPacket, VersionNegotiation};
 use crate::wire::transport_parameters::TransportParameters;
@@ -150,8 +153,7 @@ pub(crate) struct Core {
     peer_max_datagram: Option<u64>,
     send_datagrams: VecDeque<Bytes>,
     recv_datagrams: VecDeque<Bytes>,
-    cwnd: u64,
-    ssthresh: u64,
+    congestion: Congestion,
     bytes_in_flight: u64,
     peer_opened_bidi: u64,
     peer_opened_uni: u64,
@@ -174,6 +176,7 @@ pub(crate) struct Core {
 
 impl Core {
     /// Create a client core. The first ClientHello is queued by `poll_transmit`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn client(
         client_config: std::sync::Arc<ClientConfig>,
         server_name: ServerName<'static>,
@@ -182,6 +185,7 @@ impl Core {
         local_tp: TransportParameters,
         version: u32,
         supported_versions: Vec<u32>,
+        congestion: CongestionAlgorithm,
     ) -> Result<Self, QuicError> {
         let initial = initial_keys_for_version(&original_dcid, Side::Client, version)?;
         let local_max_data = local_tp.initial_max_data.unwrap_or(0);
@@ -242,8 +246,7 @@ impl Core {
             peer_max_datagram: None,
             send_datagrams: VecDeque::new(),
             recv_datagrams: VecDeque::new(),
-            cwnd: 12_000,
-            ssthresh: u64::MAX,
+            congestion: Congestion::new(congestion, Instant::now()),
             bytes_in_flight: 0,
             peer_opened_bidi: 0,
             peer_opened_uni: 0,
@@ -274,6 +277,7 @@ impl Core {
         local_cid: Vec<u8>,
         local_tp: TransportParameters,
         version: u32,
+        congestion: CongestionAlgorithm,
     ) -> Result<Self, QuicError> {
         let initial = initial_keys_for_version(&original_dcid, Side::Server, version)?;
         let local_max_data = local_tp.initial_max_data.unwrap_or(0);
@@ -323,8 +327,7 @@ impl Core {
             peer_max_datagram: None,
             send_datagrams: VecDeque::new(),
             recv_datagrams: VecDeque::new(),
-            cwnd: 12_000,
-            ssthresh: u64::MAX,
+            congestion: Congestion::new(congestion, Instant::now()),
             bytes_in_flight: 0,
             peer_opened_bidi: 0,
             peer_opened_uni: 0,
@@ -414,8 +417,7 @@ impl Core {
         if now.saturating_duration_since(earliest) < self.pto {
             return Ok(());
         }
-        self.ssthresh = self.cwnd / 2;
-        self.cwnd = 1200;
+        self.congestion.on_pto(now);
         self.bytes_in_flight = 0;
         let packets = std::mem::take(&mut self.sent);
         for packet in packets {
@@ -501,8 +503,6 @@ impl Core {
         self.srtt = None;
         self.rttvar = Duration::ZERO;
         self.pto = Duration::from_secs(1);
-        self.cwnd = 12_000;
-        self.ssthresh = u64::MAX;
         self.bytes_in_flight = 0;
         self.drain_tls()?;
         Ok(())
@@ -565,8 +565,6 @@ impl Core {
         self.srtt = None;
         self.rttvar = Duration::ZERO;
         self.pto = Duration::from_secs(1);
-        self.cwnd = 12_000;
-        self.ssthresh = u64::MAX;
         self.bytes_in_flight = 0;
         self.drain_tls()?;
         Ok(())
@@ -679,8 +677,7 @@ impl Core {
         });
         self.bytes_in_flight = self.bytes_in_flight.saturating_sub(acked_bytes);
         if !lost.is_empty() {
-            self.ssthresh = (self.cwnd / 2).max(2400);
-            self.cwnd = self.ssthresh;
+            self.congestion.on_loss(now);
             for (size, frames) in lost {
                 self.bytes_in_flight = self.bytes_in_flight.saturating_sub(size);
                 for frame in frames {
@@ -690,13 +687,7 @@ impl Core {
                 }
             }
         } else if acked_bytes > 0 {
-            if self.cwnd < self.ssthresh {
-                self.cwnd = self.cwnd.saturating_add(acked_bytes);
-            } else {
-                self.cwnd = self
-                    .cwnd
-                    .saturating_add((1200u64.saturating_mul(acked_bytes)) / self.cwnd.max(1));
-            }
+            self.congestion.on_ack(acked_bytes, now, self.srtt);
         }
     }
 
@@ -858,7 +849,7 @@ impl Core {
                 });
             }
             frames.append(&mut self.retransmit[level as usize]);
-            if level == Level::OneRtt && self.bytes_in_flight < self.cwnd {
+            if level == Level::OneRtt && self.bytes_in_flight < self.congestion.window() {
                 self.append_stream_frames(&mut frames);
                 if let Some(data) = self.send_datagrams.pop_front() {
                     frames.push(Frame::Datagram { data });
@@ -1671,6 +1662,7 @@ mod tests {
             TransportParameters::default(),
             crate::wire::packet::VERSION_1,
             vec![crate::wire::packet::VERSION_1],
+            CongestionAlgorithm::NewReno,
         )
         .expect("core")
     }

@@ -31,6 +31,7 @@ pub struct ClientConfigOwned {
     pub transport: TransportParameters,
     /// Preferred QUIC version first; later entries are Version Negotiation fallbacks.
     pub versions: Vec<u32>,
+    pub congestion: crate::profile::CongestionAlgorithm,
 }
 
 /// A server configuration for the owned endpoint.
@@ -40,6 +41,7 @@ pub struct ServerConfigOwned {
     pub transport: TransportParameters,
     /// Require a Retry token before allocating connection state.
     pub retry: bool,
+    pub congestion: crate::profile::CongestionAlgorithm,
 }
 
 /// A bound owned QUIC endpoint.
@@ -141,6 +143,7 @@ impl Endpoint {
             local_tp,
             version,
             versions,
+            config.congestion,
         )?;
         let (connection, outgoing) =
             spawn_connection(self.inner.clone(), target, core, None).await?;
@@ -292,6 +295,7 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
                 local_cid.clone(),
                 local_tp,
                 version,
+                server.congestion,
             ) {
                 Ok(core) => core,
                 Err(_) => continue,

@@ -67,7 +67,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-SERVER-22..24]` | H3 ingress is a separate QUIC listener; its exchanges use non-zero trace ids; body, handler, write and drain bounds come from the same `ServerConfig`. | ADR-0025 |
 | `[INV-QUIC-01..04]` | Crypto unification on `aws-lc-rs` (`ring` forbidden); pre-connect socket options and confinement precede QUIC initial packet; pure trace derivation; predictable datagram sizing failure. | ADR-0016 |
 | `[INV-QUIC-05..09]` | QUIC is owned by `netune-quic`: no quinn production path, delegated rustls/aws-lc-rs crypto, validate-before-mutate, timestamp-driven bounded recovery, and flow control before buffering. | ADR-0028 |
-| `[INV-QUIC-10..14]` | QUIC lifecycle hardening: Retry precedes server state, stateless reset tokens are keyed by CID, key update retains reordering keys, Version Negotiation never selects an unconfigured version, and migration waits for path validation. | ADR-0029 |
+| `[INV-QUIC-10..15]` | QUIC lifecycle hardening: Retry precedes server state, stateless reset tokens are keyed by CID, key update retains reordering keys, Version Negotiation never selects an unconfigured version, migration waits for path validation, and congestion policy is profile-selected. | ADR-0029 |
 
 The authoritative wording of each invariant lives in its ADR. This table is an index, not a second source of truth; if the two disagree, the ADR wins and this table is corrected.
 

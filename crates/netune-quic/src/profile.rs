@@ -11,6 +11,15 @@ use std::time::Duration;
 
 use crate::error::QuicError;
 
+/// Congestion-control algorithm carried by a QUIC profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CongestionAlgorithm {
+    #[default]
+    NewReno,
+    Cubic,
+    Bbr,
+}
+
 /// Transport parameters governing flow control, concurrency, and idle bounds (RFC 9000 §18.2).
 #[derive(Debug, Clone)]
 pub struct QuicTransportParameters {
@@ -103,6 +112,8 @@ pub struct QuicProfile {
     pub name: &'static str,
     /// Transport parameters applied to the QUIC state machine.
     pub transport_parameters: QuicTransportParameters,
+    /// Congestion-control algorithm applied to recovery.
+    pub congestion: CongestionAlgorithm,
     /// ALPN strings in wire preference order.
     pub alpn: Vec<Vec<u8>>,
 }
@@ -119,6 +130,7 @@ impl QuicProfile {
         Self {
             name: "quic-default",
             transport_parameters: QuicTransportParameters::default(),
+            congestion: CongestionAlgorithm::NewReno,
             alpn: vec![b"h3".to_vec()],
         }
     }
@@ -139,6 +151,7 @@ impl QuicProfile {
                 active_connection_id_limit: 4,
                 enable_datagrams: true,
             },
+            congestion: CongestionAlgorithm::Bbr,
             alpn: vec![b"h3".to_vec()],
         }
     }
@@ -159,6 +172,7 @@ impl QuicProfile {
                 active_connection_id_limit: 8,
                 enable_datagrams: true,
             },
+            congestion: CongestionAlgorithm::Bbr,
             alpn: vec![b"h3".to_vec()],
         }
     }

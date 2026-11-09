@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **QUIC lifecycle hardening.** The owned engine now validates addresses with
   stateless Retry tokens, emits keyed stateless resets, rotates 1-RTT keys with
   key-phase reordering, performs fast loss detection, tops up `MAX_DATA` /
-  `MAX_STREAM_DATA`, speaks QUIC v2 and handles Version Negotiation (ADR-0029).
+  `MAX_STREAM_DATA`, speaks QUIC v2, handles Version Negotiation, validates
+  migrated paths and selects NewReno/Cubic/BBR congestion profiles (ADR-0029).
 
 ### Changed
 

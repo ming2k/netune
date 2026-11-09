@@ -77,7 +77,19 @@ and whether peer implementations can negotiate a version at all.
   half the advertised window emits `MAX_DATA`/`MAX_STREAM_DATA` and raises the
   advertised limit.
 
-### 5. Version negotiation and QUIC v2
+### 5. Congestion-control profiles
+
+- `QuicProfile::congestion` selects NewReno, Cubic or a model-window BBR
+  controller.
+- The controller receives ACK bytes, loss notifications, PTO events and the
+  smoothed RTT from the connection core; the core reads only the returned
+  congestion window. BBR keeps bottleneck-bandwidth/min-RTT state and cycles
+  startup/drain/probe windows; it deliberately does not claim full pacing
+  parity.
+- Recovery reduces the window once per loss event and resets bytes-in-flight on
+  PTO.
+
+### 6. Version negotiation and QUIC v2
 
 - QUIC v1 and v2 long-header type mappings, Initial salts and Retry integrity
   tags are version-specific.
@@ -103,6 +115,10 @@ and whether peer implementations can negotiate a version at all.
 - **`[INV-QUIC-13]` No Unconfigured Downgrade**: Version Negotiation can select
   only a version in the client's configured list; a listed current version is
   not a downgrade signal. *Enforced by*: `handle_version_negotiation`.
+- **`[INV-QUIC-15]` Congestion Is Profile-Selected**: the connection core never
+  hard-codes an AIMD policy; NewReno, Cubic and BBR are selected from the
+  resolved QUIC profile and receive the same ACK/loss/RTT inputs. *Enforced by*:
+  `CongestionAlgorithm`, `Congestion`, and the controller unit tests.
 - **`[INV-QUIC-14]` Migrate Only After Path Validation**: a source-address change
   starts PATH_CHALLENGE on the candidate path; the endpoint switches only after
   a matching PATH_RESPONSE, and drops the change when migration is disabled.

@@ -90,6 +90,7 @@ impl H3Server {
             tls: Arc::new(tls),
             transport,
             retry: true,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
         };
         let endpoint =
             netune_quic::owned::Endpoint::server(address.to_string().as_str(), server_config)

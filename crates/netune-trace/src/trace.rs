@@ -5,8 +5,6 @@
 //! it*. The last one is a contract, not a note: a consumer must never present an
 //! L0 trace as if it had syscall-level detail.
 
-use serde::{Deserialize, Serialize};
-
 use crate::log::EventLog;
 
 /// Correlation id carried on the request (`x-netune-request-id`), so the client
@@ -14,7 +12,8 @@ use crate::log::EventLog;
 ///
 /// Stored as text because it is a UUIDv7 rendered as a string, and because a
 /// `u128` does not survive JSON in a JavaScript consumer.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraceId(String);
 
 impl TraceId {
@@ -38,7 +37,8 @@ impl std::fmt::Display for TraceId {
 /// Deliberately a plain struct rather than an application-level contracts type: the trace
 /// crate must not depend on the ledger, and the integration layer maps its
 /// `RequestUsageKey` onto this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AttemptRef {
     pub round: u64,
     pub turn: u32,
@@ -46,7 +46,8 @@ pub struct AttemptRef {
 }
 
 /// Who was called.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EndpointRef {
     pub provider: String,
     pub model: String,
@@ -55,7 +56,8 @@ pub struct EndpointRef {
 }
 
 /// Provenance of the connection the attempt used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConnectionInfo {
     /// Taken from the pool: no DNS, TCP or TLS phase occurred.
     pub reused: bool,
@@ -70,7 +72,8 @@ pub struct ConnectionInfo {
 ///
 /// A consumer's first duty is to check this before trusting a scope: an L0
 /// trace has no `TCP_INFO`, no per-read timeline and no segments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Fidelity {
     /// Protocol-level events only.
     pub protocol: bool,
@@ -83,6 +86,16 @@ pub struct Fidelity {
 }
 
 impl Fidelity {
+    /// Nothing was recorded. This is the truthful envelope for `NoTap`.
+    pub const fn none() -> Self {
+        Self {
+            protocol: false,
+            syscall: false,
+            kernel_ts: false,
+            segments: false,
+        }
+    }
+
     /// Protocol events only: the floor every platform supports.
     pub const fn l0() -> Self {
         Self {
@@ -119,13 +132,85 @@ impl Fidelity {
     }
 }
 
+/// A named wire-shaping policy applied to a connection's early flight.
+///
+/// This is intentionally a value, not a boolean on a target: it can be compared,
+/// hashed into a pool key and recorded in a trace envelope. The `SniSplit`
+/// preset matches the long-standing `SegmentingIo::for_sni` shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum EvasionPolicy {
+    /// No wire shaping.
+    #[default]
+    None,
+    /// Split the first `segment_limit` bytes into `chunk_size` writes, with an
+    /// optional gap in microseconds between chunks.
+    SniSplit {
+        chunk_size: u16,
+        segment_limit: u16,
+        gap_us: u32,
+    },
+}
+
+impl EvasionPolicy {
+    /// The preset used for SNI micro-segmentation: 24-byte chunks, first 512
+    /// bytes, 2 ms between chunks.
+    pub const fn sni_split() -> Self {
+        Self::SniSplit {
+            chunk_size: 24,
+            segment_limit: 512,
+            gap_us: 2_000,
+        }
+    }
+
+    pub const fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+/// Everything fixed at connection establishment that can change what the peer
+/// sees or which socket may serve a request.
+///
+/// Request-only wire details (HTTP/1 header order and casing, HTTP/2
+/// pseudo-header order) are deliberately not here: they are applied per
+/// request and do not make two sockets interchangeable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ConnectionIdentity {
+    pub tls_profile: Option<String>,
+    pub tls_server_name: Option<String>,
+    pub evasion: EvasionPolicy,
+    pub h2_profile: Option<String>,
+    /// The resolved QUIC profile that supplies the H3 connection's transport
+    /// identity.
+    pub h3_profile: Option<String>,
+    /// The HTTP/3 SETTINGS profile, when the connection was established with a
+    /// named one. SETTINGS are connection-level: they shape the peer's view of
+    /// the connection and cannot be changed per request.
+    pub h3_settings_profile: Option<String>,
+    pub socket_shape: Option<String>,
+    /// The route a connection took (for example a proxy authority), when it is
+    /// not a direct dial. Credentials are deliberately excluded.
+    pub route: Option<String>,
+}
+
+/// Current schema of the trace envelope. Bumped when a consumer must change
+/// how it interprets the envelope; event-kind discriminants remain stable.
+pub const TRACE_SCHEMA_VERSION: u32 = 1;
+
 /// One request attempt's complete recorded trace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RequestTrace {
     pub id: TraceId,
     pub attempt: AttemptRef,
     pub endpoint: EndpointRef,
     pub connection: ConnectionInfo,
+    /// The wire identity requested for the connection this attempt used.
+    pub identity: ConnectionIdentity,
+    /// Envelope schema version; see [`TRACE_SCHEMA_VERSION`].
+    pub schema_version: u32,
     pub fidelity: Fidelity,
     pub log: EventLog,
 }
@@ -153,6 +238,7 @@ mod tests {
         assert!(Fidelity::l2().segments);
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn trace_id_renders_as_text() {
         let id = TraceId::new("01924f4e-0000-7000-8000-000000000000");

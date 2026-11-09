@@ -1,13 +1,12 @@
 //! High-level HTTP/2 client with Akamai fingerprint impersonation (ADR-0006).
 //!
 //! Orchestrates the full lifecycle over any [`Connector`] (TCP, TLS, or Proxy),
-//! records phase boundaries in [`Recorder`], and executes requests matching
+//! records phase boundaries in [`TraceCollector`], and executes requests matching
 //! a declared [`H2Fingerprint`].
 
 use http::Method;
 use netune_http2::{H2ClientConnection, H2Fingerprint, H2Response};
-use netune_trace::{EventKind, Recorder};
-use std::sync::{Arc, Mutex};
+use netune_trace::{EventKind, TraceCollector};
 
 use crate::connect::{Connector, Target};
 use crate::error::NetError;
@@ -40,16 +39,13 @@ impl<C: Connector> H2Client<C> {
         path: &str,
         extra_headers: &[(String, String)],
         body: Option<&[u8]>,
-        recorder: &Arc<Mutex<Recorder>>,
+        recorder: &TraceCollector,
     ) -> Result<H2Response, NetError> {
         let established = self.connector.connect(target, recorder).await?;
 
-        {
-            let mut rec = recorder.lock().unwrap_or_else(|e| e.into_inner());
-            rec.mark(EventKind::RequestWriteStart, 0, 0);
-        }
+        recorder.mark(EventKind::RequestWriteStart, 0, 0);
 
-        let scheme = if target.tls_server_name.is_some() {
+        let scheme = if target.tls_server_name().is_some() {
             "https"
         } else {
             "http"
@@ -72,12 +68,9 @@ impl<C: Connector> H2Client<C> {
             .await
             .map_err(|e| NetError::Protocol(format!("HTTP/2 request: {e}")))?;
 
-        {
-            let mut rec = recorder.lock().unwrap_or_else(|e| e.into_inner());
-            rec.mark(EventKind::RequestWriteEnd, response.body.len() as u32, 0);
-            rec.mark(EventKind::HeadComplete, response.status as u32, 0);
-            rec.mark(EventKind::BodyEnd, response.body.len() as u32, 0);
-        }
+        recorder.mark(EventKind::RequestWriteEnd, response.body.len() as u32, 0);
+        recorder.mark(EventKind::HeadComplete, response.status as u32, 0);
+        recorder.mark(EventKind::BodyEnd, response.body.len() as u32, 0);
 
         Ok(response)
     }
@@ -196,7 +189,7 @@ mod tests {
         let target = Target::plain(format!("127.0.0.1:{port}"));
         let connector = TcpConnector::new();
         let client = H2Client::new(connector, H2Fingerprint::chrome());
-        let recorder = Arc::new(Mutex::new(Recorder::start(64)));
+        let recorder = TraceCollector::start(64);
 
         let response = client
             .send(&target, Method::GET, "/v1/test", &[], None, &recorder)

@@ -12,12 +12,13 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::Method;
-use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector};
+use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TraceConfig};
 use netune_http2::frame::{
     FLAG_ACK, FRAME_HEADER_LEN, FRAME_HEADERS, FRAME_PING, FRAME_SETTINGS, FRAME_WINDOW_UPDATE,
     Frame, FrameHeader, SETTING_MAX_CONCURRENT_STREAMS,
 };
 use netune_http2::hpack::{HpackDecoder, HpackEncoder};
+use netune_trace::Fidelity;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -201,6 +202,45 @@ async fn unified_client_transparently_executes_http2_request() {
     server.await.expect("server completed");
 }
 
+#[tokio::test]
+async fn an_http2_trace_is_connection_level_l0() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        handshake(&mut socket).await;
+
+        let mut decoder = HpackDecoder::new();
+        let (stream_id, _) = read_request(&mut socket, &mut decoder).await;
+        let mut encoder = HpackEncoder::new();
+        write_response_head(&mut socket, &mut encoder, stream_id, "200", false).await;
+        write_body(&mut socket, stream_id, b"l0").await;
+        drain_credit(&mut socket).await;
+    });
+
+    let client = client();
+    let mut response = client
+        .request_traced(
+            &target(port),
+            RequestHead::new(Method::GET, "/l0"),
+            None,
+            TraceConfig::default(),
+        )
+        .await
+        .expect("traced h2 request");
+    let _ = response.body.read_to_end().await.expect("body");
+
+    let trace = response.body.trace().expect("H2 trace");
+    assert_eq!(
+        trace.fidelity,
+        Fidelity::l0(),
+        "H2 is connection-level; it must not claim a per-exchange syscall timeline"
+    );
+
+    server.await.expect("server completed");
+}
+
 /// The defining property of streaming: `send` returns when the response HEADERS
 /// arrive, not when the body is complete. The server withholds the body until
 /// the test says so, so a client that buffered the response would time out.
@@ -271,7 +311,7 @@ async fn a_finished_http2_body_returns_the_connection_to_the_pool() {
     });
 
     let client = client();
-    let key = format!("127.0.0.1:{port}");
+    let key = client.pool_key(&target(port)).expect("plan");
 
     let mut first = client
         .request(&target(port), RequestHead::new(Method::GET, "/one"), None)

@@ -80,7 +80,14 @@ ALLOWED_EDGES: dict[str, set[str]] = {
         "netune-io",
     },
     # ingress orchestrator: the peer of `netune`, never its dependency.
-    "netune-server": {"netune-http1", "netune-http2", "netune-io", "netune-trace"},
+    "netune-server": {
+        "netune-http1",
+        "netune-http2",
+        "netune-http3",
+        "netune-io",
+        "netune-quic",
+        "netune-trace",
+    },
 }
 
 ORCHESTRATORS = {"netune", "netune-server"}

@@ -42,21 +42,42 @@ impl PseudoHeaderOrder {
     }
 }
 
-/// A comprehensive HTTP/2 client fingerprint profile.
+/// The connection-fixed half of an HTTP/2 identity.
+///
+/// This is what a peer observes during the preface and SETTINGS exchange, and
+/// therefore what can make two HTTP/2 connections non-interchangeable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct H2Fingerprint {
-    /// Name of the profile (e.g. "chrome-130", "safari-18", "firefox-132").
+pub struct H2ConnectionProfile {
+    /// Name of the connection profile (e.g. "chrome-130", "go-nethttp").
     pub name: &'static str,
     /// In-order initial SETTINGS key-value parameters.
     pub settings: Vec<(u16, u32)>,
     /// Connection-level initial WINDOW_UPDATE size increment.
     pub initial_connection_window_update: Option<u32>,
-    /// Ordering of HTTP/2 pseudo-headers.
-    pub pseudo_headers_order: PseudoHeaderOrder,
-    /// Header Table Size update in HPACK dynamic table.
+    /// Header Table Size advertised to the peer's HPACK encoder.
     pub header_table_size: u32,
     /// Whether to send connection preface with priority frames.
     pub send_priority_frames: bool,
+}
+
+/// The request-fixed half of an HTTP/2 identity.
+///
+/// Pseudo-header order changes one HEADERS block, not the connection. It must
+/// not key a pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct H2RequestProfile {
+    pub name: &'static str,
+    pub pseudo_headers_order: PseudoHeaderOrder,
+}
+
+/// A connection profile paired with the request profile it normally uses.
+///
+/// The pair is a convenience for presets. The connection half keys the pool;
+/// the request half can be applied per exchange without opening a new socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct H2Fingerprint {
+    pub connection: H2ConnectionProfile,
+    pub request: H2RequestProfile,
 }
 
 impl H2Fingerprint {
@@ -65,18 +86,23 @@ impl H2Fingerprint {
     /// Akamai H2 Hash: `1:65536,2:0,3:1000,4:6291456,6:262144|15663105|0|m,a,s,p`
     pub fn chrome() -> Self {
         Self {
-            name: "chrome-130",
-            settings: vec![
-                (SETTING_HEADER_TABLE_SIZE, 65536),
-                (SETTING_ENABLE_PUSH, 0),
-                (SETTING_MAX_CONCURRENT_STREAMS, 1000),
-                (SETTING_INITIAL_WINDOW_SIZE, 6291456),
-                (SETTING_MAX_HEADER_LIST_SIZE, 262144),
-            ],
-            initial_connection_window_update: Some(15663105),
-            pseudo_headers_order: PseudoHeaderOrder::MethodAuthoritySchemePath,
-            header_table_size: 65536,
-            send_priority_frames: false,
+            connection: H2ConnectionProfile {
+                name: "chrome-130",
+                settings: vec![
+                    (SETTING_HEADER_TABLE_SIZE, 65536),
+                    (SETTING_ENABLE_PUSH, 0),
+                    (SETTING_MAX_CONCURRENT_STREAMS, 1000),
+                    (SETTING_INITIAL_WINDOW_SIZE, 6291456),
+                    (SETTING_MAX_HEADER_LIST_SIZE, 262144),
+                ],
+                initial_connection_window_update: Some(15663105),
+                header_table_size: 65536,
+                send_priority_frames: false,
+            },
+            request: H2RequestProfile {
+                name: "chrome-130",
+                pseudo_headers_order: PseudoHeaderOrder::MethodAuthoritySchemePath,
+            },
         }
     }
 
@@ -85,16 +111,21 @@ impl H2Fingerprint {
     /// Akamai H2 Hash: `2:0,4:2097152,3:100|10485760|0|m,s,a,p`
     pub fn safari() -> Self {
         Self {
-            name: "safari-18",
-            settings: vec![
-                (SETTING_ENABLE_PUSH, 0),
-                (SETTING_INITIAL_WINDOW_SIZE, 2097152),
-                (SETTING_MAX_CONCURRENT_STREAMS, 100),
-            ],
-            initial_connection_window_update: Some(10485760),
-            pseudo_headers_order: PseudoHeaderOrder::MethodSchemeAuthorityPath,
-            header_table_size: 4096,
-            send_priority_frames: false,
+            connection: H2ConnectionProfile {
+                name: "safari-18",
+                settings: vec![
+                    (SETTING_ENABLE_PUSH, 0),
+                    (SETTING_INITIAL_WINDOW_SIZE, 2097152),
+                    (SETTING_MAX_CONCURRENT_STREAMS, 100),
+                ],
+                initial_connection_window_update: Some(10485760),
+                header_table_size: 4096,
+                send_priority_frames: false,
+            },
+            request: H2RequestProfile {
+                name: "safari-18",
+                pseudo_headers_order: PseudoHeaderOrder::MethodSchemeAuthorityPath,
+            },
         }
     }
 
@@ -103,16 +134,21 @@ impl H2Fingerprint {
     /// Akamai H2 Hash: `1:65536,4:131072,5:16384|12517377|0|m,p,a,s`
     pub fn firefox() -> Self {
         Self {
-            name: "firefox-132",
-            settings: vec![
-                (SETTING_HEADER_TABLE_SIZE, 65536),
-                (SETTING_INITIAL_WINDOW_SIZE, 131072),
-                (SETTING_MAX_FRAME_SIZE, 16384),
-            ],
-            initial_connection_window_update: Some(12517377),
-            pseudo_headers_order: PseudoHeaderOrder::MethodPathAuthorityScheme,
-            header_table_size: 65536,
-            send_priority_frames: true,
+            connection: H2ConnectionProfile {
+                name: "firefox-132",
+                settings: vec![
+                    (SETTING_HEADER_TABLE_SIZE, 65536),
+                    (SETTING_INITIAL_WINDOW_SIZE, 131072),
+                    (SETTING_MAX_FRAME_SIZE, 16384),
+                ],
+                initial_connection_window_update: Some(12517377),
+                header_table_size: 65536,
+                send_priority_frames: true,
+            },
+            request: H2RequestProfile {
+                name: "firefox-132",
+                pseudo_headers_order: PseudoHeaderOrder::MethodPathAuthorityScheme,
+            },
         }
     }
 
@@ -139,17 +175,22 @@ impl H2Fingerprint {
     /// Akamai H2 Hash: `2:0,4:4194304,5:1048576,6:10485760|1073741824|0|a,m,p,s`
     pub fn go() -> Self {
         Self {
-            name: "go-nethttp",
-            settings: vec![
-                (SETTING_ENABLE_PUSH, 0),
-                (SETTING_INITIAL_WINDOW_SIZE, 4_194_304),
-                (SETTING_MAX_FRAME_SIZE, 1_048_576),
-                (SETTING_MAX_HEADER_LIST_SIZE, 10_485_760),
-            ],
-            initial_connection_window_update: Some(1_073_741_824),
-            pseudo_headers_order: PseudoHeaderOrder::AuthorityMethodPathScheme,
-            header_table_size: 4096,
-            send_priority_frames: false,
+            connection: H2ConnectionProfile {
+                name: "go-nethttp",
+                settings: vec![
+                    (SETTING_ENABLE_PUSH, 0),
+                    (SETTING_INITIAL_WINDOW_SIZE, 4_194_304),
+                    (SETTING_MAX_FRAME_SIZE, 1_048_576),
+                    (SETTING_MAX_HEADER_LIST_SIZE, 10_485_760),
+                ],
+                initial_connection_window_update: Some(1_073_741_824),
+                header_table_size: 4096,
+                send_priority_frames: false,
+            },
+            request: H2RequestProfile {
+                name: "go-nethttp",
+                pseudo_headers_order: PseudoHeaderOrder::AuthorityMethodPathScheme,
+            },
         }
     }
 
@@ -164,7 +205,7 @@ impl H2Fingerprint {
     ) -> Vec<(&'a str, &'a str)> {
         let mut ordered = Vec::with_capacity(4 + extra_headers.len());
 
-        for name in self.pseudo_headers_order.names() {
+        for name in self.request.pseudo_headers_order.names() {
             match *name {
                 ":method" => ordered.push((":method", method)),
                 ":authority" => ordered.push((":authority", authority)),
@@ -217,13 +258,19 @@ mod tests {
     #[test]
     fn go_identity_matches_the_captured_antigravity_cli_framing() {
         let fp = H2Fingerprint::go();
-        assert_eq!(fp.name, "go-nethttp");
+        assert_eq!(fp.connection.name, "go-nethttp");
         assert_eq!(
-            fp.settings,
+            fp.connection.settings,
             vec![(2, 0), (4, 4_194_304), (5, 1_048_576), (6, 10_485_760)]
         );
-        assert_eq!(fp.initial_connection_window_update, Some(1_073_741_824));
-        assert!(!fp.send_priority_frames, "Go never sends PRIORITY frames");
+        assert_eq!(
+            fp.connection.initial_connection_window_update,
+            Some(1_073_741_824)
+        );
+        assert!(
+            !fp.connection.send_priority_frames,
+            "Go never sends PRIORITY frames"
+        );
 
         let extra = [("authorization".to_string(), "Bearer x".to_string())];
         let headers = fp.order_request_headers(

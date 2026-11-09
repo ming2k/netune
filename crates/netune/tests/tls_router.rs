@@ -13,14 +13,14 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http::Method;
 use netune::{
     Client, ClientConfig, Pool, Preset, RequestHead, Target, TcpConnector, TlsRouterConnector,
 };
-use netune_trace::Recorder;
+use netune_trace::TraceCollector;
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -131,9 +131,9 @@ fn pinned_client(fixture: &Fixture) -> Client<TlsRouterConnector<TcpConnector>> 
 
 async fn get(client: &Client<TlsRouterConnector<TcpConnector>>, target: &Target) -> String {
     let head = RequestHead::new(Method::GET, "/");
-    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
+    let recorder = TraceCollector::start(1024);
     let mut response = client
-        .send(target, recorder, head, None::<Bytes>)
+        .send_traced(target, recorder, head, None::<Bytes>)
         .await
         .expect("send");
     body_of(&mut response).await
@@ -176,9 +176,9 @@ async fn the_profile_selection_fails_closed_when_h2_feature_is_disabled() {
         .clone()
         .with_tls_profile(Preset::CodexReqwest.name());
     let head = RequestHead::new(Method::GET, "/");
-    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
+    let recorder = TraceCollector::start(1024);
     let err = match client
-        .send(&codex_target, recorder, head, None::<Bytes>)
+        .send_traced(&codex_target, recorder, head, None::<Bytes>)
         .await
     {
         Err(e) => e,
@@ -199,8 +199,11 @@ async fn an_unknown_profile_name_fails_loudly() {
         .with_tls_profile("no-such-fingerprint");
 
     let head = RequestHead::new(Method::GET, "/");
-    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
-    let error = match client.send(&target, recorder, head, None::<Bytes>).await {
+    let recorder = TraceCollector::start(1024);
+    let error = match client
+        .send_traced(&target, recorder, head, None::<Bytes>)
+        .await
+    {
         Err(error) => error,
         Ok(_) => panic!("unknown profile must fail, not downgrade"),
     };
@@ -262,16 +265,16 @@ async fn the_pool_never_reuses_across_identities() {
     // Each identity's slice holds exactly its own connection: the codex
     // request cannot consume the default slice and vice versa.
     assert_eq!(
-        client.pool().idle_count(&fixture.target.authority),
+        client
+            .pool()
+            .idle_count(&client.pool_key(&fixture.target).expect("plan")),
         1,
         "default identity slice"
     );
     assert_eq!(
-        client.pool().idle_count(&format!(
-            "{}#{}",
-            fixture.target.authority,
-            Preset::CodexReqwest.name()
-        )),
+        client
+            .pool()
+            .idle_count(&client.pool_key(&codex_target).expect("plan")),
         1,
         "codex identity slice"
     );

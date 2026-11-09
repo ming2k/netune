@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use http::{Method, StatusCode};
 use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector};
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -113,8 +113,8 @@ async fn listener() -> (TcpListener, String) {
     (listener, address)
 }
 
-fn recorder() -> Arc<Mutex<Recorder>> {
-    Arc::new(Mutex::new(Recorder::start(1024)))
+fn recorder() -> TraceCollector {
+    TraceCollector::start(1024)
 }
 
 async fn send(
@@ -124,16 +124,16 @@ async fn send(
     method: Method,
     headers: &[(&str, &str)],
     body: Option<&[u8]>,
-) -> (netune::Response, Arc<Mutex<Recorder>>) {
+) -> (netune::Response, TraceCollector) {
     let recorder = recorder();
     let mut head = RequestHead::new(method, path);
     for (name, value) in headers {
         head = head.with_header(name, *value);
     }
     let response = client
-        .send(
+        .send_traced(
             &Target::plain(address),
-            Arc::clone(&recorder),
+            recorder.clone(),
             head,
             body.map(Bytes::copy_from_slice),
         )
@@ -150,14 +150,8 @@ fn client() -> Client<TcpConnector> {
     )
 }
 
-fn events(recorder: &Arc<Mutex<Recorder>>) -> Vec<EventKind> {
-    recorder
-        .lock()
-        .expect("recorder")
-        .log()
-        .iter()
-        .map(|event| event.kind)
-        .collect()
+fn events(recorder: &TraceCollector) -> Vec<EventKind> {
+    recorder.log().iter().map(|event| event.kind).collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -222,7 +216,7 @@ async fn an_unknown_encoding_is_refused() {
     // The failure surfaces before the caller ever sees a response: an
     // undecodable body is not something to hand downstream.
     let error = client()
-        .send(
+        .send_traced(
             &Target::plain(&address),
             recorder(),
             RequestHead::new(Method::GET, "/models"),
@@ -391,7 +385,7 @@ async fn a_redirect_loop_is_refused() {
 
     let recorder = recorder();
     let error = client()
-        .send(
+        .send_traced(
             &Target::plain(&address),
             recorder,
             RequestHead::new(Method::GET, "/loop"),

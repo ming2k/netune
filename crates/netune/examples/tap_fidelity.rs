@@ -13,11 +13,10 @@
 // than plumb an error type nobody reads.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector};
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -108,16 +107,16 @@ async fn main() {
 
     let server = tokio::spawn(serve(listener, options.frames, options.gap));
 
-    let recorder = Arc::new(Mutex::new(Recorder::start(4096)));
+    let recorder = TraceCollector::start(4096);
     let client = Client::new(
         TcpConnector::new(),
         Pool::default(),
         ClientConfig::default(),
     );
     let mut response = client
-        .send(
+        .send_traced(
             &Target::plain(format!("127.0.0.1:{port}")),
-            Arc::clone(&recorder),
+            recorder.clone(),
             RequestHead::new(http::Method::GET, "/stream"),
             None,
         )
@@ -125,15 +124,12 @@ async fn main() {
         .expect("send");
     while response.body.next_chunk().await.expect("chunk").is_some() {}
 
-    let lines: Vec<String> = {
-        let recorder = recorder.lock().expect("recorder");
-        recorder
-            .log()
-            .iter()
-            .filter(|event| event.kind == EventKind::Read)
-            .map(|event| format!("read {} {}", event.at_ns, event.a))
-            .collect()
-    };
+    let lines: Vec<String> = recorder
+        .log()
+        .iter()
+        .filter(|event| event.kind == EventKind::Read)
+        .map(|event| format!("read {} {}", event.at_ns, event.a))
+        .collect();
     for line in lines {
         println!("{line}");
     }

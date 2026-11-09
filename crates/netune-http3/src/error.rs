@@ -17,7 +17,15 @@ pub enum H3Error {
     #[error("http error: {0}")]
     Http(#[from] http::Error),
 
-    /// Request execution timed out.
-    #[error("http3 request timed out")]
-    Timeout,
+    /// A profile name was not registered.
+    #[error("profile error: {0}")]
+    Profile(String),
+
+    /// One request phase exceeded its configured deadline.
+    #[error("http3 {0} timed out")]
+    Timeout(&'static str),
+
+    /// A buffered response exceeded the configured body ceiling.
+    #[error("http3 response body exceeded {limit} bytes")]
+    BodyTooLarge { limit: usize },
 }

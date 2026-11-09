@@ -4,13 +4,14 @@
 //! makes `dns_us` / `tcp_us` / `tls_us` measurements rather than guesses — and
 //! what makes them *absent* (`ConnectionReused`) when the pool answered instead.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{ConnectionIdentity, EvasionPolicy, EventKind, TraceCollector};
 
 use crate::dns::{DnsResolver, SystemResolver};
 use crate::error::NetError;
+use crate::profile::ProfileId;
 use crate::socket::SocketConfig;
 
 /// Default upper bound on the DNS + TCP establishment phases.
@@ -32,22 +33,28 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite> AsyncReadWrite for T {}
 pub struct Target {
     /// `host:port`.
     pub authority: String,
-    /// Server name for TLS; `None` means plaintext.
-    pub tls_server_name: Option<String>,
-    /// Which TLS fingerprint identity to present on this target, by profile
-    /// name (`"codex-reqwest"`, …). `None` selects the connector's default —
-    /// for `TlsRouterConnector` that is [`crate::tls_profile::TlsProfile::
-    /// netune_default`], and a plain [`crate::tls::TlsConnector`] ignores the
-    /// name entirely (it has only one identity to offer).
-    ///
-    /// The pool keys on this: a connection handshook under one identity is
-    /// never handed to a request that asked for another, because the pooled
-    /// session's hello is already on the wire and cannot be changed.
-    pub tls_profile: Option<String>,
-    /// Enable early-flight TCP segmentation to defeat middlebox SNI inspection (ADR-0006).
-    pub sni_segmentation: bool,
+    /// Everything fixed at connection establishment that changes what the peer
+    /// sees or which pooled socket may serve this target. The pool keys on the
+    /// whole value ([`crate::pool::PoolKey`]).
+    pub identity: ConnectionIdentity,
     /// Mandate HTTP/2 framing (bypasses HTTP/1.1 negotiation).
+    ///
+    /// This is a request protocol decision, not a connection identity: a pooled
+    /// HTTP/2 connection is selected by protocol, and a pooled HTTP/1.1 socket
+    /// is never handed to a request that mandates HTTP/2.
     pub force_h2: bool,
+    /// The HTTP/1 request-header wire profile, when this request speaks H1.
+    ///
+    /// Per request and deliberately outside `ConnectionIdentity`: header order
+    /// and casing do not make two sockets interchangeable, so they must not key
+    /// the pool. `None` uses the client's default profile.
+    pub h1_profile: Option<ProfileId>,
+    /// The HTTP/2 request-header profile, when this request speaks H2.
+    ///
+    /// Per request and outside `ConnectionIdentity`: pseudo-header order changes
+    /// one HEADERS block, not the connection. `None` uses the selected H2
+    /// fingerprint's request half.
+    pub h2_request_profile: Option<ProfileId>,
 }
 
 impl Target {
@@ -55,10 +62,10 @@ impl Target {
     pub fn plain(authority: impl Into<String>) -> Self {
         Self {
             authority: authority.into(),
-            tls_server_name: None,
-            tls_profile: None,
-            sni_segmentation: false,
+            identity: ConnectionIdentity::default(),
             force_h2: false,
+            h1_profile: None,
+            h2_request_profile: None,
         }
     }
 
@@ -67,29 +74,75 @@ impl Target {
     pub fn tls(authority: impl Into<String>, server_name: impl Into<String>) -> Self {
         Self {
             authority: authority.into(),
-            tls_server_name: Some(server_name.into()),
-            tls_profile: None,
-            sni_segmentation: false,
+            identity: ConnectionIdentity {
+                tls_server_name: Some(server_name.into()),
+                ..ConnectionIdentity::default()
+            },
             force_h2: false,
+            h1_profile: None,
+            h2_request_profile: None,
         }
+    }
+
+    /// The TLS profile name requested for this target, if any.
+    pub fn tls_profile(&self) -> Option<&str> {
+        self.identity.tls_profile.as_deref()
+    }
+
+    /// The server name verified against the certificate, if this is TLS.
+    pub fn tls_server_name(&self) -> Option<&str> {
+        self.identity.tls_server_name.as_deref()
+    }
+
+    /// The wire-shaping policy requested for this target.
+    pub fn evasion(&self) -> EvasionPolicy {
+        self.identity.evasion
     }
 
     /// This target with an explicit TLS profile selection. A plaintext target
     /// ignores the name (there is no hello to shape).
     pub fn with_tls_profile(mut self, profile: impl Into<String>) -> Self {
-        self.tls_profile = Some(profile.into());
+        self.identity.tls_profile = Some(profile.into());
         self
     }
 
-    /// Enable SNI micro-segmentation to evade DPI.
-    pub fn with_sni_segmentation(mut self, enabled: bool) -> Self {
-        self.sni_segmentation = enabled;
+    /// This target with a named wire-shaping policy. A plaintext target carries
+    /// it in the identity but cannot apply it to a TLS hello.
+    pub fn with_evasion(mut self, evasion: EvasionPolicy) -> Self {
+        self.identity.evasion = evasion;
         self
     }
 
     /// Mandate HTTP/2 protocol wire framing.
     pub fn with_force_h2(mut self, enabled: bool) -> Self {
         self.force_h2 = enabled;
+        self
+    }
+
+    /// Select an HTTP/1 request-header wire profile by name.
+    ///
+    /// The name is resolved by the client's `H1Registry` before a connection is
+    /// opened; an unknown name is a loud failure, never a default fallback.
+    pub fn with_h1_profile(mut self, profile: impl Into<ProfileId>) -> Self {
+        self.h1_profile = Some(profile.into());
+        self
+    }
+
+    /// Select an HTTP/2 connection profile by name.
+    ///
+    /// The name is resolved by the client's `H2Registry` while the connection
+    /// plan is built; an unknown name fails before a socket is opened.
+    pub fn with_h2_profile(mut self, profile: impl Into<String>) -> Self {
+        self.identity.h2_profile = Some(profile.into());
+        self
+    }
+
+    /// Select an HTTP/2 request-header profile by name.
+    ///
+    /// This half changes pseudo-header order for this request; it does not
+    /// change connection identity or the pool key.
+    pub fn with_h2_request_profile(mut self, profile: impl Into<ProfileId>) -> Self {
+        self.h2_request_profile = Some(profile.into());
         self
     }
 
@@ -154,8 +207,27 @@ pub trait Connector: Send + Sync {
     fn connect(
         &self,
         target: &Target,
-        recorder: &Arc<Mutex<Recorder>>,
+        recorder: &TraceCollector,
     ) -> impl std::future::Future<Output = Result<Established, NetError>> + Send;
+
+    /// A stable description of the socket shape this connector applies.
+    ///
+    /// Two `Client`s can share a `Pool` while using different `SocketConfig`
+    /// values; a pooled connection established with one shape must not serve the
+    /// other. The orchestrator folds this fragment into `ConnectionIdentity`.
+    /// Wrappers that delegate the dial delegate this too.
+    fn socket_shape(&self) -> Option<String> {
+        None
+    }
+
+    /// A stable description of the route a dial takes, when it is not direct.
+    ///
+    /// A proxy authority is part of connection identity: the same target reached
+    /// through two proxies is not the same socket identity. Credentials are not
+    /// included.
+    fn route_shape(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Egress confinement policy for connection establishment (ADR-0002).
@@ -256,17 +328,18 @@ pub(crate) fn split_target_authority(authority: &str) -> Result<(&str, u16), Net
 }
 
 impl<R: DnsResolver> Connector for TcpConnector<R> {
+    fn socket_shape(&self) -> Option<String> {
+        Some(self.socket_config.canonical())
+    }
+
     async fn connect(
         &self,
         target: &Target,
-        recorder: &Arc<Mutex<Recorder>>,
+        recorder: &TraceCollector,
     ) -> Result<Established, NetError> {
         let (host, port) = split_target_authority(&target.authority)?;
 
-        {
-            let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-            recorder.mark(EventKind::DnsStart, 0, 0);
-        }
+        recorder.mark(EventKind::DnsStart, 0, 0);
         let resolve = self.resolver.resolve(host, port);
         let addresses = match self.connect_timeout {
             Some(timeout) => tokio::time::timeout(timeout, resolve).await.map_err(|_| {
@@ -277,10 +350,7 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
             })?,
             None => resolve.await,
         }?;
-        {
-            let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-            recorder.mark(EventKind::DnsEnd, addresses.len() as u32, 0);
-        }
+        recorder.mark(EventKind::DnsEnd, addresses.len() as u32, 0);
         let Some(address) = addresses.first().copied() else {
             return Err(NetError::Resolve(format!(
                 "no addresses for {}",
@@ -300,10 +370,7 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
             }
         }
 
-        {
-            let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-            recorder.mark(EventKind::TcpStart, 0, 0);
-        }
+        recorder.mark(EventKind::TcpStart, 0, 0);
         let dial = crate::socket::connect(address, &self.socket_config);
         let stream = match self.connect_timeout {
             Some(timeout) => tokio::time::timeout(timeout, dial).await.map_err(|_| {
@@ -319,19 +386,29 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
             .apply(&stream)
             .map_err(|error| NetError::Connect(error.to_string()))?;
         let local_port = stream.local_addr().ok().map(|address| address.port());
-        {
-            let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-            recorder.mark(EventKind::TcpEnd, 0, 0);
-        }
+        recorder.mark(EventKind::TcpEnd, 0, 0);
 
         // A duplicated descriptor for the same socket: the HTTP path owns the
         // stream, the sampler owns this one, and neither blocks the other.
         let socket = crate::tcp_info::duplicate(&stream);
 
-        let stream_transport: Box<dyn Transport> = if target.sni_segmentation {
-            Box::new(crate::evasion::SegmentingIo::for_sni(stream))
-        } else {
-            Box::new(stream)
+        let stream_transport: Box<dyn Transport> = match target.evasion() {
+            EvasionPolicy::None => Box::new(stream),
+            EvasionPolicy::SniSplit {
+                chunk_size,
+                segment_limit,
+                gap_us,
+            } => {
+                let mut segmented = crate::evasion::SegmentingIo::new(
+                    stream,
+                    usize::from(chunk_size),
+                    usize::from(segment_limit),
+                );
+                if gap_us > 0 {
+                    segmented = segmented.with_gap(Duration::from_micros(u64::from(gap_us)));
+                }
+                Box::new(segmented)
+            }
         };
 
         Ok(Established {
@@ -365,7 +442,7 @@ mod tests {
     async fn strict_public_confinement_rejects_loopback() {
         let connector = TcpConnector::strict_public();
         let target = Target::plain("127.0.0.1:80");
-        let recorder = Arc::new(Mutex::new(Recorder::start(64)));
+        let recorder = TraceCollector::start(64);
         let result = connector.connect(&target, &recorder).await;
         assert!(matches!(result, Err(NetError::Security(_))));
     }
@@ -383,7 +460,7 @@ mod tests {
         let connector = TcpConnector::with_resolver(resolver).with_socket_config(socket_config);
 
         let target = Target::plain(format!("custom.origin:{port}"));
-        let recorder = Arc::new(Mutex::new(Recorder::start(64)));
+        let recorder = TraceCollector::start(64);
 
         let accept_fut = listener.accept();
         let connect_fut = connector.connect(&target, &recorder);
@@ -423,7 +500,7 @@ mod tests {
         let connector = TcpConnector::with_resolver(Arc::new(NeverResolver))
             .with_connect_timeout(Some(Duration::from_millis(200)));
         let target = Target::plain("slow.origin:443");
-        let recorder = Arc::new(Mutex::new(Recorder::start(64)));
+        let recorder = TraceCollector::start(64);
 
         let started = tokio::time::Instant::now();
         let error = match connector.connect(&target, &recorder).await {

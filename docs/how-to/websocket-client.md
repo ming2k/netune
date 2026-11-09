@@ -76,13 +76,12 @@ echo exactly one of them, or none:
 
 ```rust,no_run
 use netune::{Client, ClientConfig, Pool, Target, TcpConnector, WsHandshake};
-use netune_trace::Recorder;
-use std::sync::{Arc, Mutex};
+use netune_trace::TraceCollector;
 
 # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 let client = Client::new(TcpConnector::new(), Pool::default(), ClientConfig::default());
 let target = Target::plain("ws.example.internal:8080");
-let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
+let recorder = TraceCollector::start(1024);
 
 let handshake = WsHandshake::default()
     .with_subprotocol("mcp.v1")
@@ -101,29 +100,24 @@ An echo of an unoffered subprotocol is a terminal handshake error — loud, by
 
 ## Trace What Happened
 
-`connect_ws` allocates a throwaway recorder. Pass an explicit one when you want
-to keep the attempt's trace:
+`connect_ws` is the untraced path. Pass an explicit collector to
+`connect_ws_traced` when you want to keep the attempt's trace:
 
 ```rust,no_run
 use netune::{Client, ClientConfig, Pool, Target, TcpConnector, WsHandshake};
-use netune_trace::Recorder;
-use std::sync::{Arc, Mutex};
+use netune_trace::TraceCollector;
 
 # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 let client = Client::new(TcpConnector::new(), Pool::default(), ClientConfig::default());
 let target = Target::plain("ws.example.internal:8080");
 
-let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
+let recorder = TraceCollector::start(1024);
 let mut ws = client
-    .connect_ws_traced(&target, "/v1/stream", Arc::clone(&recorder), WsHandshake::default())
+    .connect_ws_traced(&target, "/v1/stream", recorder.clone(), WsHandshake::default())
     .await?;
 
-// ... session, then read the log from the recorder you passed ...
-let log = recorder
-    .lock()
-    .unwrap_or_else(|error| error.into_inner())
-    .log()
-    .clone();
+// ... session, then read the log from the collector you passed ...
+let log = recorder.log();
 # let _ = (&mut ws, log);
 # Ok(())
 # }

@@ -6,15 +6,14 @@
 //! skipped).
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use http::Method;
-use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector};
+use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TraceConfig};
 use netune_trace::{
-    AttemptRef, ConnectionInfo, EndpointRef, EventKind, Fidelity, FrameClass, Reason, Recorder,
-    RequestTrace, TraceId, Validity, derive,
+    AttemptRef, ConnectionInfo, EndpointRef, EventKind, Fidelity, FrameClass, Reason, RequestTrace,
+    TRACE_SCHEMA_VERSION, TraceCollector, TraceId, Validity, derive,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -87,6 +86,8 @@ fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
             authority: authority.to_string(),
         },
         connection: ConnectionInfo::default(),
+        identity: netune_trace::ConnectionIdentity::default(),
+        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: Fidelity::l1(),
         log,
     }
@@ -97,14 +98,14 @@ fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
 async fn request_once(
     client: &Client<TcpConnector>,
     target: &Target,
-    recorder: Arc<Mutex<Recorder>>,
+    recorder: TraceCollector,
 ) -> usize {
     let head = RequestHead::new(Method::POST, "/v1/chat/completions")
         .with_header("content-type", "application/json");
     let mut response = client
-        .send(
+        .send_traced(
             target,
-            Arc::clone(&recorder),
+            recorder.clone(),
             head,
             Some(Bytes::from_static(b"{\"stream\":true}")),
         )
@@ -116,11 +117,9 @@ async fn request_once(
     while let Some(chunk) = response.body.next_chunk().await.expect("chunk") {
         if chunk.starts_with(b"data: ") {
             frames += 1;
-            let mut recorder = recorder.lock().expect("recorder");
             recorder.frame(FrameClass::Text, 1);
         }
     }
-    let mut recorder = recorder.lock().expect("recorder");
     recorder.mark(EventKind::Validated, 0, 0);
     frames
 }
@@ -185,16 +184,13 @@ async fn a_pooled_socket_the_peer_dropped_is_replaced_transparently() {
     let target = Target::plain(address.to_string());
 
     // First request populates the pool with a connection the peer then kills.
-    let first = request_once(
-        &client,
-        &target,
-        Arc::new(Mutex::new(Recorder::start(4096))),
-    )
-    .await;
+    let first = request_once(&client, &target, TraceCollector::start(4096)).await;
     assert_eq!(first, 1, "the first response is served in full");
     server.await.expect("join");
     assert_eq!(
-        client.pool().idle_count(&address.to_string()),
+        client
+            .pool()
+            .idle_count(&client.pool_key(&target).expect("plan")),
         1,
         "the answered connection is pooled"
     );
@@ -204,15 +200,15 @@ async fn a_pooled_socket_the_peer_dropped_is_replaced_transparently() {
     // caller. Rebind the same port so the reconnect has somewhere to land.
     let listener = TcpListener::bind(address).await.expect("rebind");
     let server = tokio::spawn(serve(listener, 1));
-    let recorder = Arc::new(Mutex::new(Recorder::start(4096)));
-    let frames = request_once(&client, &target, Arc::clone(&recorder)).await;
+    let recorder = TraceCollector::start(4096);
+    let frames = request_once(&client, &target, recorder.clone()).await;
     assert_eq!(
         frames, CHUNKS,
         "the request succeeds on a fresh connection after the stale socket is discarded"
     );
     server.await.expect("join");
 
-    let log = recorder.lock().expect("recorder").log().clone();
+    let log = recorder.log();
     assert_eq!(
         log.iter()
             .filter(|event| event.kind == EventKind::ConnectReused)
@@ -247,16 +243,13 @@ async fn a_streaming_attempt_produces_a_derivable_trace() {
     let address = listener.local_addr().expect("addr");
     let server = tokio::spawn(serve(listener, 1));
 
-    let recorder = Arc::new(Mutex::new(Recorder::start(4096)));
+    let recorder = TraceCollector::start(4096);
     let client = client();
     let target = Target::plain(address.to_string());
-    let frames = request_once(&client, &target, Arc::clone(&recorder)).await;
+    let frames = request_once(&client, &target, recorder.clone()).await;
     assert_eq!(frames, CHUNKS);
 
-    let trace = trace_of(
-        recorder.lock().expect("recorder").log().clone(),
-        &address.to_string(),
-    );
+    let trace = trace_of(recorder.log(), &address.to_string());
     let derived = derive(&trace);
 
     // Connect phases were measured, not guessed.
@@ -323,6 +316,66 @@ async fn a_streaming_attempt_produces_a_derivable_trace() {
     let _ = server.await;
 }
 
+#[tokio::test]
+async fn request_traced_carries_identity_and_honest_fidelity() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(serve(listener, 1));
+
+    let client = client();
+    let target = Target::plain(address.to_string());
+    let mut response = client
+        .request_traced(
+            &target,
+            RequestHead::new(Method::GET, "/v1/models"),
+            None,
+            TraceConfig::default(),
+        )
+        .await
+        .expect("traced request");
+    let _ = response.body.read_to_end().await.expect("body");
+
+    let trace = response.body.trace().expect("traced body yields a trace");
+    assert_eq!(
+        trace.identity,
+        client.pool_key(&target).expect("plan").identity
+    );
+    assert_eq!(trace.schema_version, TRACE_SCHEMA_VERSION);
+    assert_eq!(trace.fidelity, Fidelity::l1());
+
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn request_default_is_counted_but_not_traced() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(serve(listener, 1));
+
+    let client = client();
+    let target = Target::plain(address.to_string());
+    let mut response = client
+        .request(&target, RequestHead::new(Method::GET, "/v1/models"), None)
+        .await
+        .expect("default request");
+    let _ = response.body.read_to_end().await.expect("body");
+
+    assert!(
+        response.body.trace().is_none(),
+        "the default L0 observation must not fabricate an event-level trace"
+    );
+    let counters = response
+        .body
+        .counters()
+        .expect("the default observation yields L0 counters");
+    assert!(counters.reads > 0);
+    assert!(counters.writes > 0);
+    assert!(counters.read_bytes > 0);
+    assert!(counters.write_bytes > 0);
+
+    let _ = server.await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pooled_reuse_is_attributed_rather_than_charged_to_the_peer() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -332,21 +385,15 @@ async fn a_pooled_reuse_is_attributed_rather_than_charged_to_the_peer() {
     let client = client();
     let target = Target::plain(address.to_string());
 
-    let first = Arc::new(Mutex::new(Recorder::start(4096)));
-    request_once(&client, &target, Arc::clone(&first)).await;
-    let first_trace = trace_of(
-        first.lock().expect("recorder").log().clone(),
-        &address.to_string(),
-    );
+    let first = TraceCollector::start(4096);
+    request_once(&client, &target, first.clone()).await;
+    let first_trace = trace_of(first.log(), &address.to_string());
     let first_derived = derive(&first_trace);
     assert!(first_derived.dns_us.is_measured());
 
-    let second = Arc::new(Mutex::new(Recorder::start(4096)));
-    request_once(&client, &target, Arc::clone(&second)).await;
-    let second_trace = trace_of(
-        second.lock().expect("recorder").log().clone(),
-        &address.to_string(),
-    );
+    let second = TraceCollector::start(4096);
+    request_once(&client, &target, second.clone()).await;
+    let second_trace = trace_of(second.log(), &address.to_string());
     let second_derived = derive(&second_trace);
 
     assert!(
@@ -388,12 +435,9 @@ async fn prewarming_primes_pool_for_zero_handshake_first_request() {
     assert!(!second_warm, "subsequent prewarm on a warm pool is a no-op");
 
     // First actual user request immediately hits the warm pool!
-    let recorder = Arc::new(Mutex::new(Recorder::start(4096)));
-    request_once(&client, &target, Arc::clone(&recorder)).await;
-    let trace = trace_of(
-        recorder.lock().expect("recorder").log().clone(),
-        &address.to_string(),
-    );
+    let recorder = TraceCollector::start(4096);
+    request_once(&client, &target, recorder.clone()).await;
+    let trace = trace_of(recorder.log(), &address.to_string());
     let derived = derive(&trace);
 
     assert!(

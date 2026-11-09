@@ -13,7 +13,7 @@
 
 use base64::Engine as _;
 use netune_http1::{Http1Reader, Limits};
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::connect::{Connector, Established, Target, Transport};
@@ -73,6 +73,14 @@ impl Proxy {
             Self::Http { authority, .. } | Self::Socks5 { authority, .. } => authority,
         }
     }
+
+    /// Route identity: scheme and authority, never credentials.
+    pub(crate) fn route_identity(&self) -> String {
+        match self {
+            Self::Http { authority, .. } => format!("http:{authority}"),
+            Self::Socks5 { authority, .. } => format!("socks5:{authority}"),
+        }
+    }
 }
 
 /// A connector that reaches `target` through `proxy`.
@@ -88,10 +96,18 @@ impl<C: Connector> ProxyConnector<C> {
 }
 
 impl<C: Connector> Connector for ProxyConnector<C> {
+    fn socket_shape(&self) -> Option<String> {
+        self.inner.socket_shape()
+    }
+
+    fn route_shape(&self) -> Option<String> {
+        Some(self.proxy.route_identity())
+    }
+
     async fn connect(
         &self,
         target: &Target,
-        recorder: &std::sync::Arc<std::sync::Mutex<Recorder>>,
+        recorder: &TraceCollector,
     ) -> Result<Established, NetError> {
         // The socket goes to the proxy; the target is named inside the tunnel.
         let hop = Target::plain(self.proxy.authority().to_string());
@@ -106,10 +122,7 @@ impl<C: Connector> Connector for ProxyConnector<C> {
                 socks5_connect(&mut stream, &target.authority, credentials.as_ref()).await?;
             }
         }
-        {
-            let mut recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
-            recorder.mark(EventKind::ProxyTunnel, 0, 0);
-        }
+        recorder.mark(EventKind::ProxyTunnel, 0, 0);
 
         Ok(Established {
             stream,

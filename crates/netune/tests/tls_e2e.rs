@@ -6,14 +6,14 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http::Method;
 use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TlsConnector};
 use netune_trace::{
     Alpn, AttemptRef, ConnectionInfo, EndpointRef, EventKind, Fidelity, FrameClass, Reason,
-    Recorder, RequestTrace, TraceId, Validity,
+    RequestTrace, TraceCollector, TraceId, Validity,
 };
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -73,6 +73,8 @@ fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
             authority: authority.to_string(),
         },
         connection: ConnectionInfo::default(),
+        identity: netune_trace::ConnectionIdentity::default(),
+        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: Fidelity::l1(),
         log,
     }
@@ -81,14 +83,14 @@ fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
 async fn request_once<C: netune::Connector>(
     client: &Client<C>,
     target: &Target,
-    recorder: Arc<Mutex<Recorder>>,
+    recorder: TraceCollector,
 ) {
     let head = RequestHead::new(Method::POST, "/v1/chat/completions")
         .with_header("content-type", "application/json");
     let mut response = client
-        .send(
+        .send_traced(
             target,
-            Arc::clone(&recorder),
+            recorder.clone(),
             head,
             Some(Bytes::from_static(b"{\"stream\":true}")),
         )
@@ -97,16 +99,10 @@ async fn request_once<C: netune::Connector>(
     assert_eq!(response.head.status, http::StatusCode::OK);
     while let Some(chunk) = response.body.next_chunk().await.expect("chunk") {
         if chunk.starts_with(b"data: ") {
-            recorder
-                .lock()
-                .expect("recorder")
-                .frame(FrameClass::Text, 1);
+            recorder.frame(FrameClass::Text, 1);
         }
     }
-    recorder
-        .lock()
-        .expect("recorder")
-        .mark(EventKind::Validated, 0, 0);
+    recorder.mark(EventKind::Validated, 0, 0);
 }
 
 fn tls_client(config: Arc<rustls::ClientConfig>) -> Client<TlsConnector<TcpConnector>> {
@@ -144,13 +140,10 @@ async fn a_tls_attempt_measures_the_handshake_and_records_negotiation() {
 
     let client = tls_client(Arc::new(config));
     let target = Target::tls(address.to_string(), "localhost");
-    let recorder = Arc::new(Mutex::new(Recorder::start(4096)));
-    request_once(&client, &target, Arc::clone(&recorder)).await;
+    let recorder = TraceCollector::start(4096);
+    request_once(&client, &target, recorder.clone()).await;
 
-    let trace = trace_of(
-        recorder.lock().expect("recorder").log().clone(),
-        &address.to_string(),
-    );
+    let trace = trace_of(recorder.log(), &address.to_string());
     let derived = netune_trace::derive(&trace);
 
     assert!(derived.dns_us.is_measured());
@@ -198,20 +191,14 @@ async fn a_pooled_tls_reuse_has_no_handshake_to_charge() {
     let client = tls_client(Arc::new(config));
     let target = Target::tls(address.to_string(), "localhost");
 
-    let first = Arc::new(Mutex::new(Recorder::start(4096)));
-    request_once(&client, &target, Arc::clone(&first)).await;
-    let first_trace = trace_of(
-        first.lock().expect("recorder").log().clone(),
-        &address.to_string(),
-    );
+    let first = TraceCollector::start(4096);
+    request_once(&client, &target, first.clone()).await;
+    let first_trace = trace_of(first.log(), &address.to_string());
     assert!(netune_trace::derive(&first_trace).tls_us.is_measured());
 
-    let second = Arc::new(Mutex::new(Recorder::start(4096)));
-    request_once(&client, &target, Arc::clone(&second)).await;
-    let second_trace = trace_of(
-        second.lock().expect("recorder").log().clone(),
-        &address.to_string(),
-    );
+    let second = TraceCollector::start(4096);
+    request_once(&client, &target, second.clone()).await;
+    let second_trace = trace_of(second.log(), &address.to_string());
     let second_derived = netune_trace::derive(&second_trace);
 
     assert!(

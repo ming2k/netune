@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use netune_trace::{Alpn, EventKind, Recorder};
+use netune_trace::{Alpn, EventKind, TraceCollector};
 use rustls::pki_types::ServerName;
 use rustls_platform_verifier::BuilderVerifierExt;
 use tokio_rustls::TlsConnector as RustlsConnector;
@@ -71,17 +71,14 @@ async fn handshake(
     config: &Arc<rustls::ClientConfig>,
     established: Established,
     target: &Target,
-    recorder: &Arc<Mutex<Recorder>>,
+    recorder: &TraceCollector,
 ) -> Result<Established, NetError> {
-    let Some(server_name) = target.tls_server_name.clone() else {
+    let Some(server_name) = target.tls_server_name().map(str::to_owned) else {
         // A plaintext target passes straight through.
         return Ok(established);
     };
 
-    {
-        let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-        recorder.mark(EventKind::TlsStart, 0, 0);
-    }
+    recorder.mark(EventKind::TlsStart, 0, 0);
     let name = ServerName::try_from(server_name.clone())
         .map_err(|error| NetError::Connect(format!("invalid TLS server name: {error}")))?;
     let connector = RustlsConnector::from(Arc::clone(config));
@@ -102,11 +99,8 @@ async fn handshake(
         Some(rustls::ProtocolVersion::TLSv1_2) => 12u32,
         _ => 0u32,
     };
-    {
-        let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-        recorder.mark(EventKind::TlsEnd, 0, 0);
-        recorder.mark(EventKind::TlsInfo, u32::from(alpn.code()), version_code);
-    }
+    recorder.mark(EventKind::TlsEnd, 0, 0);
+    recorder.mark(EventKind::TlsInfo, u32::from(alpn.code()), version_code);
 
     Ok(Established {
         stream: Box::new(stream),
@@ -117,10 +111,18 @@ async fn handshake(
 }
 
 impl<C: Connector> Connector for TlsConnector<C> {
+    fn socket_shape(&self) -> Option<String> {
+        self.inner.socket_shape()
+    }
+
+    fn route_shape(&self) -> Option<String> {
+        self.inner.route_shape()
+    }
+
     async fn connect(
         &self,
         target: &Target,
-        recorder: &Arc<Mutex<Recorder>>,
+        recorder: &TraceCollector,
     ) -> Result<Established, NetError> {
         let established = self.inner.connect(target, recorder).await?;
         handshake(&self.config, established, target, recorder).await
@@ -208,18 +210,23 @@ fn unknown_profile_error(name: &str) -> NetError {
 }
 
 impl<C: Connector> Connector for TlsRouterConnector<C> {
+    fn socket_shape(&self) -> Option<String> {
+        self.inner.socket_shape()
+    }
+
+    fn route_shape(&self) -> Option<String> {
+        self.inner.route_shape()
+    }
+
     async fn connect(
         &self,
         target: &Target,
-        recorder: &Arc<Mutex<Recorder>>,
+        recorder: &TraceCollector,
     ) -> Result<Established, NetError> {
-        if target.tls_server_name.is_none() {
+        if target.tls_server_name().is_none() {
             return self.inner.connect(target, recorder).await;
         }
-        let name = target
-            .tls_profile
-            .as_deref()
-            .unwrap_or(Preset::NetuneDefault.name());
+        let name = target.tls_profile().unwrap_or(Preset::NetuneDefault.name());
         let config = self.config_for(name)?;
         let established = self.inner.connect(target, recorder).await?;
         handshake(&config, established, target, recorder).await

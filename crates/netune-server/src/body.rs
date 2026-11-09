@@ -29,11 +29,9 @@
 //! serve both protocols: HTTP/1.1 decodes chunks, HTTP/2 decodes `DATA` frames and emits
 //! `WINDOW_UPDATE`, and the handler sees the same `next_chunk` either way.
 
-use std::sync::{Arc, Mutex};
-
 use bytes::{Bytes, BytesMut};
 use netune_http1::HttpError;
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 
 /// The transport a handler's body reader is generic over.
 ///
@@ -72,9 +70,12 @@ pub(crate) type ChunkFuture<'a> = std::pin::Pin<
 /// body cost is a derivation rather than an estimate.
 pub struct RequestBody<'a> {
     source: &'a mut dyn BodySource,
-    recorder: Arc<Mutex<Recorder>>,
+    recorder: TraceCollector,
     /// Bytes read so far, for the trace and for the handler's own accounting.
     read: u64,
+    /// Trace stream id. HTTP/1.1 and HTTP/2 use 0; HTTP/3 gives each request
+    /// its own exchange id because stream 0 is a valid request stream.
+    stream: u32,
     /// Whether the body was fully consumed.
     finished: bool,
     /// Whether `RequestBodyStart` has been recorded (the first byte is the anchor).
@@ -91,11 +92,29 @@ impl std::fmt::Debug for RequestBody<'_> {
 }
 
 impl<'a> RequestBody<'a> {
-    pub(crate) fn new(source: &'a mut dyn BodySource, recorder: Arc<Mutex<Recorder>>) -> Self {
+    pub(crate) fn new(source: &'a mut dyn BodySource, recorder: TraceCollector) -> Self {
         Self {
             source,
             recorder,
             read: 0,
+            stream: 0,
+            finished: false,
+            started: false,
+        }
+    }
+
+    /// Construct a body whose trace events belong to `stream`.
+    #[cfg(feature = "http3")]
+    pub(crate) fn new_at_stream(
+        source: &'a mut dyn BodySource,
+        recorder: TraceCollector,
+        stream: u32,
+    ) -> Self {
+        Self {
+            source,
+            recorder,
+            read: 0,
+            stream,
             finished: false,
             started: false,
         }
@@ -120,7 +139,9 @@ impl<'a> RequestBody<'a> {
                     self.record(EventKind::RequestBodyStart, 0);
                 }
                 self.read += bytes.len() as u64;
-                self.record(EventKind::Read, bytes.len());
+                // A handler's body chunk is a decoded protocol boundary, not a
+                // socket read; socket reads belong to the transport tap.
+                self.record(EventKind::ChunkBoundary, bytes.len());
             }
             None => {
                 self.finished = true;
@@ -179,11 +200,7 @@ impl<'a> RequestBody<'a> {
 
     fn record(&self, kind: EventKind, bytes: usize) {
         let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
-        let mut recorder = self
-            .recorder
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        recorder.mark(kind, bytes, 0);
+        self.recorder.mark_stream(self.stream, kind, bytes, 0);
     }
 }
 
@@ -203,8 +220,8 @@ mod tests {
         }
     }
 
-    fn recorder() -> Arc<Mutex<Recorder>> {
-        Arc::new(Mutex::new(Recorder::start_ingress(64)))
+    fn recorder() -> TraceCollector {
+        TraceCollector::start_ingress(64)
     }
 
     #[tokio::test]
@@ -215,7 +232,7 @@ mod tests {
                 .collect(),
         };
         let recorder = recorder();
-        let mut body = RequestBody::new(&mut source, Arc::clone(&recorder));
+        let mut body = RequestBody::new(&mut source, recorder.clone());
         assert_eq!(
             body.read_to_end().await.expect("body").as_ref(),
             b"hello world"
@@ -223,7 +240,7 @@ mod tests {
         assert!(body.is_finished());
         assert_eq!(body.bytes_read(), 11);
 
-        let log = recorder.lock().expect("lock").log().clone();
+        let log = recorder.log();
         assert!(log.first_of(EventKind::RequestBodyStart).is_some());
         assert_eq!(
             log.first_of(EventKind::RequestBodyEnd).map(|event| event.a),

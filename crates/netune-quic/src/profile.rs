@@ -6,6 +6,7 @@
 //! transport parameters, and initial flight behaviors are explicit data
 //! rather than hard-coded library defaults.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,6 +62,49 @@ impl Default for QuicTransportParameters {
             active_connection_id_limit: 4,
             enable_datagrams: true,
         }
+    }
+}
+
+/// Named QUIC profiles. Built-ins and caller-supplied profiles share one
+/// resolution path; an unknown name is a hard error, never a silent default.
+#[derive(Debug, Clone)]
+pub struct QuicProfileRegistry {
+    profiles: HashMap<String, QuicProfile>,
+}
+
+impl Default for QuicProfileRegistry {
+    fn default() -> Self {
+        let mut profiles = HashMap::new();
+        for profile in [
+            QuicProfile::default_profile(),
+            QuicProfile::chrome_quic(),
+            QuicProfile::cloud_optimized(),
+        ] {
+            profiles.insert(profile.name.to_string(), profile);
+        }
+        Self { profiles }
+    }
+}
+
+impl QuicProfileRegistry {
+    pub fn with_profile(mut self, profile: QuicProfile) -> Self {
+        self.profiles.insert(profile.name.to_string(), profile);
+        self
+    }
+
+    pub fn resolve(&self, name: &str) -> Result<&QuicProfile, QuicError> {
+        self.profiles.get(name).ok_or_else(|| {
+            QuicError::Config(format!(
+                "unknown QUIC profile {name:?}; registered: {}",
+                self.names().join(", ")
+            ))
+        })
+    }
+
+    pub fn names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
     }
 }
 
@@ -146,14 +190,9 @@ impl QuicProfile {
         }
     }
 
-    /// Resolves a named profile preset.
+    /// Resolves a named profile preset through the default registry.
     pub fn by_name(name: &str) -> Option<Self> {
-        match name {
-            "quic-default" => Some(Self::default_profile()),
-            "chrome-quic" => Some(Self::chrome_quic()),
-            "cloud-optimized" => Some(Self::cloud_optimized()),
-            _ => None,
-        }
+        QuicProfileRegistry::default().resolve(name).ok().cloned()
     }
 
     /// Lowers this profile into a Quinn `TransportConfig`.
@@ -208,5 +247,37 @@ impl QuicProfile {
         });
 
         Ok(Arc::new(transport))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_profiles_resolve_through_one_registry() {
+        let registry = QuicProfileRegistry::default();
+        assert_eq!(
+            registry.resolve("chrome-quic").expect("built-in").name,
+            "chrome-quic"
+        );
+        assert_eq!(
+            registry.resolve("quic-default").expect("built-in").name,
+            "quic-default"
+        );
+
+        let custom = QuicProfile {
+            name: "my-quic",
+            ..QuicProfile::default_profile()
+        };
+        let registry = registry.with_profile(custom);
+        assert_eq!(registry.resolve("my-quic").expect("custom").name, "my-quic");
+    }
+
+    #[test]
+    fn an_unknown_quic_profile_is_a_loud_error() {
+        let registry = QuicProfileRegistry::default();
+        let error = registry.resolve("does-not-exist").expect_err("must fail");
+        assert!(error.to_string().contains("unknown QUIC profile"));
     }
 }

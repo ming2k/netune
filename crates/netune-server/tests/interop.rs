@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector};
 use netune_server::{Server, ServerConfig};
-use netune_trace::{Recorder, derive, derive_ingress};
+use netune_trace::{TraceCollector, derive, derive_ingress};
 
 /// Serve `server` in the background, returning its address, a shutdown trigger and the
 /// serving task.
@@ -57,10 +57,10 @@ async fn our_client_and_our_server_complete_a_request() {
     let target = Target::plain(format!("127.0.0.1:{}", address.port()));
     let head =
         RequestHead::new(http::Method::POST, "/echo").with_header("content-type", "text/plain");
-    let recorder = Arc::new(std::sync::Mutex::new(Recorder::start(1024)));
+    let recorder = TraceCollector::start(1024);
 
     let mut response = client()
-        .send(&target, recorder, head, None)
+        .send_traced(&target, recorder, head, None)
         .await
         .expect("the request completes against our own server");
     assert_eq!(response.head.status, http::StatusCode::OK);
@@ -93,10 +93,10 @@ async fn a_body_survives_the_round_trip_between_our_two_orchestrators() {
     let payload = r#"{"messages":[{"role":"user","content":"hello"}]}"#;
     let head = RequestHead::new(http::Method::POST, "/v1/echo")
         .with_header("content-type", "application/json");
-    let recorder = Arc::new(std::sync::Mutex::new(Recorder::start(1024)));
+    let recorder = TraceCollector::start(1024);
 
     let mut response = client()
-        .send(
+        .send_traced(
             &target,
             recorder,
             head,
@@ -129,10 +129,10 @@ async fn the_egress_trace_derives_a_measured_ttfb() {
 
     let target = Target::plain(format!("127.0.0.1:{}", address.port()));
     let head = RequestHead::new(http::Method::GET, "/trace");
-    let recorder = Arc::new(std::sync::Mutex::new(Recorder::start(1024)));
+    let recorder = TraceCollector::start(1024);
 
     let mut response = client()
-        .send(&target, recorder, head, None)
+        .send_traced(&target, recorder, head, None)
         .await
         .expect("request");
     let _ = response.body.read_to_end().await.expect("body");
@@ -170,10 +170,10 @@ async fn an_ingress_trace_from_a_real_exchange_derives_every_phase() {
 
     let target = Target::plain(format!("127.0.0.1:{}", address.port()));
     let head = RequestHead::new(http::Method::POST, "/measured");
-    let recorder = Arc::new(std::sync::Mutex::new(Recorder::start(1024)));
+    let recorder = TraceCollector::start(1024);
 
     let mut response = client()
-        .send(&target, recorder, head, None)
+        .send_traced(&target, recorder, head, None)
         .await
         .expect("request");
     let _ = response.body.read_to_end().await.expect("body");
@@ -208,6 +208,8 @@ async fn an_ingress_trace_from_a_real_exchange_derives_every_phase() {
             authority: address.to_string(),
         },
         connection: netune_trace::ConnectionInfo::default(),
+        identity: netune_trace::ConnectionIdentity::default(),
+        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: netune_trace::Fidelity::l1(),
         log,
     };

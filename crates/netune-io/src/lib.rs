@@ -23,9 +23,14 @@
 //!
 //! # The two wrappers
 //!
-//! - [`TimedIo`] records what the transport did: one event per `poll_read` /
-//!   `poll_write` that moved bytes. This is the L1 tap every timing in
-//!   `netune-trace` ultimately rests on.
+//! - [`TimedIo`] observes what the transport did. The observation strategy is a
+//!   type parameter: [`netune_trace::NoTap`] adds nothing, `Counters` is a
+//!   clock-free L0 count, and `Ring` records one event per `poll_read` /
+//!   `poll_write` that moved bytes. The wrapper owns the tap; it never holds a
+//!   shared recorder or a mutex.
+//! - [`RingIo`] is the same owned `Ring` tap for a protocol that boxes its
+//!   transport and cannot hand the tap back explicitly; it merges the log into
+//!   the connection recorder when the wrapper is dropped.
 //! - [`FaultIo`] changes what the transport does: delayed reads, split reads,
 //!   truncation, resets. It records nothing by design — a fault the harness
 //!   injected itself must not pollute the trace the harness judges the
@@ -41,4 +46,4 @@ mod fault;
 mod timed;
 
 pub use fault::{Fault, FaultIo, FaultScript};
-pub use timed::TimedIo;
+pub use timed::{RingIo, TimedIo};

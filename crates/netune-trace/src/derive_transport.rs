@@ -21,22 +21,22 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
-
 use crate::derive::span;
 use crate::event::EventKind;
 use crate::trace::RequestTrace;
 use crate::verdict::{Reading, Reason};
 
 /// Everything derivable from a QUIC handshake trace.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DerivedQuic {
     /// `QuicStart` → `QuicEnd`, present only when the handshake succeeded.
     pub handshake_us: Reading<u64>,
 }
 
 /// Everything derivable from one HTTP/3 request exchange.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DerivedH3 {
     /// Request stream start → response head.
     pub ttfb_us: Reading<u64>,
@@ -173,6 +173,8 @@ mod tests {
                 authority: "example.invalid:443".into(),
             },
             connection: ConnectionInfo::default(),
+            identity: crate::ConnectionIdentity::default(),
+            schema_version: crate::TRACE_SCHEMA_VERSION,
             fidelity: Fidelity::l0(),
             log,
         }

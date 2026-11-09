@@ -60,6 +60,16 @@ The architectural evolution is governed by the following decisions:
 | [ADR-0014](../adr/0014-request-validation-before-dispatch.md) | Request Validation | Target and `Host` grammar, CRLF strictness, cumulative body limits enforced before dispatch (`INV-SERVER-14..16`). |
 | [ADR-0015](../adr/0015-self-terminated-tls.md) | Self-Terminated TLS | Ingress TLS termination; SNI configuration routing; ALPN negotiation; trace recorded handshakes (`INV-SERVER-18..21`). |
 | [ADR-0016](../adr/0016-quic-and-http3-transport.md) | QUIC & HTTP/3 Transport | First-class QUIC (`netune-quic`) and HTTP/3 (`netune-http3`) unified on `aws-lc-rs`; `QuicProfile` shaping (`INV-QUIC-01..04`). |
+| [ADR-0017](../adr/0017-tiered-observation-and-connection-identity.md) | Tiered Observation & Identity | Typed tap cost and typed connection identity (`INV-TRACE-04..06`, `INV-CUSTOM-04..06`). |
+| [ADR-0018](../adr/0018-one-trace-collector-per-attempt.md) | One Trace Collector per Attempt | `TraceCollector` public, `Recorder` internal, byte events only through `Tap` (`INV-TRACE-07..09`). |
+| [ADR-0019](../adr/0019-connection-plan-and-wire-profile-registry.md) | Connection Plan & Wire Profiles | Resolve before connect; connection-fixed and request-only profile axes split (`INV-CUSTOM-08..11`). |
+| [ADR-0020](../adr/0020-split-multiplexed-profiles.md) | Split Multiplexed Profiles | H2 connection and request halves have separate types and lifetimes (`INV-CUSTOM-12..13`). |
+| [ADR-0021](../adr/0021-named-quic-profiles.md) | Named QUIC Profiles | QUIC profiles resolve through one registry, loudly (`INV-CUSTOM-14..15`). |
+| [ADR-0022](../adr/0022-http3-connection-identity.md) | HTTP/3 Connection Identity | H3 identity is the resolved QUIC profile (`INV-CUSTOM-16..17`). |
+| [ADR-0023](../adr/0023-h3-request-header-order.md) | H3 Request Header Order | Controlled h3 fork applies request order before QPACK (`INV-CUSTOM-18..20`). |
+| [ADR-0024](../adr/0024-h3-streaming-request-bodies.md) | H3 Streaming Request Bodies | `open_request` is the primitive; buffered `send` composes it (`INV-H3-01..02`). |
+| [ADR-0025](../adr/0025-h3-ingress-peer-transport.md) | H3 Ingress Peer Transport | Separate QUIC listener, non-zero exchange ids, shared handler and bounds (`INV-SERVER-22..24`). |
+| [ADR-0026](../adr/0026-controlled-dynamic-qpack.md) | Controlled Dynamic QPACK | QPACK critical streams, ACKs and blocked streams are wired; typed SETTINGS profiles (`INV-H3-03..05`). |
 
 ---
 

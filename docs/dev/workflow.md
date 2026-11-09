@@ -55,7 +55,8 @@ separately so both privilege postures are proven rather than assumed.
 
 The allowed edges live in one table inside that script, because the real graph
 is not a flat ring: `netune-io` depends on `netune-trace`, since `TimedIo`
-writes into a `Recorder` and there is no version of that type which does not. A
+owns a `Tap` and `RingIo` merges into a `TraceCollector`, and there is no version
+of those types which does not. A
 rule reading "leaves never depend on each other" would be false, and a false
 rule teaches people to ignore the checker.
 

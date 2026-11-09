@@ -3,18 +3,18 @@
 //! QUIC connector and established connection management.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use netune_egress::EgressConfinement;
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 use quinn::congestion::ControllerFactory;
 use quinn::{AsyncUdpSocket, Endpoint, EndpointConfig, TokioRuntime};
 use rustls_platform_verifier::BuilderVerifierExt;
 
 use crate::datagram::QuicDatagramSession;
 use crate::error::QuicError;
-use crate::profile::QuicProfile;
+use crate::profile::{QuicProfile, QuicProfileRegistry};
 use crate::socket::QuicSocketConfig;
 use crate::stream::QuicStream;
 
@@ -57,6 +57,16 @@ impl QuicConnector {
             custom_tls: None,
             custom_transport: None,
         }
+    }
+
+    /// Resolve a named profile through a registry, then construct the connector.
+    pub fn from_registry(registry: &QuicProfileRegistry, name: &str) -> Result<Self, QuicError> {
+        Ok(Self::new(registry.resolve(name)?.clone()))
+    }
+
+    /// The resolved profile name, for identity and diagnostics.
+    pub fn profile_name(&self) -> &'static str {
+        self.profile.name
     }
 
     /// Sets the socket configuration (applied before any packet is sent, [INV-SOCKET-01]).
@@ -150,11 +160,9 @@ impl QuicConnector {
         &self,
         target_addr: SocketAddr,
         server_name: &str,
-        recorder: Option<Arc<Mutex<Recorder>>>,
+        recorder: Option<TraceCollector>,
     ) -> Result<QuicConnection, QuicError> {
-        if let Some(r) = &recorder
-            && let Ok(mut rec) = r.lock()
-        {
+        if let Some(rec) = &recorder {
             rec.mark(EventKind::QuicStart, 0, 0);
         }
 
@@ -189,9 +197,7 @@ impl QuicConnector {
         let connecting = endpoint
             .connect_with(client_config, target_addr, server_name)
             .map_err(|e| {
-                if let Some(r) = &recorder
-                    && let Ok(mut rec) = r.lock()
-                {
+                if let Some(rec) = &recorder {
                     rec.mark(EventKind::QuicEnd, 0, 0);
                 }
                 QuicError::Connect(format!("quic dial init: {e}"))
@@ -199,17 +205,13 @@ impl QuicConnector {
 
         let connection = match connecting.await {
             Ok(conn) => {
-                if let Some(r) = &recorder
-                    && let Ok(mut rec) = r.lock()
-                {
+                if let Some(rec) = &recorder {
                     rec.mark(EventKind::QuicEnd, 1, 0);
                 }
                 conn
             }
             Err(e) => {
-                if let Some(r) = &recorder
-                    && let Ok(mut rec) = r.lock()
-                {
+                if let Some(rec) = &recorder {
                     rec.mark(EventKind::QuicEnd, 0, 0);
                 }
                 return Err(QuicError::Connect(format!("quic handshake: {e}")));
@@ -229,7 +231,7 @@ impl QuicConnector {
 pub struct QuicConnection {
     _endpoint: Endpoint,
     connection: quinn::Connection,
-    recorder: Option<Arc<Mutex<Recorder>>>,
+    recorder: Option<TraceCollector>,
 }
 
 impl std::fmt::Debug for QuicConnection {
@@ -274,9 +276,7 @@ impl QuicConnection {
             .await
             .map_err(|e| QuicError::Stream(format!("open bidirectional stream: {e}")))?;
 
-        if let Some(r) = &self.recorder
-            && let Ok(mut rec) = r.lock()
-        {
+        if let Some(rec) = &self.recorder {
             rec.mark(
                 EventKind::QuicStreamOpen,
                 send.id().index() as u32,

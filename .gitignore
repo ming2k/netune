@@ -8,3 +8,7 @@ __pycache__/
 
 # Local agent-tool workspace configuration (machine-specific roots).
 /.muta/
+
+# Vendored h3 has its own test workspace; never commit its build products.
+/vendor/h3/target
+/vendor/h3/Cargo.lock

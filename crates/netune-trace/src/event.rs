@@ -5,15 +5,14 @@
 //! output token), never how a particular provider spells it. Adding HTTP/2 or a
 //! new provider therefore adds frame classes, not a new event model.
 
-use serde::{Deserialize, Serialize};
-
 /// What an [`crate::Event`] records.
 ///
 /// Discriminants are stable: they are the persisted code for a kind, so a kind
 /// may be added but never renumbered.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum EventKind {
     /// Origin of the trace: the request left the harness. Always at offset 0.
     Dispatch = 0,
@@ -231,6 +230,14 @@ impl EventKind {
     pub const fn is_synthetic(self) -> bool {
         matches!(self, Self::TimeJump)
     }
+
+    /// Whether this kind may only be produced by a byte-path [`crate::Tap`].
+    ///
+    /// `TraceCollector::mark` rejects these kinds: a control/protocol producer
+    /// must not be able to manufacture a syscall timeline.
+    pub const fn is_byte_path(self) -> bool {
+        matches!(self, Self::Read | Self::Write | Self::Segment)
+    }
 }
 
 /// Which clock produced a read event's timestamp.
@@ -239,8 +246,9 @@ impl EventKind {
 /// timestamps on another), so the source travels with the event instead of being
 /// assumed from the trace's fidelity level.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum TimeSource {
     /// `Instant::now()` immediately after a read returned.
     #[default]
@@ -273,8 +281,9 @@ impl TimeSource {
 /// origin had *started responding* (a frame of any class) and whether it was
 /// still preamble. Provider-specific shapes map onto these classes.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum FrameClass {
     #[default]
     Unknown = 0,
@@ -315,8 +324,9 @@ impl FrameClass {
 /// ALPN protocol negotiated on a TLS connection, as recorded in
 /// [`EventKind::TlsInfo`].
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Alpn {
     #[default]
     Unknown = 0,
@@ -438,6 +448,11 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_decoded_event_stays_compact() {
+        assert_eq!(std::mem::size_of::<Event>(), 24);
+    }
 
     #[test]
     fn kind_codes_round_trip_and_are_stable() {

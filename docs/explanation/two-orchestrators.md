@@ -135,6 +135,21 @@ connection interleaves exchanges, so an event's *position* is not its exchange. 
 and the ingress derivation groups by it. `[INV-SERVER-07]`'s refusal is unchanged; it now has a
 shape that can actually be derived instead of only refused.
 
+## Why HTTP/3 does not reuse the TCP connection machine
+
+HTTP/2 ingress could reuse the client's connection machine because both ends see the
+same bytes on a TCP stream. HTTP/3 cannot: QUIC owns the connection, TLS is inside the
+handshake, one connection multiplexes request streams, and QPACK has its own critical
+streams. `netune-server` therefore gains a peer `H3Server`, not a third branch in the
+TCP accept loop. The H3 state machine stays in the `netune-http3` leaf; the orchestrator
+owns admission, dispatch, bounds, trace and drain. This is the same split as the two
+orchestrators themselves: one direction of travel, one owner of the wire.
+
+The trace model needed one correction. HTTP/3 wire stream `0` is a valid request, while
+the trace reserves stream `0` for connection-level facts. H3 ingress therefore assigns a
+non-zero exchange id to each request and records the wire stream id in the H3 start
+event; the existing per-exchange derivation is unchanged.
+
 ## What the red-lines had to become
 
 `[INV-WS-01]`'s second sentence — no accept/listen code anywhere — was retired in place, with

@@ -244,6 +244,8 @@ async fn a_two_request_connection_yields_two_exchanges_from_the_real_transport()
             authority: address_string(),
         },
         connection: netune_trace::ConnectionInfo::default(),
+        identity: netune_trace::ConnectionIdentity::default(),
+        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: netune_trace::Fidelity::l1(),
         log: ingress.log,
     };

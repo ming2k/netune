@@ -9,6 +9,7 @@
 //! gaps, the transport forces the OS kernel to flush each slice into an independent TCP packet,
 //! preventing pattern matching by stateless DPI filters.
 
+use netune_trace::EvasionPolicy;
 use std::cmp::min;
 use std::io;
 use std::pin::Pin;
@@ -44,11 +45,33 @@ impl<T> SegmentingIo<T> {
         }
     }
 
-    /// Construct a preset tuned for SNI segmentation: 24-byte chunks with 2ms pacing for the first 512 bytes.
+    /// Wrap `inner` according to a named evasion policy.
+    ///
+    /// `EvasionPolicy::None` returns `None`, so the caller keeps the bare stream
+    /// without wrapping it in a pass-through type.
+    pub fn for_policy(inner: T, policy: EvasionPolicy) -> Option<Self> {
+        match policy {
+            EvasionPolicy::None => None,
+            EvasionPolicy::SniSplit {
+                chunk_size,
+                segment_limit,
+                gap_us,
+            } => {
+                let mut wrapped = Self::new(inner, chunk_size as usize, segment_limit as usize);
+                if gap_us > 0 {
+                    wrapped.inter_chunk_gap = Some(Duration::from_micros(u64::from(gap_us)));
+                }
+                Some(wrapped)
+            }
+        }
+    }
+
+    /// Construct the preset tuned for SNI segmentation: 24-byte chunks with
+    /// 2 ms pacing for the first 512 bytes.
     pub fn for_sni(inner: T) -> Self {
-        let mut s = Self::new(inner, 24, 512);
-        s.inter_chunk_gap = Some(Duration::from_millis(2));
-        s
+        let mut wrapped = Self::new(inner, 24, 512);
+        wrapped.inter_chunk_gap = Some(Duration::from_millis(2));
+        wrapped
     }
 
     /// Set an inter-chunk delay to guarantee discrete TCP segment transmission.

@@ -13,8 +13,17 @@ categories = ["network-programming", "development-tools::debugging"]
 [package.metadata.docs.rs]
 all-features = true
 
+[features]
+# JA3/JA4 parsing and the ClientHello forge are additive capabilities. They are
+# on by default because the fingerprint goldens and the egress TLS-path tests
+# depend on them; a consumer that only needs the event model can compile them
+# out without changing observation or identity defaults.
+default = ["ja4", "serde"]
+ja4 = []
+serde = ["dep:serde"]
+
 [dependencies]
-serde = { workspace = true }
+serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

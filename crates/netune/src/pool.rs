@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Id as RuntimeId;
 
 use bytes::BytesMut;
+use netune_trace::ConnectionIdentity;
 
 use crate::connect::Transport;
 #[cfg(feature = "http2")]
@@ -187,10 +188,31 @@ fn current_runtime_id() -> Option<RuntimeId> {
         .map(|handle| handle.id())
 }
 
+/// The only key a pooled connection may be stored under.
+///
+/// The authority is the socket address; the identity is every property fixed at
+/// connection establishment. A pool lookup that does not carry the whole
+/// identity cannot typecheck, which is what makes `[INV-CUSTOM-04]` structural
+/// rather than a convention.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PoolKey {
+    pub authority: String,
+    pub identity: ConnectionIdentity,
+}
+
+impl PoolKey {
+    pub fn new(authority: impl Into<String>, identity: ConnectionIdentity) -> Self {
+        Self {
+            authority: authority.into(),
+            identity,
+        }
+    }
+}
+
 #[derive(Default)]
 struct PoolInner {
     config: PoolConfig,
-    idle: Mutex<HashMap<String, Vec<Idle>>>,
+    idle: Mutex<HashMap<PoolKey, Vec<Idle>>>,
 }
 
 /// A shared, cloneable connection pool.
@@ -213,9 +235,9 @@ impl Pool {
         self.inner.config
     }
 
-    /// Take the newest live idle connection for `authority`, whatever its protocol.
-    pub fn take(&self, authority: &str) -> Option<IdleConnection> {
-        self.take_matching(authority, |_| true)
+    /// Take the newest live idle connection for `key`, whatever its protocol.
+    pub fn take(&self, key: &PoolKey) -> Option<IdleConnection> {
+        self.take_matching(key, |_| true)
     }
 
     /// Take the newest live idle connection whose protocol `accept` approves.
@@ -225,12 +247,12 @@ impl Pool {
     /// discarded.
     pub(crate) fn take_matching(
         &self,
-        authority: &str,
+        key: &PoolKey,
         accept: impl Fn(Protocol) -> bool,
     ) -> Option<IdleConnection> {
         let current = current_runtime_id();
         let mut idle = self.inner.idle.lock().unwrap_or_else(|e| e.into_inner());
-        let entries = idle.get_mut(authority)?;
+        let entries = idle.get_mut(key)?;
         let now = Instant::now();
         for index in (0..entries.len()).rev() {
             let age = now.saturating_duration_since(entries[index].since());
@@ -253,26 +275,26 @@ impl Pool {
     /// Return an HTTP/1.1 keep-alive socket to the pool.
     pub fn put(
         &self,
-        authority: &str,
+        key: &PoolKey,
         stream: Box<dyn Transport>,
         buffered: BytesMut,
         local_port: Option<u16>,
         socket: Option<std::net::TcpStream>,
     ) {
-        self.put_http1(authority, stream, buffered, local_port, socket);
+        self.put_http1(key, stream, buffered, local_port, socket);
     }
 
     /// Return an HTTP/1.1 keep-alive socket to the pool.
     pub fn put_http1(
         &self,
-        authority: &str,
+        key: &PoolKey,
         stream: Box<dyn Transport>,
         buffered: BytesMut,
         local_port: Option<u16>,
         socket: Option<std::net::TcpStream>,
     ) {
         self.put_entry(
-            authority,
+            key,
             Idle::Http1 {
                 stream,
                 buffered,
@@ -291,13 +313,13 @@ impl Pool {
     #[cfg(feature = "http2")]
     pub fn put_http2(
         &self,
-        authority: &str,
+        key: &PoolKey,
         connection: H2ClientConnection<Box<dyn Transport>>,
         local_port: Option<u16>,
         socket: Option<std::net::TcpStream>,
     ) {
         self.put_entry(
-            authority,
+            key,
             Idle::Http2 {
                 connection: Box::new(connection),
                 local_port,
@@ -308,22 +330,22 @@ impl Pool {
         );
     }
 
-    fn put_entry(&self, authority: &str, entry: Idle) {
+    fn put_entry(&self, key: &PoolKey, entry: Idle) {
         if self.inner.config.max_idle_per_authority == 0 {
             return;
         }
         let mut idle = self.inner.idle.lock().unwrap_or_else(|e| e.into_inner());
-        let entries = idle.entry(authority.to_string()).or_default();
+        let entries = idle.entry(key.clone()).or_default();
         while entries.len() >= self.inner.config.max_idle_per_authority {
             entries.remove(0);
         }
         entries.push(entry);
     }
 
-    /// Number of idle connections retained for `authority` (tests, diagnostics).
-    pub fn idle_count(&self, authority: &str) -> usize {
+    /// Number of idle connections retained for `key` (tests, diagnostics).
+    pub fn idle_count(&self, key: &PoolKey) -> usize {
         let idle = self.inner.idle.lock().unwrap_or_else(|e| e.into_inner());
-        idle.get(authority).map_or(0, Vec::len)
+        idle.get(key).map_or(0, Vec::len)
     }
 }
 
@@ -370,8 +392,12 @@ mod tests {
         Box::new(Dummy)
     }
 
+    fn key(authority: &str) -> PoolKey {
+        PoolKey::new(authority, ConnectionIdentity::default())
+    }
+
     fn take_http1(pool: &Pool, authority: &str) -> Http1Idle {
-        match pool.take(authority) {
+        match pool.take(&key(authority)) {
             Some(IdleConnection::Http1(idle)) => idle,
             #[cfg(feature = "http2")]
             Some(IdleConnection::Http2(_)) => panic!("expected an HTTP/1.1 connection"),
@@ -389,8 +415,8 @@ mod tests {
     #[test]
     fn an_empty_pool_has_nothing_to_reuse() {
         let pool = pool(2, Duration::from_secs(60));
-        assert!(pool.take("example:443").is_none());
-        assert_eq!(pool.idle_count("example:443"), 0);
+        assert!(pool.take(&key("example:443")).is_none());
+        assert_eq!(pool.idle_count(&key("example:443")), 0);
     }
 
     #[test]
@@ -398,20 +424,26 @@ mod tests {
         let pool = pool(2, Duration::from_secs(60));
         let mut buffered = BytesMut::new();
         buffered.extend_from_slice(b"HTTP/1.1 200 OK\r\n");
-        pool.put("example:443", idle_stream(), buffered, Some(51_234), None);
+        pool.put(
+            &key("example:443"),
+            idle_stream(),
+            buffered,
+            Some(51_234),
+            None,
+        );
 
         let idle = take_http1(&pool, "example:443");
         assert_eq!(idle.local_port, Some(51_234));
         assert_eq!(&idle.buffered[..], b"HTTP/1.1 200 OK\r\n");
-        assert_eq!(pool.idle_count("example:443"), 0, "take removes it");
+        assert_eq!(pool.idle_count(&key("example:443")), 0, "take removes it");
     }
 
     #[test]
     fn authorities_do_not_share_connections() {
         let pool = pool(2, Duration::from_secs(60));
-        pool.put("a:443", idle_stream(), BytesMut::new(), None, None);
-        assert!(pool.take("b:443").is_none());
-        assert!(pool.take("a:443").is_some());
+        pool.put(&key("a:443"), idle_stream(), BytesMut::new(), None, None);
+        assert!(pool.take(&key("b:443")).is_none());
+        assert!(pool.take(&key("a:443")).is_some());
     }
 
     #[test]
@@ -419,26 +451,32 @@ mod tests {
         let pool = pool(2, Duration::from_secs(60));
         for port in 1..=5u16 {
             pool.put(
-                "example:443",
+                &key("example:443"),
                 idle_stream(),
                 BytesMut::new(),
                 Some(port),
                 None,
             );
         }
-        assert_eq!(pool.idle_count("example:443"), 2);
+        assert_eq!(pool.idle_count(&key("example:443")), 2);
         assert_eq!(take_http1(&pool, "example:443").local_port, Some(5));
         assert_eq!(take_http1(&pool, "example:443").local_port, Some(4));
-        assert!(pool.take("example:443").is_none());
+        assert!(pool.take(&key("example:443")).is_none());
     }
 
     #[test]
     fn a_stale_connection_is_discarded_rather_than_reused() {
         let pool = pool(2, Duration::from_millis(1));
-        pool.put("example:443", idle_stream(), BytesMut::new(), None, None);
+        pool.put(
+            &key("example:443"),
+            idle_stream(),
+            BytesMut::new(),
+            None,
+            None,
+        );
         std::thread::sleep(Duration::from_millis(5));
         assert!(
-            pool.take("example:443").is_none(),
+            pool.take(&key("example:443")).is_none(),
             "an expired connection must not be handed out"
         );
     }
@@ -446,14 +484,20 @@ mod tests {
     #[test]
     fn a_candidate_the_caller_cannot_drive_is_left_in_place() {
         let pool = pool(2, Duration::from_secs(60));
-        pool.put("example:443", idle_stream(), BytesMut::new(), None, None);
+        pool.put(
+            &key("example:443"),
+            idle_stream(),
+            BytesMut::new(),
+            None,
+            None,
+        );
         assert!(
-            pool.take_matching("example:443", |protocol| protocol != Protocol::Http1)
+            pool.take_matching(&key("example:443"), |protocol| protocol != Protocol::Http1)
                 .is_none(),
             "an HTTP/1.1 socket must not be handed to a caller that wants HTTP/2"
         );
         assert_eq!(
-            pool.idle_count("example:443"),
+            pool.idle_count(&key("example:443")),
             1,
             "the rejected candidate must remain available to a compatible request"
         );
@@ -470,8 +514,14 @@ mod tests {
             .build()
             .expect("first runtime");
         first.block_on(async {
-            pool.put("example:443", idle_stream(), BytesMut::new(), None, None);
-            assert_eq!(pool.idle_count("example:443"), 1);
+            pool.put(
+                &key("example:443"),
+                idle_stream(),
+                BytesMut::new(),
+                None,
+                None,
+            );
+            assert_eq!(pool.idle_count(&key("example:443")), 1);
         });
 
         let second = tokio::runtime::Builder::new_multi_thread()
@@ -479,10 +529,10 @@ mod tests {
             .enable_all()
             .build()
             .expect("second runtime");
-        let taken = second.block_on(async { pool.take("example:443").is_some() });
+        let taken = second.block_on(async { pool.take(&key("example:443")).is_some() });
         assert!(!taken, "a foreign runtime must not inherit this socket");
         assert_eq!(
-            pool.idle_count("example:443"),
+            pool.idle_count(&key("example:443")),
             0,
             "the discarded candidate must leave the pool"
         );
@@ -491,7 +541,13 @@ mod tests {
     #[test]
     fn a_zero_cap_disables_pooling() {
         let pool = pool(0, Duration::from_secs(60));
-        pool.put("example:443", idle_stream(), BytesMut::new(), None, None);
-        assert_eq!(pool.idle_count("example:443"), 0);
+        pool.put(
+            &key("example:443"),
+            idle_stream(),
+            BytesMut::new(),
+            None,
+            None,
+        );
+        assert_eq!(pool.idle_count(&key("example:443")), 0);
     }
 }

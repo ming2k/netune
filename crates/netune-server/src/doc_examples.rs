@@ -28,5 +28,9 @@
 #[doc = include_str!("../../../docs/how-to/serve-http.md")]
 pub struct ServeHttp1Examples;
 
+#[cfg(feature = "http3")]
+#[doc = include_str!("../../../docs/how-to/use-http3.md")]
+pub struct UseHttp3Examples;
+
 #[doc = include_str!("../../../docs/explanation/two-orchestrators.md")]
 pub struct TwoOrchestratorsExamples;

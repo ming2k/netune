@@ -14,11 +14,10 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use netune::{DatagramConnector, Proxy, Socks5DatagramConnector, TcpConnector};
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
@@ -144,7 +143,7 @@ async fn an_association_carries_a_datagram_to_the_destination_and_back() {
 
     let proxy = Proxy::parse(&format!("socks5://{proxy_address}")).expect("proxy url");
     let connector = Socks5DatagramConnector::new(TcpConnector::new(), proxy).expect("connector");
-    let recorder = Arc::new(Mutex::new(Recorder::start(32)));
+    let recorder = TraceCollector::start(32);
 
     // The destination is a literal address, which is what a UDP relay knows: it
     // has already resolved the name that the routing decision was made on.
@@ -175,8 +174,8 @@ async fn an_association_carries_a_datagram_to_the_destination_and_back() {
 
     // The trace must show the tunnel and the session, and must not claim a TLS
     // handshake that never happened.
-    let log = recorder.lock().unwrap_or_else(|error| error.into_inner());
-    let kinds: Vec<EventKind> = log.log().iter().map(|event| event.kind).collect();
+    let log = recorder.log();
+    let kinds: Vec<EventKind> = log.iter().map(|event| event.kind).collect();
     assert!(kinds.contains(&EventKind::ProxyTunnel), "{kinds:?}");
     assert!(kinds.contains(&EventKind::UdpOpen), "{kinds:?}");
     // The control hop really is TCP.
@@ -205,7 +204,7 @@ async fn inv_udp_03_a_datagram_claiming_a_foreign_source_is_dropped() {
 
     let proxy = Proxy::parse(&format!("socks5://{proxy_address}")).expect("proxy url");
     let connector = Socks5DatagramConnector::new(TcpConnector::new(), proxy).expect("connector");
-    let recorder = Arc::new(Mutex::new(Recorder::start(32)));
+    let recorder = TraceCollector::start(32);
 
     let session = tokio::time::timeout(
         Duration::from_secs(5),
@@ -248,7 +247,7 @@ async fn the_reported_maximum_leaves_room_for_the_wrapper() {
 
     let proxy = Proxy::parse(&format!("socks5://{proxy_address}")).expect("proxy url");
     let connector = Socks5DatagramConnector::new(TcpConnector::new(), proxy).expect("connector");
-    let recorder = Arc::new(Mutex::new(Recorder::start(32)));
+    let recorder = TraceCollector::start(32);
     let session = connector
         .connect(&origin.to_string(), &recorder)
         .await

@@ -348,8 +348,9 @@ pub enum StreamEvent {
 
 /// Receives the facts a session observes, tagged with the stream they belong to.
 ///
-/// Implemented by the orchestrator, never by this crate: a session that wrote into a `Recorder`
-/// itself would need the trace model, and a codec that depends on a trace model is no longer a codec.
+/// Implemented by the orchestrator, never by this crate: a session that wrote into a
+/// `TraceCollector` itself would need the trace model, and a codec that depends on a trace model
+/// is no longer a codec.
 pub trait SessionObserver: Send + Sync + std::fmt::Debug {
     /// One fact on `stream_id`.
     fn observed(&self, stream_id: u32, event: StreamEvent);

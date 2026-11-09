@@ -24,15 +24,15 @@
 //! [`netune_http1::ResponseWriter`] rather than by convention here, so a streaming handler and a
 //! one-shot handler are equally unable to produce them.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use netune_http1::{
     BodyKind, Http1ServerReader, HttpError, IncomingRequest, ResponseWriter, TargetForm,
     write_interim,
 };
-use netune_io::TimedIo;
-use netune_trace::{EventKind, Recorder};
+use netune_io::{RingIo, TimedIo};
+use netune_trace::{EventKind, NoTap, Ring, TraceCollector};
 use tokio::io::AsyncWrite;
 
 use crate::body::{BodySource, RequestBody};
@@ -49,13 +49,28 @@ pub(crate) async fn serve_http1<T>(
     stream: T,
     config: Arc<ServerConfig>,
     handler: Arc<dyn Handler>,
-    recorder: Arc<Mutex<Recorder>>,
+    recorder: TraceCollector,
 ) -> u32
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
-    let stream = TimedIo::new(stream, Arc::clone(&recorder));
-    let mut reader: Reader = Http1ServerReader::with_limits(Box::new(stream), config.limits);
+    let (observed, origin, capacity) = (
+        recorder.is_enabled(),
+        recorder.origin(),
+        recorder.capacity(),
+    );
+    let stream: Box<dyn crate::body::AsyncIo> = if observed {
+        Box::new(RingIo::new(
+            stream,
+            Ring::new(origin, capacity, None),
+            recorder.clone(),
+        ))
+    } else {
+        // No observer was installed: the byte path must not take a lock or
+        // read a clock just to feed a disabled recorder.
+        Box::new(TimedIo::new(stream, NoTap))
+    };
+    let mut reader: Reader = Http1ServerReader::with_limits(stream, config.limits);
     let mut exchanges = 0u32;
 
     loop {
@@ -149,7 +164,7 @@ where
                 reader: &mut reader,
                 config: &config,
             };
-            let body = RequestBody::new(&mut source, Arc::clone(&recorder));
+            let body = RequestBody::new(&mut source, recorder.clone());
             if !expects_continue {
                 mark(&recorder, EventKind::HandlerStart, 0);
             }
@@ -295,9 +310,10 @@ async fn drain_body(reader: &mut Reader, kind: BodyKind, config: &ServerConfig) 
     let mut source = Http1BodySource { reader, config };
     let mut body = RequestBody::new(
         &mut source,
-        // The drain is not attributed to an exchange's handler span, and the recorder here only
-        // needs to exist; the transport owns the real one.
-        Arc::new(Mutex::new(Recorder::start_ingress(1))),
+        // The drain is not attributed to an exchange's handler span, and the
+        // transport owns the real collector. A disabled collector keeps this
+        // helper allocation-free and prevents a throwaway event ring.
+        TraceCollector::disabled(),
     );
     match tokio::time::timeout(config.body_timeout, body.read_to_end()).await {
         Ok(Ok(_)) => true,
@@ -321,7 +337,7 @@ struct ConnectionDirective {
 /// finish.
 async fn write_exchange(
     reader: &mut Reader,
-    recorder: &Arc<Mutex<Recorder>>,
+    recorder: &TraceCollector,
     method: &http::Method,
     response: Response,
     directive: ConnectionDirective,
@@ -366,7 +382,7 @@ async fn write_exchange(
 async fn write_body<W: AsyncWrite + Unpin>(
     writer: &mut ResponseWriter<W>,
     body: ResponseBody,
-    recorder: &Arc<Mutex<Recorder>>,
+    recorder: &TraceCollector,
     write_timeout: Duration,
 ) -> bool {
     match body {
@@ -540,8 +556,7 @@ pub const ERROR_HANDLER_PANIC: u32 = 8;
 pub const ERROR_INVALID_REQUEST: u32 = 9;
 pub const ERROR_TLS_HANDSHAKE: u32 = 10;
 
-pub(crate) fn mark(recorder: &Arc<Mutex<Recorder>>, kind: EventKind, a: u32) {
-    let mut recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
+pub(crate) fn mark(recorder: &TraceCollector, kind: EventKind, a: u32) {
     recorder.mark(kind, a, 0);
 }
 
@@ -560,7 +575,7 @@ fn rejection_for(error: &HttpError) -> Option<Response> {
 }
 
 /// Record a read failure unless it is the normal end of a keep-alive connection.
-fn record_read_failure(recorder: &Arc<Mutex<Recorder>>, error: &HttpError) {
+fn record_read_failure(recorder: &TraceCollector, error: &HttpError) {
     // A clean close between requests is how a keep-alive connection ends; recording it as an error
     // would make every well-behaved client look like a failure.
     if matches!(error, HttpError::Incomplete(_)) {
@@ -578,7 +593,7 @@ pub(crate) fn code_for(error: &HttpError) -> u32 {
     }
 }
 
-pub(crate) fn record_error(recorder: &Arc<Mutex<Recorder>>, code: u32) {
+pub(crate) fn record_error(recorder: &TraceCollector, code: u32) {
     mark(recorder, EventKind::Error, code);
 }
 

@@ -16,10 +16,9 @@
 //! ([`duplicate`]), so it never borrows the stream the HTTP path owns and can be
 //! stopped at any time by dropping its handle.
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use netune_trace::Recorder;
+use netune_trace::TraceCollector;
 
 /// One `TCP_INFO` reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,21 +45,14 @@ impl Drop for Sampler {
 }
 
 /// Start sampling `socket` into `recorder` until the returned handle is dropped.
-pub fn start(
-    socket: std::net::TcpStream,
-    recorder: Arc<Mutex<Recorder>>,
-    interval: Duration,
-) -> Sampler {
+pub fn start(socket: std::net::TcpStream, recorder: TraceCollector, interval: Duration) -> Sampler {
     let handle = tokio::spawn(async move {
         let mut last: Option<TcpSample> = None;
         loop {
             if let Some(sample) = sample(&socket)
                 && last != Some(sample)
             {
-                recorder
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .tcp_info(sample.rtt_us, sample.retransmits);
+                recorder.tcp_info(sample.rtt_us, sample.retransmits);
                 last = Some(sample);
             }
             tokio::time::sleep(interval).await;
@@ -168,15 +160,13 @@ mod tests {
     async fn sampling_records_at_least_one_sample_and_stops_on_drop() {
         let (client, accept) = connected_pair().await;
         let duplicated = duplicate(&client).expect("duplicate");
-        let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
-        let sampler = start(duplicated, Arc::clone(&recorder), Duration::from_millis(1));
+        let recorder = TraceCollector::start(1024);
+        let sampler = start(duplicated, recorder.clone(), Duration::from_millis(1));
         tokio::time::sleep(Duration::from_millis(20)).await;
         drop(sampler);
 
         let count = || {
             recorder
-                .lock()
-                .expect("recorder")
                 .log()
                 .iter()
                 .filter(|event| event.kind == netune_trace::EventKind::TcpInfo)

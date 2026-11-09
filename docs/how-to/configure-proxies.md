@@ -18,9 +18,7 @@ A proxy is a `Connector` wrapper: the inner connector dials the **proxy**, and
 the wrapper opens a tunnel to the target inside it.
 
 ```rust,no_run
-use netune::{Client, ClientConfig, Pool, Proxy, ProxyConnector, RequestHead, Target, TcpConnector, TlsConnector};
-use netune_trace::Recorder;
-use std::sync::{Arc, Mutex};
+use netune::{Client, ClientConfig, Pool, Proxy, ProxyConnector, RequestHead, Target, TcpConnector, TlsConnector, TraceConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,10 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. The target is the origin, not the proxy.
     let target = Target::tls("api.openai.com:443", "api.openai.com");
-    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
     let head = RequestHead::new(http::Method::GET, "/v1/models");
 
-    let mut response = client.send(&target, recorder, head, None).await?;
+    let mut response = client
+        .request_traced(&target, head, None, TraceConfig::default())
+        .await?;
     let body = response.body.read_to_end().await?;
     println!("Response bytes: {}", body.len());
 

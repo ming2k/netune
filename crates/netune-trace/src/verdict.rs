@@ -8,16 +8,15 @@
 //! number without having matched on its verdict, because there is no other
 //! accessor.
 
-use serde::{Deserialize, Serialize};
-
 /// Why a scope carries no number.
 ///
 /// Reason codes are stable identifiers, not prose: the UI owns the wording, and
 /// an aggregate can filter on a code (`Batched` samples must not enter a
 /// server-side efficiency average) without parsing English.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Reason {
     /// No event of the required kind was recorded.
     PhaseAbsent = 0,
@@ -76,8 +75,9 @@ impl Reason {
 }
 
 /// The verdict attached to every derived quantity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Validity {
     /// The quantity was measured and is defensible.
     Measured,
@@ -116,7 +116,8 @@ impl Validity {
 }
 
 /// A value that carries its own verdict.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Reading<T> {
     value: Option<T>,
     validity: Validity,
@@ -258,6 +259,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn readings_round_trip_through_serde() {
         let measured: Reading<u64> = Reading::measured(42);

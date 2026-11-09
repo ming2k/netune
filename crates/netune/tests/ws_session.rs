@@ -1,7 +1,7 @@
 #![cfg(feature = "ws")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use netune::{Client, ClientConfig, Pool, Target, TcpConnector, WsMessage};
-use netune_trace::Recorder;
+use netune_trace::TraceCollector;
 use netune_ws::{Frame, FrameDecoder, FrameEncoder, Role, compute_accept_key};
 
 /// Commands the server mock's script can issue against the connection.
@@ -334,13 +334,13 @@ async fn wsframe_events_record_every_frame_including_fragment_parts() {
 
     let client = test_client();
     let target = test_target(port);
-    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
+    let recorder = TraceCollector::start(1024);
 
     let mut ws = client
         .connect_ws_traced(
             &target,
             "/ws",
-            Arc::clone(&recorder),
+            recorder.clone(),
             netune::WsHandshake::default(),
         )
         .await
@@ -350,9 +350,8 @@ async fn wsframe_events_record_every_frame_including_fragment_parts() {
     assert_eq!(msg, WsMessage::Text("part1-part2-part3".to_string()));
 
     // Frame-level trace: exactly three WsFrame events, one per fragment part.
-    let rec = recorder.lock().unwrap();
-    let ws_frames: Vec<_> = rec
-        .log()
+    let log = recorder.log();
+    let ws_frames: Vec<_> = log
         .iter()
         .filter(|e| e.kind == EventKind::WsFrame)
         .collect();
@@ -454,12 +453,7 @@ async fn subprotocol_negotiation_offers_and_validates_the_echo() {
         .with_extra_header("authorization", "Bearer test-token");
 
     let ws = client
-        .connect_ws_traced(
-            &target,
-            "/mcp",
-            Arc::new(Mutex::new(Recorder::start(1024))),
-            handshake,
-        )
+        .connect_ws_traced(&target, "/mcp", TraceCollector::start(1024), handshake)
         .await
         .expect("subprotocol negotiation must succeed when the echo matches an offer");
 
@@ -509,7 +503,7 @@ async fn subprotocol_echo_mismatch_fails_loudly() {
         .connect_ws_traced(
             &test_target(port),
             "/mcp",
-            Arc::new(Mutex::new(Recorder::start(1024))),
+            TraceCollector::start(1024),
             handshake,
         )
         .await;

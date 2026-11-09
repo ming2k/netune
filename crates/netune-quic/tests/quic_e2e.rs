@@ -10,13 +10,13 @@
 //! - [INV-QUIC-03]: Monotonic trace event recording in `netune-trace`.
 //! - [INV-QUIC-04]: RFC 9221 datagram MTU bounds and explicit size error.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use netune_quic::profile::QuicProfile;
 use netune_quic::socket::QuicSocketConfig;
 use netune_quic::{QuicConnector, QuicError};
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug)]
@@ -124,7 +124,7 @@ async fn test_quic_stream_and_trace_lifecycle() {
         .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
         .with_no_client_auth();
 
-    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
+    let recorder = TraceCollector::start(1024);
 
     let connector = QuicConnector::new(QuicProfile::chrome_quic())
         .with_tls_config(client_crypto)
@@ -138,7 +138,7 @@ async fn test_quic_stream_and_trace_lifecycle() {
         });
 
     let conn = connector
-        .connect(addr, "localhost", Some(Arc::clone(&recorder)))
+        .connect(addr, "localhost", Some(recorder.clone()))
         .await
         .expect("connect");
 
@@ -153,7 +153,7 @@ async fn test_quic_stream_and_trace_lifecycle() {
     assert_eq!(&response, b"hello quic");
 
     // Verify trace events [INV-QUIC-03]
-    let log = recorder.lock().unwrap().log().clone();
+    let log = recorder.log();
     let kinds: Vec<EventKind> = log.iter().map(|e| e.kind).collect();
     assert!(
         kinds.contains(&EventKind::QuicStart),

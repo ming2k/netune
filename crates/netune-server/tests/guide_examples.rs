@@ -164,6 +164,8 @@ async fn the_guide_timing_table_describes_a_real_exchange() {
             authority: address.to_string(),
         },
         connection: netune_trace::ConnectionInfo::default(),
+        identity: netune_trace::ConnectionIdentity::default(),
+        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: netune_trace::Fidelity::l1(),
         log,
     };

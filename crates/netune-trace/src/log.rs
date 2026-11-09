@@ -10,15 +10,14 @@
 //! contribution is folded into `base_ns`, and `dropped` is incremented —
 //! the loss is always counted and surfaced, never silent.
 
-use serde::{Deserialize, Serialize};
-
 use crate::event::{Event, EventKind};
 
 /// Largest gap one stored event can carry directly: `u32` nanoseconds (4.29 s).
 pub const MAX_DELTA_NS: u64 = u32::MAX as u64;
 
 /// One stored event, delta-encoded against its predecessor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EncodedEvent {
     /// Exchanges on the connection this event belongs to (see [`Event::stream`]).
     pub stream: u32,
@@ -34,8 +33,9 @@ pub struct EncodedEvent {
 /// The log is pure data: it holds no clock and no `Instant`, so it round-trips
 /// through serde unchanged and can be replayed anywhere. Producers hand it
 /// absolute nanosecond offsets ([`Self::push_at`]) or go through
-/// [`crate::Recorder`], which reads the clock once.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// [`crate::TraceCollector`] / [`crate::Ring`], which read the clock once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EventLog {
     /// Maximum number of events retained.
     capacity: usize,
@@ -177,6 +177,54 @@ impl EventLog {
         (0..self.len).map(move |i| self.buf[(self.head + i) % modulus])
     }
 
+    /// Maximum number of events retained.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Merge another log produced against the same origin into this one.
+    ///
+    /// Both logs carry absolute offsets, so the merge is a stable sort by
+    /// `at_ns` followed by a re-encode into this log's capacity. Drop counts are
+    /// inherited: a window that lost events before the merge must not look
+    /// complete afterwards. This is a cold-path operation; the byte path never
+    /// calls it.
+    pub fn merge(&mut self, other: EventLog) {
+        let inherited_drops = self.dropped.saturating_add(other.dropped);
+        if other.is_empty() {
+            self.dropped = inherited_drops;
+            return;
+        }
+
+        let mut events: Vec<Event> = self.iter().chain(other.iter()).collect();
+        events.sort_by_key(|event| event.at_ns);
+
+        let capacity = self.capacity;
+        let mut merged = Self::with_capacity(capacity);
+        for event in events {
+            merged.push_at_stream(event.at_ns, event.stream, event.kind, event.a, event.b);
+        }
+        merged.dropped = inherited_drops.saturating_add(merged.dropped);
+        *self = merged;
+    }
+
+    /// A bounded copy containing connection-level events (`stream == 0`) and
+    /// the events of one exchange.
+    ///
+    /// Used by multiplexed clients to hand a consumer a per-exchange envelope
+    /// without letting another exchange's events leak into the derivation.
+    pub fn for_exchange(&self, stream: u32) -> EventLog {
+        let mut filtered = Self::with_capacity(self.capacity);
+        for event in self
+            .iter()
+            .filter(|event| event.stream == 0 || event.stream == stream)
+        {
+            filtered.push_at_stream(event.at_ns, event.stream, event.kind, event.a, event.b);
+        }
+        filtered.dropped = self.dropped.saturating_add(filtered.dropped);
+        filtered
+    }
+
     /// Number of live events.
     pub fn len(&self) -> usize {
         self.len
@@ -204,7 +252,7 @@ impl EventLog {
     /// The earliest event still in the ring, whatever its kind.
     ///
     /// Used when the origin kind is not yet known — a trace whose direction has not
-    /// been established — and by [`crate::Recorder::with_sink`], which must replay
+    /// been established — and by [`crate::TraceCollector::with_sink`], which must replay
     /// the origin event whether it is `Dispatch` or `IngressDispatch`.
     pub fn first(&self) -> Option<Event> {
         self.iter().next()
@@ -249,6 +297,11 @@ mod tests {
 
     fn kinds(log: &EventLog) -> Vec<(u64, EventKind)> {
         log.iter().map(|e| (e.at_ns, e.kind)).collect()
+    }
+
+    #[test]
+    fn the_encoded_event_stays_compact() {
+        assert_eq!(std::mem::size_of::<EncodedEvent>(), 20);
     }
 
     #[test]
@@ -297,6 +350,57 @@ mod tests {
     }
 
     #[test]
+    fn exchange_filter_keeps_connection_events_and_one_stream() {
+        let mut log = EventLog::with_capacity(16);
+        log.push_at(0, EventKind::Dispatch, 0, 0);
+        log.push_at_stream(100, 1, EventKind::H3StreamStart, 0, 0);
+        log.push_at_stream(200, 2, EventKind::H3StreamStart, 0, 0);
+        log.push_at_stream(300, 1, EventKind::H3HeadComplete, 200, 0);
+        log.push_at_stream(400, 2, EventKind::H3HeadComplete, 201, 0);
+
+        let exchange = log.for_exchange(1);
+        let events: Vec<_> = exchange
+            .iter()
+            .map(|event| (event.stream, event.kind))
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                (0, EventKind::Dispatch),
+                (1, EventKind::H3StreamStart),
+                (1, EventKind::H3HeadComplete),
+            ]
+        );
+    }
+
+    #[test]
+    fn merging_two_logs_keeps_absolute_order_and_drop_counts() {
+        let mut control = EventLog::with_capacity(8);
+        control.push_at(0, EventKind::Dispatch, 0, 0);
+        control.push_at(200, EventKind::TcpStart, 0, 0);
+
+        let mut byte = EventLog::with_capacity(8);
+        byte.push_at(100, EventKind::Read, 10, 0);
+        byte.push_at(300, EventKind::Write, 20, 0);
+
+        control.merge(byte);
+        let kinds: Vec<_> = control
+            .iter()
+            .map(|event| (event.at_ns, event.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (0, EventKind::Dispatch),
+                (100, EventKind::Read),
+                (200, EventKind::TcpStart),
+                (300, EventKind::Write),
+            ]
+        );
+        assert_eq!(control.dropped(), 0);
+    }
+
+    #[test]
     fn ring_evicts_oldest_and_counts_drops() {
         let mut log = EventLog::with_capacity(3);
         for i in 0..5u64 {
@@ -337,6 +441,7 @@ mod tests {
         assert_eq!(log.base_ns(), 10_000_000_000);
     }
 
+    #[cfg(feature = "serde")]
     #[test]
     fn serde_round_trip_preserves_offsets_and_drops() {
         let mut log = EventLog::with_capacity(2);

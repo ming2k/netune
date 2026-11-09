@@ -1,7 +1,7 @@
 //! The listener: accept, admit, trace, dispatch, drain.
 //!
-//! This module is the only place in the workspace that owns a listening socket, and it owns exactly
-//! one (`[INV-SERVER-01]`). Everything it does per connection is ordered, and the order is the design:
+//! This module owns the TCP listener; with the `http3` feature, `crate::h3` owns the peer
+//! QUIC endpoint. Neither is ever reached from `netune` (`[INV-SERVER-01]`). Everything it does per connection is ordered, and the order is the design:
 //!
 //! ```text
 //! accept ─► permit ─► trace origin ─► protocol? ─► serve ─► drain ─► release
@@ -27,9 +27,9 @@
 //! drain possible at all.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use netune_trace::{EventLog, Recorder};
+use netune_trace::{EventLog, Fidelity, TraceCollector};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -54,6 +54,9 @@ pub struct IngressTrace {
     pub exchanges: u32,
     /// The protocol that was served, for an operator that has to tell them apart.
     pub protocol: ServedProtocol,
+    /// What the connection's trace can truthfully answer. HTTP/1.1 owns a byte
+    /// tap (L1); HTTP/2 is a connection-level frame/control trace (L0).
+    pub fidelity: Fidelity,
     /// The recorded events.
     pub log: EventLog,
 }
@@ -65,6 +68,8 @@ pub enum ServedProtocol {
     Http1,
     /// HTTP/2.
     Http2,
+    /// HTTP/3 over QUIC.
+    Http3,
 }
 
 impl ServedProtocol {
@@ -72,6 +77,7 @@ impl ServedProtocol {
         match self {
             Self::Http1 => "http/1.1",
             Self::Http2 => "h2",
+            Self::Http3 => "h3",
         }
     }
 }
@@ -83,6 +89,8 @@ pub enum BindError {
     Bind(std::io::Error),
     /// The configuration is not usable.
     Invalid(&'static str),
+    /// The QUIC transport could not be created.
+    Transport(String),
 }
 
 impl std::fmt::Display for BindError {
@@ -90,6 +98,7 @@ impl std::fmt::Display for BindError {
         match self {
             Self::Bind(error) => write!(f, "could not bind the listener: {error}"),
             Self::Invalid(what) => write!(f, "invalid server configuration: {what}"),
+            Self::Transport(error) => write!(f, "could not create the QUIC listener: {error}"),
         }
     }
 }
@@ -98,7 +107,7 @@ impl std::error::Error for BindError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Bind(error) => Some(error),
-            Self::Invalid(_) => None,
+            Self::Invalid(_) | Self::Transport(_) => None,
         }
     }
 }
@@ -270,9 +279,15 @@ async fn run_connection(
     #[cfg_attr(not(feature = "http2"), allow(unused_variables))]
     drain: tokio::sync::watch::Receiver<bool>,
 ) {
-    // The accept is the trace origin: `Recorder::start_ingress` writes `IngressDispatch` at offset 0,
-    // which is what every ingress derivation anchors on (`[INV-SERVER-02]`).
-    let recorder = Arc::new(Mutex::new(Recorder::start_ingress(config.trace_capacity)));
+    // The accept is the trace origin: `TraceCollector::start_ingress` writes `IngressDispatch` at offset 0,
+    // which is what every ingress derivation anchors on (`[INV-SERVER-02]`). A listener with no
+    // observer has no consumer for that trace, so it records nothing rather than allocating a ring
+    // per connection that is dropped at close.
+    let recorder = if config.trace_sink.is_some() {
+        TraceCollector::start_ingress(config.trace_capacity)
+    } else {
+        TraceCollector::disabled()
+    };
     let local = stream
         .local_addr()
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
@@ -294,7 +309,6 @@ async fn run_connection(
         // A peer that never sends anything gets no protocol and no trace beyond the accept: the
         // connection is closed, which is the whole point of the head bound.
         Err(_) => {
-            let mut recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
             recorder.mark(
                 netune_trace::EventKind::Error,
                 crate::h1::ERROR_HEAD_TIMEOUT,
@@ -311,16 +325,13 @@ async fn run_connection(
         protocol,
         Arc::clone(&config),
         handler,
-        Arc::clone(&recorder),
+        recorder.clone(),
         false,
         drain,
     )
     .await;
 
-    {
-        let recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
-        hand_over(&config, peer, local, protocol, exchanges, &recorder);
-    }
+    hand_over(&config, peer, local, protocol, exchanges, &recorder);
     drop(permit);
 }
 
@@ -336,7 +347,7 @@ async fn run_tls_connection(
     local: SocketAddr,
     config: Arc<ServerConfig>,
     handler: Arc<dyn Handler>,
-    recorder: Arc<Mutex<Recorder>>,
+    recorder: TraceCollector,
     #[cfg_attr(not(feature = "http2"), allow(unused_variables))]
     drain: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -348,7 +359,6 @@ async fn run_tls_connection(
         match crate::tls::accept(stream, config.head_timeout, move |name| selected(name)).await {
             Ok(negotiated) => negotiated,
             Err(error) => {
-                let mut recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
                 recorder.mark(
                     netune_trace::EventKind::Error,
                     crate::h1::ERROR_TLS_HANDSHAKE,
@@ -361,16 +371,13 @@ async fn run_tls_connection(
         };
 
     let (mut stream, negotiated) = negotiated;
-    {
-        // The handshake's end is a recorded fact, so a derivation can separate "the TLS identity cost
-        // this" from "the client was slow to speak".
-        let mut recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
-        recorder.mark(
-            netune_trace::EventKind::IngressTlsEnd,
-            u32::from(negotiated == crate::tls::Negotiated::Http2),
-            0,
-        );
-    }
+    // The handshake's end is a recorded fact, so a derivation can separate "the TLS identity cost
+    // this" from "the client was slow to speak".
+    recorder.mark(
+        netune_trace::EventKind::IngressTlsEnd,
+        u32::from(negotiated == crate::tls::Negotiated::Http2),
+        0,
+    );
 
     let protocol = match negotiated {
         crate::tls::Negotiated::Http2 => ServedProtocol::Http2,
@@ -380,6 +387,7 @@ async fn run_tls_connection(
     let serves = match protocol {
         ServedProtocol::Http2 => config.protocols.http2,
         ServedProtocol::Http1 => config.protocols.http1,
+        ServedProtocol::Http3 => false,
     };
     if !serves {
         // A negotiated protocol the listener does not serve is refused inside the session, so the peer
@@ -390,7 +398,6 @@ async fn run_tls_connection(
             config.write_timeout,
         )
         .await;
-        let recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
         hand_over(&config, peer, local, protocol, 0, &recorder);
         return;
     }
@@ -402,13 +409,12 @@ async fn run_tls_connection(
         protocol,
         Arc::clone(&config),
         handler,
-        Arc::clone(&recorder),
+        recorder.clone(),
         false,
         drain,
     )
     .await;
 
-    let recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
     hand_over(&config, peer, local, protocol, exchanges, &recorder);
 }
 
@@ -419,7 +425,7 @@ async fn serve_selected<S>(
     protocol: ServedProtocol,
     config: Arc<ServerConfig>,
     handler: Arc<dyn Handler>,
-    recorder: Arc<Mutex<Recorder>>,
+    recorder: TraceCollector,
     #[cfg_attr(not(feature = "http2"), allow(unused_variables))] preface_already_read: bool,
     #[cfg_attr(not(feature = "http2"), allow(unused_variables))]
     drain: tokio::sync::watch::Receiver<bool>,
@@ -447,7 +453,7 @@ where
                 stream,
                 Arc::clone(&config),
                 handler,
-                Arc::clone(&recorder),
+                recorder.clone(),
                 preface_already_read,
                 wait_for_drain(drain),
             )
@@ -470,10 +476,13 @@ where
         }
         ServedProtocol::Http1 => {
             let exchanges =
-                crate::h1::serve_http1(stream, Arc::clone(&config), handler, Arc::clone(&recorder))
+                crate::h1::serve_http1(stream, Arc::clone(&config), handler, recorder.clone())
                     .await;
             (exchanges, ServedProtocol::Http1)
         }
+        // HTTP/3 never enters the TCP dispatcher; this arm keeps the protocol
+        // enum exhaustive without pretending a QUIC connection is a byte stream.
+        ServedProtocol::Http3 => (0, ServedProtocol::Http3),
     }
 }
 
@@ -481,13 +490,13 @@ where
 ///
 /// Before the permit is released: the observer runs on this connection's task, so the recorder is
 /// quiescent and the ring is complete.
-fn hand_over(
+pub(crate) fn hand_over(
     config: &ServerConfig,
     peer: SocketAddr,
     local: SocketAddr,
     protocol: ServedProtocol,
     exchanges: u32,
-    recorder: &Recorder,
+    recorder: &TraceCollector,
 ) {
     if let Some(observer) = &config.trace_sink {
         observer.connection_finished(IngressTrace {
@@ -495,16 +504,20 @@ fn hand_over(
             local,
             exchanges,
             protocol,
-            log: recorder.log().clone(),
+            fidelity: match protocol {
+                ServedProtocol::Http1 => Fidelity::l1(),
+                ServedProtocol::Http2 | ServedProtocol::Http3 => Fidelity::l0(),
+            },
+            log: recorder.log(),
         });
     }
 }
 
 /// How many exchanges a connection's recorder witnessed.
 #[cfg(feature = "http2")]
-fn exchange_count(recorder: &Arc<Mutex<Recorder>>) -> u32 {
-    let recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
-    netune_trace::exchange_count(recorder.log()) as u32
+fn exchange_count(recorder: &TraceCollector) -> u32 {
+    let log = recorder.log();
+    netune_trace::exchange_count(&log) as u32
 }
 
 /// Resolve when the listener starts draining.
@@ -568,6 +581,7 @@ mod tests {
             local: SocketAddr::from(([127, 0, 0, 1], 2)),
             exchanges: 0,
             protocol: ServedProtocol::Http1,
+            fidelity: Fidelity::l1(),
             log: EventLog::with_capacity(1),
         });
     }

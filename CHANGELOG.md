@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10] - 2026-11-09
+
+### Added
+
+- **Tiered observation.** `NoTap`, `Counters`, and `Ring` are typed taps owned
+  by `TimedIo`; the hot path no longer shares a `Recorder` behind a mutex.
+  `TraceCollector` is the only public cold-path handle, and fidelity is reported
+  by the producing tap. H2/H3 remain connection-level L0 traces.
+- **Typed connection identity and profile registries.** `ConnectionPlan` resolves
+  H1/H2/QUIC names before connect; H2 connection and request profiles are split;
+  named QUIC profiles resolve through one registry.
+- **Controlled H3 request-header order.** The vendored `h3` fork applies ordered
+  pseudo-headers and regular fields before QPACK encoding.
+- **Streaming H3 request bodies and trailers.** `H3Client::open_request` returns
+  `H3RequestBody`; buffered `send` composes it rather than opening a second path.
+- **Controlled dynamic QPACK and typed H3 SETTINGS.** Request/response heads and
+  trailers use the fork's encoder/decoder, acknowledge decoded sections, wait for
+  blocked insertions, and expose enforceable QPACK capacity/blocked-stream
+  profiles. The default remains stateless QPACK.
+- **HTTP/3 ingress.** `H3Server` is a separate QUIC listener with the same
+  handler, admission, timeout, body-ceiling, trace and drain model as the TCP
+  listener. H3 exchange ids are distinct from wire stream ids because stream `0`
+  is a valid request stream.
+- **Deterministic CI coverage.** The vendored `h3` suite runs in the
+  all-features job; architecture and documentation gates cover the new H3 edges
+  and ADRs; the zero-cost instruction gate remains `4` (`NoTap`) and `9`
+  (`Counters`) instructions.
+
+### Changed
+
+- HTTP/3 connection identity is the resolved QUIC profile plus a typed,
+  connection-fixed SETTINGS profile name.
+- The H2/H3 trace path reports protocol L0 instead of a synthetic syscall
+  timeline.
+- `H3Client::send` returns after the response head; `execute` remains the
+  bounded buffering convenience.
+
+### Fixed
+
+- HTTP/3 trailers now finish the send side, so a peer no longer waits for
+  END_STREAM after receiving them.
+- QPACK instruction parsing retains partial instructions across QUIC chunks and
+  bounds the retained buffer.
+- H3 ingress refuses a single malformed or over-large request head without
+  tearing down the QUIC connection's other streams.
+
 ## [0.0.9] - 2026-11-08
 
 ### Fixed

@@ -1,16 +1,13 @@
 //! Tap overhead and fidelity, measured rather than assumed.
 //!
-//! ADR-0001's P0 gate has two empirical criteria this file can close hermetically:
+//! These are diagnostic measurements, not gates. `docs/dev/testing.md` §2
+//! forbids wall-clock assertions: a loaded CI host cannot distinguish a tap
+//! regression from scheduler noise. The deterministic zero-cost gate is the
+//! `size_of` assertion on `TimedIo<I, NoTap>` and the fixed-width `Counters`
+//! test; the numbers printed here are for a human comparing a changed line.
 //!
-//! 1. **Overhead** — recording an event must cost microseconds, not milliseconds,
-//!    or the tap changes the thing it measures.
-//! 2. **Fidelity** — a read event's timestamp must mark when the bytes *arrived*,
-//!    not when the read was issued. A tap that timestamps the wrong instant
-//!    produces confident nonsense.
-//!
-//! The numbers are printed, so a regression shows up as a changed line, not just
-//! a red test. The assertions are set well above the measured cost so a loaded
-//! machine does not flake; the printed value is the real gate.
+//! The fidelity test keeps a wall clock only as an *external reference* for
+//! "did the tap stamp arrival rather than issue?" — it is not a latency budget.
 //!
 //! What this file deliberately does *not* do: compare against `tcpdump`. That
 //! needs a privileged capture and belongs in the CI cross-check job, not here.
@@ -24,12 +21,9 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use netune::TimedIo;
-use netune_trace::{EventKind, Recorder, TimeSource};
+use netune_trace::{EventKind, Ring, Tap, TimeSource, TraceCollector};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-
-/// ADR-0001's per-event budget.
-const PER_EVENT_BUDGET: Duration = Duration::from_micros(20);
 
 async fn loopback_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -44,17 +38,17 @@ async fn loopback_pair() -> (TcpStream, TcpStream) {
 }
 
 #[test]
-fn recording_an_event_costs_microseconds() {
+fn report_event_recording_cost() {
     const EVENTS: usize = 200_000;
-    let mut recorder = Recorder::start(EVENTS);
+    let mut ring = Ring::new(Instant::now(), EVENTS, None);
     let mut samples: Vec<Duration> = Vec::with_capacity(EVENTS);
     let started = Instant::now();
     for index in 0..EVENTS {
         let before = Instant::now();
         if index % 2 == 0 {
-            recorder.read(1448, TimeSource::Syscall);
+            ring.read(1448, TimeSource::Syscall);
         } else {
-            recorder.wrote(1448);
+            ring.wrote(1448);
         }
         samples.push(before.elapsed());
     }
@@ -63,16 +57,11 @@ fn recording_an_event_costs_microseconds() {
     let at = |per_mille: usize| samples[(EVENTS - 1) * per_mille / 1000];
     let (p50, p99, p999, worst) = (at(500), at(990), at(999), samples[EVENTS - 1]);
     println!(
-        "recorder: {EVENTS} events in {total:?} → mean {:?}, p50 {p50:?}, p99 {p99:?}, \
-         p99.9 {p999:?}, max {worst:?} (budget {PER_EVENT_BUDGET:?})",
+        "ring: {EVENTS} events in {total:?} → mean {:?}, p50 {p50:?}, p99 {p99:?}, \
+         p99.9 {p999:?}, max {worst:?}",
         total / EVENTS as u32
     );
-    // The budget governs the cost of *recording an event*. The maximum is an
-    // amortized-allocation outlier (the ring doubles ~18 times over 200 000
-    // pushes); the tail percentiles are what a stream actually pays.
-    assert!(p99 < Duration::from_micros(5), "p99 {p99:?}");
-    assert!(p999 < PER_EVENT_BUDGET, "p99.9 {p999:?}");
-    assert_eq!(recorder.log().len(), EVENTS);
+    assert_eq!(ring.finish().len(), EVENTS);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -93,8 +82,8 @@ async fn the_tap_timestamps_arrival_not_issue() {
     const TOLERANCE: Duration = Duration::from_millis(12);
 
     let (client, mut server) = loopback_pair().await;
-    let recorder = Arc::new(Mutex::new(Recorder::start(64)));
-    let origin = recorder.lock().expect("recorder").origin();
+    let recorder = TraceCollector::start(64);
+    let origin = recorder.origin();
     let sent_at = Arc::new(Mutex::new(None));
     let sender_sent_at = Arc::clone(&sent_at);
     let sender = tokio::spawn(async move {
@@ -104,15 +93,15 @@ async fn the_tap_timestamps_arrival_not_issue() {
         server.flush().await.expect("flush");
     });
 
-    let mut timed = TimedIo::new(client, Arc::clone(&recorder));
+    let mut timed = TimedIo::new(client, Ring::new(origin, 64, None));
     let mut buffer = [0u8; 32];
     let read = timed.read(&mut buffer).await.expect("read");
     assert_eq!(&buffer[..read], b"burst");
     sender.await.expect("join");
+    let (_, tap) = timed.into_parts();
+    recorder.merge(tap.finish());
 
     let event = recorder
-        .lock()
-        .expect("recorder")
         .log()
         .first_of(EventKind::Read)
         .expect("read event");
@@ -207,8 +196,12 @@ async fn the_tap_adds_no_delay_to_the_data_path() {
     const OPERATIONS: usize = 20_000;
     const WRITE: usize = 1448;
 
-    let recorder = Arc::new(Mutex::new(Recorder::start(2 * OPERATIONS + 64)));
-    let mut tapped = TimedIo::new(NullSink::new(), Arc::clone(&recorder));
+    let recorder = TraceCollector::start(2 * OPERATIONS + 64);
+    let origin = recorder.origin();
+    let mut tapped = TimedIo::new(
+        NullSink::new(),
+        Ring::new(origin, 2 * OPERATIONS + 64, None),
+    );
 
     let mut tapped_samples = Vec::with_capacity(OPERATIONS);
     for _ in 0..OPERATIONS {
@@ -233,32 +226,28 @@ async fn the_tap_adds_no_delay_to_the_data_path() {
     let added = tapped_median.saturating_sub(plain_median);
     println!(
         "data path (median of {OPERATIONS} writes through an in-memory sink): \
-         plain {plain_median:?}, tapped {tapped_median:?}, added {added:?} \
-         (two events per write, budget {PER_EVENT_BUDGET:?} each)"
+         plain {plain_median:?}, tapped {tapped_median:?}, added {added:?}"
     );
 
-    // The tap records two events per write (a `Write` and its byte count), so the budget
-    // for one operation is two events.
-    let budget = PER_EVENT_BUDGET * 2;
-    assert!(
-        added < budget,
-        "the tap added {added:?} per write, above the {budget:?} budget for two events"
-    );
-
+    // `TimedIo` records one `Write` event per successful poll. The sink accepts
+    // the whole buffer, so the event count is exactly one per operation.
     // The sink really was written through the tap, so a passing measurement cannot be an
     // artefact of nothing happening.
-    assert_eq!(tapped.into_inner().written, OPERATIONS * WRITE);
+    let (tapped_sink, tap) = tapped.into_parts();
+    assert_eq!(tapped_sink.written, OPERATIONS * WRITE);
     assert_eq!(plain.written, OPERATIONS * WRITE);
-    assert!(recorder.lock().expect("recorder").log().len() > OPERATIONS);
+    let record_count = tap.finish().len();
+    assert_eq!(record_count, OPERATIONS);
 
     // A read through the tap is measured the same way, so a regression in the read path is
     // not hidden behind the write path passing.
-    let recorder = Arc::new(Mutex::new(Recorder::start(OPERATIONS + 64)));
+    let recorder = TraceCollector::start(OPERATIONS + 64);
+    let origin = recorder.origin();
     let mut reading = TimedIo::new(
         FixedSource {
             remaining: OPERATIONS * WRITE,
         },
-        Arc::clone(&recorder),
+        Ring::new(origin, OPERATIONS + 64, None),
     );
     let mut buffer = [0u8; WRITE];
     let mut read_samples = Vec::with_capacity(OPERATIONS);
@@ -271,8 +260,4 @@ async fn the_tap_adds_no_delay_to_the_data_path() {
     read_samples.sort_unstable();
     let read_median = median(&read_samples);
     println!("data path: median read {read_median:?} through the tap");
-    assert!(
-        read_median < budget,
-        "a tapped read cost {read_median:?}, above the {budget:?} budget"
-    );
 }

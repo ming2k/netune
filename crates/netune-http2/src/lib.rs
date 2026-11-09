@@ -44,8 +44,9 @@
 //! # Observability
 //!
 //! This crate records nothing itself: it is a codec, and a codec that read a clock would break
-//! `INV-TRACE-01`. The server role accepts a `Recorder` because a multiplexed connection's facts
-//! must carry their stream identity, and only the layer that knows the stream can attach it.
+//! `INV-TRACE-01`. The server role accepts a `SessionObserver` because a multiplexed connection's
+//! facts must carry their stream identity, and only the layer that knows the stream can attach it;
+//! the orchestrator adapts those facts into its `TraceCollector`.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -67,7 +68,7 @@ pub use connection::{
     MIN_MAX_FRAME_SIZE, PeerSettings, Role, error_code,
 };
 pub use error::H2Error;
-pub use fingerprint::{H2Fingerprint, PseudoHeaderOrder};
+pub use fingerprint::{H2ConnectionProfile, H2Fingerprint, H2RequestProfile, PseudoHeaderOrder};
 pub use frame::{
     FRAME_CONTINUATION, FRAME_DATA, FRAME_GOAWAY, FRAME_HEADERS, FRAME_PING, FRAME_PRIORITY,
     FRAME_PUSH_PROMISE, FRAME_RST_STREAM, FRAME_SETTINGS, FRAME_WINDOW_UPDATE, Frame, FrameHeader,

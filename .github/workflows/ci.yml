@@ -49,6 +49,15 @@ jobs:
       # in both configurations.
       - run: cargo nextest run
         if: matrix.features == ''
+      # Additive capabilities must remain optional: the trace crate builds and
+      # tests without its default `ja4` feature, and no observation/identity
+      # default changes when it is absent.
+      - run: cargo nextest run -p netune-trace --no-default-features
+        if: matrix.features == ''
+      - run: cargo nextest run -p netune-trace --no-default-features --features ja4
+        if: matrix.features == ''
+      - run: cargo nextest run -p netune-trace --no-default-features --features serde
+        if: matrix.features == ''
       - run: cargo nextest run -p netune-probe --features inject
         if: matrix.features == 'netune-probe/inject'
       # The `all-features` posture is where opt-in code is *executed*, not merely
@@ -57,6 +66,11 @@ jobs:
       # jobs compile it without executing. Running the whole workspace with
       # every feature on is the only gate that proves those paths work.
       - run: cargo nextest run --all-features
+        if: matrix.features == 'all-features'
+      # The controlled `h3` fork is not a workspace member, so the workspace
+      # suite cannot exercise its QPACK/stream driving directly. Run its own
+      # unit/doc tests whenever the all-features posture is tested.
+      - run: cargo test --manifest-path vendor/h3/Cargo.toml
         if: matrix.features == 'all-features'
 
   supply-chain:
@@ -94,6 +108,16 @@ jobs:
             exit 1
           fi
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Deterministic observation-cost gate. The baseline is generated in the
+      # same job, then the second run fails on any instruction-count regression:
+      # no wall-clock tolerance, no "load average" excuse.
+      - name: Zero-cost instruction gate (INV-TRACE-04)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+          cargo install iai-callgrind-runner --version 0.16.1
+          cargo bench -p netune --bench zero_cost -- --save-baseline=ci
+          cargo bench -p netune --bench zero_cost -- --baseline=ci --callgrind-limits='ir=0%'
       # Both feature postures are checked: `--all-features` proves the opt-in
       # paths compile, `--no-default-features` proves the codecs are genuinely
       # optional rather than merely gated in name.

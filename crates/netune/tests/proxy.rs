@@ -13,7 +13,7 @@ use http::Method;
 use netune::{
     Client, ClientConfig, Pool, Proxy, ProxyConnector, RequestHead, Target, TcpConnector,
 };
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -135,17 +135,17 @@ async fn bind() -> (TcpListener, String) {
     (listener, address)
 }
 
-async fn fetch_through(proxy: Proxy, origin_address: &str) -> (String, Arc<Mutex<Recorder>>) {
+async fn fetch_through(proxy: Proxy, origin_address: &str) -> (String, TraceCollector) {
     let client = Client::new(
         ProxyConnector::new(TcpConnector::new(), proxy),
         Pool::default(),
         ClientConfig::default(),
     );
-    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
+    let recorder = TraceCollector::start(1024);
     let mut response = client
-        .send(
+        .send_traced(
             &Target::plain(origin_address),
-            Arc::clone(&recorder),
+            recorder.clone(),
             RequestHead::new(Method::GET, "/through-proxy"),
             None,
         )
@@ -175,13 +175,7 @@ async fn an_http_connect_tunnel_carries_the_request_and_is_traced() {
         "{:?}",
         seen[0]
     );
-    let kinds: Vec<EventKind> = recorder
-        .lock()
-        .expect("recorder")
-        .log()
-        .iter()
-        .map(|event| event.kind)
-        .collect();
+    let kinds: Vec<EventKind> = recorder.log().iter().map(|event| event.kind).collect();
     assert!(kinds.contains(&EventKind::ProxyTunnel), "tunnel traced");
 
     let _ = (origin_task.await, proxy_task.await);
@@ -222,13 +216,7 @@ async fn a_socks5_tunnel_carries_the_request() {
     let (body, recorder) = fetch_through(proxy, &origin_address).await;
     assert_eq!(body, "via socks");
     assert_eq!(seen.lock().expect("seen").as_slice(), &[origin_address]);
-    let kinds: Vec<EventKind> = recorder
-        .lock()
-        .expect("recorder")
-        .log()
-        .iter()
-        .map(|event| event.kind)
-        .collect();
+    let kinds: Vec<EventKind> = recorder.log().iter().map(|event| event.kind).collect();
     assert!(kinds.contains(&EventKind::ProxyTunnel));
     let _ = (origin_task.await, proxy_task.await);
 }
@@ -272,9 +260,9 @@ async fn a_refused_tunnel_is_an_error_not_a_truncated_stream() {
         ClientConfig::default(),
     );
     let error = client
-        .send(
+        .send_traced(
             &Target::plain("127.0.0.1:9"),
-            Arc::new(Mutex::new(Recorder::start(64))),
+            TraceCollector::start(64),
             RequestHead::new(Method::GET, "/"),
             None,
         )

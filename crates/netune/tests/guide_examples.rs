@@ -7,7 +7,6 @@
 //! the network endpoint) and *executes* it against a local mock, so a guide
 //! that drifts from the API fails CI instead of lying to readers.
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
@@ -15,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use netune::{Client, ClientConfig, Pool, Target, TcpConnector, WsMessage};
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 use netune_ws::{Frame, FrameDecoder, FrameEncoder, Role, compute_accept_key};
 
 /// Minimal origin mock: completes the upgrade, sends `scripted` frames, and
@@ -144,12 +143,12 @@ async fn guide_trace_what_happened() {
         AttemptRef, ConnectionInfo, EndpointRef, Fidelity, RequestTrace, TraceId, derive,
     };
 
-    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
+    let recorder = TraceCollector::start(1024);
     let mut ws = client
         .connect_ws_traced(
             &target,
             "/v1/stream",
-            Arc::clone(&recorder),
+            recorder.clone(),
             netune::WsHandshake::default(),
         )
         .await
@@ -159,7 +158,7 @@ async fn guide_trace_what_happened() {
         .await
         .expect("close");
 
-    let log = recorder.lock().unwrap().log().clone();
+    let log = recorder.log();
     let trace = RequestTrace {
         id: TraceId::new("guide"),
         attempt: AttemptRef {
@@ -173,6 +172,8 @@ async fn guide_trace_what_happened() {
             authority: format!("127.0.0.1:{port}"),
         },
         connection: ConnectionInfo::default(),
+        identity: netune_trace::ConnectionIdentity::default(),
+        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: Fidelity::l1(),
         log,
     };

@@ -28,8 +28,8 @@ crates are distributed by git tag, not from a registry:
 
 ```toml
 [dependencies]
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.9" }
-netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.9" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.10" }
+netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.10" }
 http = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
@@ -42,9 +42,8 @@ Create `src/main.rs` with the following code:
 
 ```rust,no_run
 use http::Method;
-use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector};
-use netune_trace::{Recorder, derive};
-use std::sync::{Arc, Mutex};
+use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TraceConfig};
+use netune_trace::derive;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,12 +57,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target = Target::plain("127.0.0.1:8080");
     let head = RequestHead::new(Method::GET, "/health");
 
-    // 3. An attempt recorder with a bounded event ring.
-    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
-
-    // 4. Send the request and consume the response body.
+    // 3. Send a traced request with a bounded event ring, then consume the body.
     println!("Sending request to {}...", target.authority);
-    let mut response = client.send(&target, Arc::clone(&recorder), head, None).await?;
+    let mut response = client
+        .request_traced(&target, head, None, TraceConfig::default())
+        .await?;
     let body = response.body.read_to_end().await?;
     println!("Response status: {}", response.head.status);
     println!("Response bytes: {}", body.len());

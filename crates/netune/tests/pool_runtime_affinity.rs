@@ -20,11 +20,10 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector};
-use netune_trace::Recorder;
+use netune_trace::TraceCollector;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -55,10 +54,10 @@ async fn serve(listener: TcpListener) {
 }
 
 async fn one_request(client: &Client<TcpConnector>, target: &Target) -> u16 {
-    let recorder = Arc::new(Mutex::new(Recorder::start(64)));
+    let recorder = TraceCollector::start(64);
     let head = RequestHead::new(http::Method::GET, "/");
     let mut response = client
-        .send(target, recorder, head, None)
+        .send_traced(target, recorder, head, None)
         .await
         .expect("request must succeed");
     let mut body = Vec::new();

@@ -21,14 +21,13 @@
 //! and the first body byte arrived in one flush, because then the frame anchor
 //! was compressed by the transport and the number would flatter the origin.
 
-use serde::{Deserialize, Serialize};
-
 use crate::event::EventKind;
 use crate::trace::RequestTrace;
 use crate::verdict::{Reading, Reason};
 
 /// Everything derivable from a trace.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DerivedTimings {
     /// Name resolution, on a connection that needed one.
     pub dns_us: Reading<u64>,
@@ -278,6 +277,8 @@ mod tests {
                 authority: "example.invalid:443".into(),
             },
             connection: ConnectionInfo::default(),
+            identity: crate::ConnectionIdentity::default(),
+            schema_version: crate::TRACE_SCHEMA_VERSION,
             fidelity: Fidelity::l2(),
             log,
         }

@@ -105,6 +105,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bit-vec"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -271,6 +280,27 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+
+[[package]]
+name = "derive_more"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d751e9e49156b02b44f9c1815bcb94b984cdcc4396ecc32521c739452808b134"
+dependencies = [
+ "derive_more-impl",
+]
+
+[[package]]
+name = "derive_more-impl"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "displaydoc"
@@ -448,8 +478,6 @@ dependencies = [
 [[package]]
 name = "h3"
 version = "0.0.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be"
 dependencies = [
  "bytes",
  "fastrand",
@@ -544,6 +572,42 @@ dependencies = [
  "hyper",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "iai-callgrind"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b1e4910d3a9137442723dfb772c32dc10674c4181ca078d2fd227cd5dce9db0"
+dependencies = [
+ "bincode",
+ "derive_more",
+ "iai-callgrind-macros",
+ "iai-callgrind-runner",
+]
+
+[[package]]
+name = "iai-callgrind-macros"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d03775318d3f9f01b39ac6612b01464006dc397a654a89dd57df2fd34fb68c3"
+dependencies = [
+ "derive_more",
+ "proc-macro-error2",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "iai-callgrind-runner"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b74c9743c00c3bca4aaffc69c87cae56837796cd362438daf354a3f785788c68"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -676,13 +740,14 @@ dependencies = [
 
 [[package]]
 name = "netune"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "base64",
  "brotli",
  "bytes",
  "flate2",
  "http",
+ "iai-callgrind",
  "libc",
  "netune-egress",
  "netune-http1",
@@ -702,11 +767,11 @@ dependencies = [
 
 [[package]]
 name = "netune-egress"
-version = "0.0.9"
+version = "0.0.10"
 
 [[package]]
 name = "netune-http1"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "bytes",
  "http",
@@ -719,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http2"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "bytes",
  "http",
@@ -728,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http3"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "bytes",
  "h3",
@@ -745,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "netune-io"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "netune-trace",
  "tokio",
@@ -753,14 +818,14 @@ dependencies = [
 
 [[package]]
 name = "netune-probe"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "netune-quic"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "bytes",
  "libc",
@@ -779,14 +844,16 @@ dependencies = [
 
 [[package]]
 name = "netune-server"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "bytes",
  "http",
  "netune",
  "netune-http1",
  "netune-http2",
+ "netune-http3",
  "netune-io",
+ "netune-quic",
  "netune-trace",
  "rcgen",
  "rustls",
@@ -796,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "netune-trace"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -804,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "netune-ws"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "base64",
  "bytes",
@@ -903,6 +970,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "proc-macro-error-attr2"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96de42df36bb9bba5542fe9f1a054b8cc87e172759a1868aa05c1f3acc89dfc5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
+name = "proc-macro-error2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802"
+dependencies = [
+ "proc-macro-error-attr2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1082,6 +1171,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
+name = "rustc_version"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+dependencies = [
+ "semver",
+]
+
+[[package]]
 name = "rusticata-macros"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1212,6 +1310,12 @@ dependencies = [
  "core-foundation-sys",
  "libc",
 ]
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"

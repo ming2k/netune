@@ -29,9 +29,7 @@ production:
 is selected per request through the target:
 
 ```rust,no_run
-use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TlsRouterConnector};
-use netune_trace::Recorder;
-use std::sync::{Arc, Mutex};
+use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TlsRouterConnector, TraceConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,10 +41,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target = Target::tls("api.openai.com:443", "api.openai.com")
         .with_tls_profile("codex-reqwest");
 
-    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
     let head = RequestHead::new(http::Method::GET, "/v1/models");
 
-    let mut response = client.send(&target, recorder, head, None).await?;
+    let mut response = client
+        .request_traced(&target, head, None, TraceConfig::default())
+        .await?;
     let _ = response.body.read_to_end().await?;
     Ok(())
 }

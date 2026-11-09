@@ -32,10 +32,10 @@
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 
@@ -118,7 +118,7 @@ pub trait DatagramConnector: Send + Sync {
     fn connect<'a>(
         &'a self,
         authority: &'a str,
-        recorder: &'a Arc<Mutex<Recorder>>,
+        recorder: &'a TraceCollector,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<EstablishedDatagrams, NetError>> + Send + 'a>,
     >;
@@ -253,22 +253,16 @@ impl<R: DnsResolver> DatagramConnector for UdpConnector<R> {
     fn connect<'a>(
         &'a self,
         authority: &'a str,
-        recorder: &'a Arc<Mutex<Recorder>>,
+        recorder: &'a TraceCollector,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<EstablishedDatagrams, NetError>> + Send + 'a>,
     > {
         Box::pin(async move {
             let (host, port) = split_datagram_authority(authority)?;
 
-            {
-                let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-                recorder.mark(EventKind::DnsStart, 0, 0);
-            }
+            recorder.mark(EventKind::DnsStart, 0, 0);
             let address = self.resolve_one(host, port).await?;
-            {
-                let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-                recorder.mark(EventKind::DnsEnd, 1, 0);
-            }
+            recorder.mark(EventKind::DnsEnd, 1, 0);
 
             let socket = open_connected(address, &self.socket_config)
                 .await
@@ -276,10 +270,7 @@ impl<R: DnsResolver> DatagramConnector for UdpConnector<R> {
             let local_port = socket.local_addr().ok().map(|address| address.port());
             let max_datagram_size = max_datagram_size(&socket);
 
-            {
-                let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-                recorder.mark(EventKind::UdpOpen, 1, 0);
-            }
+            recorder.mark(EventKind::UdpOpen, 1, 0);
 
             Ok(EstablishedDatagrams {
                 datagrams: Box::new(ConnectedUdp {
@@ -379,7 +370,7 @@ impl<C: Connector> DatagramConnector for Socks5DatagramConnector<C> {
     fn connect<'a>(
         &'a self,
         authority: &'a str,
-        recorder: &'a Arc<Mutex<Recorder>>,
+        recorder: &'a TraceCollector,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<EstablishedDatagrams, NetError>> + Send + 'a>,
     > {
@@ -392,10 +383,7 @@ impl<C: Connector> DatagramConnector for Socks5DatagramConnector<C> {
             let mut control = established.stream;
 
             let bound = socks5_udp_associate(&mut control).await?;
-            {
-                let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-                recorder.mark(EventKind::ProxyTunnel, 0, 0);
-            }
+            recorder.mark(EventKind::ProxyTunnel, 0, 0);
 
             // The local socket binds a wildcard address, not the reply's: a
             // proxy usually answers with its *own* (often public) address, which
@@ -414,10 +402,7 @@ impl<C: Connector> DatagramConnector for Socks5DatagramConnector<C> {
             let peer = relay_bound_peer(bound, &self.proxy)?;
             let max_datagram_size = max_datagram_size(&relay) - SOCKS5_UDP_HEADER_CEILING;
 
-            {
-                let mut recorder = recorder.lock().unwrap_or_else(|e| e.into_inner());
-                recorder.mark(EventKind::UdpOpen, 1, 0);
-            }
+            recorder.mark(EventKind::UdpOpen, 1, 0);
 
             Ok(EstablishedDatagrams {
                 datagrams: Box::new(Socks5AssociatedUdp {
@@ -780,16 +765,16 @@ mod tests {
     #[tokio::test]
     async fn inv_udp_01_confinement_precedes_the_datagram_socket() {
         let connector = UdpConnector::<SystemResolver>::strict_public();
-        let recorder = Arc::new(Mutex::new(Recorder::start(8)));
+        let recorder = TraceCollector::start(8);
         let error = connector
             .connect("127.0.0.1:9", &recorder)
             .await
             .expect_err("must refuse loopback");
         assert_eq!(error.class(), "security");
         // Nothing may claim a session was opened.
-        let log = recorder.lock().unwrap_or_else(|e| e.into_inner());
         assert!(
-            !log.log()
+            !recorder
+                .log()
                 .iter()
                 .any(|event| event.kind == EventKind::UdpOpen),
             "a refused session must not record UdpOpen"
@@ -801,7 +786,7 @@ mod tests {
         let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
         let authority = server.local_addr().expect("addr").to_string();
         let connector = UdpConnector::<SystemResolver>::new();
-        let recorder = Arc::new(Mutex::new(Recorder::start(8)));
+        let recorder = TraceCollector::start(8);
 
         let established = connector
             .connect(&authority, &recorder)
@@ -809,8 +794,7 @@ mod tests {
             .expect("connect");
         assert!(established.local_port.is_some());
 
-        let log = recorder.lock().unwrap_or_else(|e| e.into_inner());
-        let kinds: Vec<EventKind> = log.log().iter().map(|event| event.kind).collect();
+        let kinds: Vec<EventKind> = recorder.log().iter().map(|event| event.kind).collect();
         assert!(kinds.contains(&EventKind::DnsStart));
         assert!(kinds.contains(&EventKind::UdpOpen));
         // A datagram session has no handshake, so it must not claim one.

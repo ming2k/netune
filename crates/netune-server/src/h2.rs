@@ -21,7 +21,7 @@
 //! synthesises the missing one on each side so exactly one field answers "which authority is this",
 //! which is the field a router keys on.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use netune_http1::{BodyKind, IncomingRequest, TargetForm};
@@ -29,7 +29,7 @@ use netune_http2::server::{
     H2Handler, H2Request, H2Response, H2ResponseBody, ResponseFuture as H2ResponseFuture,
     ServerSession, ServerSessionConfig, SessionEnd, SessionObserver, StreamEvent,
 };
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 use tokio::sync::mpsc;
 
 use crate::body::{BodySource, RequestBody};
@@ -42,7 +42,7 @@ pub(crate) async fn serve_http2<S>(
     stream: S,
     config: Arc<ServerConfig>,
     handler: Arc<dyn Handler>,
-    recorder: Arc<Mutex<Recorder>>,
+    recorder: TraceCollector,
     preface_already_read: bool,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> SessionEnd
@@ -59,7 +59,7 @@ where
         write_timeout: config.write_timeout,
     };
     let observer = Arc::new(TraceObserver {
-        recorder: Arc::clone(&recorder),
+        recorder: recorder.clone(),
     });
     let adapter = Arc::new(HandlerAdapter {
         handler,
@@ -74,14 +74,14 @@ where
 struct HandlerAdapter {
     handler: Arc<dyn Handler>,
     config: Arc<ServerConfig>,
-    recorder: Arc<Mutex<Recorder>>,
+    recorder: TraceCollector,
 }
 
 impl H2Handler for HandlerAdapter {
     fn handle(&self, request: H2Request) -> H2ResponseFuture<'_> {
         let handler = Arc::clone(&self.handler);
         let config = Arc::clone(&self.config);
-        let recorder = Arc::clone(&self.recorder);
+        let recorder = self.recorder.clone();
         Box::pin(async move { self.answer(handler, config, recorder, request).await })
     }
 }
@@ -91,7 +91,7 @@ impl HandlerAdapter {
         &self,
         handler: Arc<dyn Handler>,
         config: Arc<ServerConfig>,
-        recorder: Arc<Mutex<Recorder>>,
+        recorder: TraceCollector,
         request: H2Request,
     ) -> H2Response {
         let stream_id = request.stream_id;
@@ -122,7 +122,7 @@ impl HandlerAdapter {
         // The body is handed over as an orchestrator `BodySource`, so a handler reads it through the
         // same `RequestBody` API it uses on HTTP/1.1.
         let mut source = H2BodySource { body: request.body };
-        let body = RequestBody::new(&mut source, Arc::clone(&recorder));
+        let body = RequestBody::new(&mut source, recorder.clone());
 
         crate::h1::mark(&recorder, EventKind::HandlerStart, 0);
         // `CatchPanic` wraps any future, so the owned future an HTTP/2 stream produces is contained
@@ -141,7 +141,6 @@ impl HandlerAdapter {
                 // every sub-log, so a stream-0 `Error` would make one stream's panic appear in every
                 // other stream's derivation on the same connection.
                 let _described = crate::panic::describe(payload.as_ref());
-                let mut recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
                 recorder.mark_stream(
                     stream_id,
                     EventKind::Error,
@@ -151,7 +150,6 @@ impl HandlerAdapter {
                 Response::internal_error()
             }
             Err(_) => {
-                let mut recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
                 recorder.mark_stream(
                     stream_id,
                     EventKind::Error,
@@ -162,15 +160,12 @@ impl HandlerAdapter {
             }
         };
 
-        {
-            let mut recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
-            recorder.mark_stream(
-                stream_id,
-                EventKind::HandlerEnd,
-                response.head.status.as_u16() as u32,
-                0,
-            );
-        }
+        recorder.mark_stream(
+            stream_id,
+            EventKind::HandlerEnd,
+            response.head.status.as_u16() as u32,
+            0,
+        );
         translate_response(response)
     }
 }
@@ -286,7 +281,7 @@ async fn pump(mut stream: Box<dyn BodyStream>, tx: mpsc::Sender<Bytes>) {
 /// The adapter that turns the codec's stream events into trace events.
 #[derive(Debug)]
 struct TraceObserver {
-    recorder: Arc<Mutex<Recorder>>,
+    recorder: TraceCollector,
 }
 
 impl SessionObserver for TraceObserver {
@@ -295,7 +290,9 @@ impl SessionObserver for TraceObserver {
             StreamEvent::RequestHeadComplete { payload } => {
                 (EventKind::RequestHeadComplete, payload)
             }
-            StreamEvent::RequestBodyChunk { payload } => (EventKind::Read, payload),
+            // This is a decoded request-body chunk, not a socket read: the
+            // socket read belongs to the transport tap, not to the H2 codec.
+            StreamEvent::RequestBodyChunk { payload } => (EventKind::ChunkBoundary, payload),
             StreamEvent::RequestBodyEnd => (EventKind::RequestBodyEnd, 0),
             StreamEvent::HandlerEnd { status } => (EventKind::HandlerEnd, u32::from(status)),
             StreamEvent::ResponseHeadSent => (EventKind::ResponseHeadSent, 0),
@@ -303,10 +300,6 @@ impl SessionObserver for TraceObserver {
             StreamEvent::ResponseEnd => (EventKind::ResponseEnd, 0),
             StreamEvent::Failed { code } => (EventKind::Error, code),
         };
-        let mut recorder = self
-            .recorder
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        recorder.mark_stream(stream_id, kind, a, 0);
+        self.recorder.mark_stream(stream_id, kind, a, 0);
     }
 }

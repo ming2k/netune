@@ -648,7 +648,7 @@ impl SinkObserver {
 impl TraceObserver for SinkObserver {
     fn connection_finished(&self, trace: IngressTrace) {
         for event in trace.log.iter() {
-            self.sink.event(event);
+            let _ = self.sink.event(event);
         }
     }
 }

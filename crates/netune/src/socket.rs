@@ -104,6 +104,29 @@ impl Default for SocketConfig {
 }
 
 impl SocketConfig {
+    /// A stable, human-readable description of every option that changes what
+    /// the peer or the kernel sees.
+    ///
+    /// This is an identity fragment, not a hash: an option omitted from here
+    /// would let two different socket shapes share a pool key.
+    pub fn canonical(&self) -> String {
+        format!(
+            "nodelay={};ttl={:?};recv={:?};send={:?};mss={:?};mark={:?};device={:?};\
+             bind={:?};keepalive={:?};tos={:?};fastopen={}",
+            self.nodelay,
+            self.ttl,
+            self.recv_buffer_size,
+            self.send_buffer_size,
+            self.mss,
+            self.mark,
+            self.bind_device,
+            self.bind_address,
+            self.keepalive,
+            self.tos,
+            self.tcp_fast_open
+        )
+    }
+
     /// Standard stock configuration with Nagle disabled.
     pub fn new() -> Self {
         Self::default()

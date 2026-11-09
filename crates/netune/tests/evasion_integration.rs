@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use netune::{Client, ClientConfig, Method, Pool, RequestHead, Target, TcpConnector};
-use netune_trace::Recorder;
+use netune_trace::{EvasionPolicy, TraceCollector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -60,16 +60,17 @@ async fn client_with_sni_segmentation_slices_early_writes() {
         }
     });
 
-    let target = Target::plain(format!("127.0.0.1:{port}")).with_sni_segmentation(true);
+    let target =
+        Target::plain(format!("127.0.0.1:{port}")).with_evasion(EvasionPolicy::sni_split());
     let client = Client::new(
         TcpConnector::new(),
         Pool::default(),
         ClientConfig::default(),
     );
-    let recorder = Arc::new(Mutex::new(Recorder::start(64)));
+    let recorder = TraceCollector::start(64);
     let head = RequestHead::new(Method::GET, "/evasion-check");
     let mut response = client
-        .send(&target, recorder, head, None)
+        .send_traced(&target, recorder, head, None)
         .await
         .expect("send");
     let body = response.body.read_to_end().await.expect("read body");

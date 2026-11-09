@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! netune (P1)          produces events: resolver, socket, TLS, IO tap, codec
-//!        │  Recorder::read / write / mark
+//!        │  Tap::read / wrote, TraceCollector::mark
 //!        ▼
 //! netune-trace           stores them delta-encoded, derives timings + rates
 //!        │  DerivedTimings
@@ -24,7 +24,8 @@
 //!
 //! The transport crate (`netune`) owns the monotonic clock and hands this
 //! crate absolute nanosecond offsets; this crate never reads a clock except in
-//! [`Recorder`], which exists so the offset conversion is written once.
+//! the internal recorder behind [`TraceCollector`]/[`Ring`], so the offset
+//! conversion is written once.
 //!
 //! # The two invariants
 //!
@@ -39,10 +40,11 @@
 //! # Why the event log is delta-encoded
 //!
 //! A long streaming turn produces thousands of read and token events. Each is
-//! stored as `(dt_ns: u32, kind, a, b)` relative to its predecessor — 13 bytes
-//! plus padding, with gaps longer than 4.29 s carried losslessly by a
+//! stored as `(stream: u32, dt_ns: u32, kind, a: u32, b: u32)` relative to its
+//! predecessor — 17 bytes of fields, 20 bytes with alignment padding, asserted
+//! by a test. Gaps longer than 4.29 s are carried losslessly by a
 //! [`EventKind::TimeJump`] record (see the `log` module). A 10 000-event turn
-//! is ~130 KB, bounded by a ring buffer that counts what it drops.
+//! is ~200 KB, bounded by a ring buffer that counts what it drops.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -50,9 +52,12 @@ mod derive;
 mod derive_ingress;
 mod derive_transport;
 mod event;
+#[cfg(feature = "ja4")]
 mod forge;
 mod log;
 mod record;
+mod tap;
+#[cfg(feature = "ja4")]
 mod tlsfp;
 mod trace;
 mod verdict;
@@ -63,11 +68,17 @@ pub use derive_ingress::{
 };
 pub use derive_transport::{DerivedH3, DerivedQuic, derive_h3, derive_h3_exchanges, derive_quic};
 pub use event::{Alpn, Event, EventKind, FrameClass, TimeSource};
+#[cfg(feature = "ja4")]
 pub use forge::{ClientHelloForge, RawExtension};
 pub use log::{EncodedEvent, EventLog, MAX_DELTA_NS};
-pub use record::{Recorder, TraceSink};
+pub use record::{Flow, TraceCollector, TraceSink};
+pub use tap::{Counters, NoTap, Ring, Tap, TapLog};
+#[cfg(feature = "ja4")]
 pub use tlsfp::{ClientHello, Ja3, Ja4, is_grease, ja3, ja4};
-pub use trace::{AttemptRef, ConnectionInfo, EndpointRef, Fidelity, RequestTrace, TraceId};
+pub use trace::{
+    AttemptRef, ConnectionIdentity, ConnectionInfo, EndpointRef, EvasionPolicy, Fidelity,
+    RequestTrace, TRACE_SCHEMA_VERSION, TraceId,
+};
 pub use verdict::{Reading, Reason, Validity};
 
 /// Default capacity of a request's event ring, in events.

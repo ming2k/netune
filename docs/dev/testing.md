@@ -27,8 +27,8 @@ This guide defines how `netune` is tested, what each test tier is for, and the r
 | :--- | :--- | :--- |
 | 1. Unit | `#[cfg(test)]` modules in `src/` | Pure functions, state machines |
 | 2. Differential | `crates/*/tests/differential.rs`, `tests/golden.rs` | A battle-tested oracle as a **dev-dependency only** |
-| 3. Integration | `crates/netune/tests/*.rs`, `crates/netune-server/tests/ingress.rs` | Loopback mock origins, TLS fixtures, `FaultIo`; ingress shedding, slow-peer bounds, drain |
-| 4. End-to-end | `crates/netune/tests/{e2e,tls_e2e,ws,ws_session}.rs`, `crates/netune-server/tests/interop.rs` | A full client lifecycle over a real socket; our client against our server |
+| 3. Integration | `crates/netune/tests/*.rs`, `crates/netune-server/tests/{ingress,http3_ingress}.rs`, `crates/netune-http3/tests/http3_e2e.rs` | Loopback mock origins, TLS fixtures, `FaultIo`; ingress shedding, slow-peer bounds, drain; H3 streaming upload, dynamic QPACK and per-exchange trace |
+| 4. End-to-end | `crates/netune/tests/{e2e,tls_e2e,ws,ws_session}.rs`, `crates/netune-server/tests/interop.rs`, `crates/netune-server/tests/http3_ingress.rs` | A full client lifecycle over a real socket; our H1/H2 client against our server; our HTTP/3 client against `H3Server` over a real QUIC handshake |
 
 The WebSocket guide's code samples are also compiled and executed by `crates/netune/tests/guide_examples.rs`, so a drifting guide fails CI instead of misleading readers.
 
@@ -40,7 +40,7 @@ The WebSocket guide's code samples are also compiled and executed by `crates/net
 
 1. **No live network.** Tests must not depend on the public internet or a real third-party service. Mock origins bind to `127.0.0.1:0`.
 2. **No sleep-based synchronisation.** Wait on a condition, a channel, or a deadline; a `sleep` that "usually works" is a flaky test.
-3. **No wall-clock assertions.** Timing invariants are asserted as *derivations from recorded events*, not as elapsed wall time.
+3. **No wall-clock assertions.** Timing invariants are asserted as *derivations from recorded events*, not as elapsed wall time. A benchmark may print elapsed numbers for a human, but the gate is deterministic: `size_of`, event counts, or instruction counts (e.g. `iai-callgrind`). A wall-clock tolerance is a flake, not a budget.
 4. **RAII fixtures.** Temporary files and directories clean up on drop; a test must not leave state behind for the next one.
 5. **Feature isolation.** The default build carries no transmission path. The `inject` suite is run separately so both configurations are proven.
 
@@ -73,7 +73,17 @@ cargo nextest run -p netune-ws
 
 # Plain cargo, if nextest is unavailable
 cargo test --workspace
+
+# The controlled h3 fork is not a workspace member
+cargo test --manifest-path vendor/h3/Cargo.toml
+
+# Deterministic zero-cost gate (requires valgrind + iai-callgrind-runner)
+cargo bench -p netune --bench zero_cost
 ```
+
+The benchmark gate is intentionally separate from `cargo test`: it measures
+instructions, not wall time, and fails a regression against a baseline generated
+in the same CI run (`ir=0%`).
 
 CI additionally sets `RUSTFLAGS="-D warnings"`, so warnings are failures on `main`.
 

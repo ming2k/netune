@@ -1,4 +1,4 @@
-//! `netune-server`: the ingress path we own — HTTP/1.1 **and** HTTP/2, over one handler.
+//! `netune-server`: the ingress path we own — HTTP/1.1, HTTP/2, and optional HTTP/3, over one handler.
 //!
 //! This is the peer orchestrator to `netune`. Where `netune` opens sockets outward — resolution,
 //! confinement, TLS identity, pooling — this crate accepts them inward and answers. Neither depends on
@@ -9,14 +9,15 @@
 //! # What this crate is, and what it refuses to be
 //!
 //! It is a **transport**: a listener with admission control, slow-peer bounds, per-connection tracing,
-//! graceful drain, and both application protocols. It is **not a web framework**: there is no routing
+//! graceful drain, and all supported application protocols. HTTP/3 is a peer QUIC listener
+//! ([ADR-0025](../../docs/adr/0025-h3-ingress-peer-transport.md)), not a mode of the TCP `Server`. It is **not a web framework**: there is no routing
 //! table, no extractor, no middleware stack, no `#[get]` macro, and no JSON. A request arrives, a
 //! [`Handler`] is called with the head and a body reader, and a [`Response`] is written. Everything
 //! above that — which path maps to which function, what a body means, whether a route exists — is the
 //! application's business, and putting it here would make the transport opinionated about things it
 //! cannot see.
 //!
-//! # One handler, two protocols
+//! # One handler, three protocols
 //!
 //! ```text
 //!        ALPN `h2` or a `PRI *` preface          ┌────────────────────┐
@@ -35,6 +36,9 @@
 //! socket. Above that decision an application writes one handler: the [`IncomingRequest`] it receives
 //! carries the same method, target, headers and body framing whichever wire it arrived on, and a
 //! `Host`/`:authority` mismatch is synthesised away so exactly one field names the authority.
+//!
+//! HTTP/3 is a peer listener (the `H3Server` type, feature `http3`) rather than a branch in the TCP protocol
+//! selector, but it calls the same [`Handler`] with the same [`IncomingRequest`] and [`RequestBody`].
 //!
 //! # The order of operations, and why it is that order
 //!
@@ -138,6 +142,8 @@ mod date;
 mod h1;
 #[cfg(feature = "http2")]
 mod h2;
+#[cfg(feature = "http3")]
+mod h3;
 mod handler;
 mod panic;
 mod service;
@@ -152,9 +158,13 @@ pub use config::{
 };
 #[cfg(feature = "tls")]
 pub use config::{ConfigSelector, TlsTermination};
+#[cfg(feature = "http3")]
+pub use h3::H3Server;
 pub use handler::{
     BodyStream, ChunkFuture, ChunkResult, Handler, HandlerFuture, Response, ResponseBody,
 };
+#[cfg(feature = "http3")]
+pub use netune_http3::H3SettingsProfile;
 pub use service::{BindError, DiscardingObserver, IngressTrace, ServedProtocol, Server};
 
 /// The stable numeric codes an ingress trace carries for a terminal failure.

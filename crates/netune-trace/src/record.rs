@@ -11,10 +11,12 @@
 //! logic worth testing — batching-agnostic recording, overflow accounting, the
 //! origin conversion — is here.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::event::{Event, EventKind, FrameClass, TimeSource};
+#[cfg(test)]
+use crate::event::TimeSource;
+use crate::event::{Event, EventKind, FrameClass};
 use crate::log::EventLog;
 
 /// A destination for events as they are recorded (ADR-0010).
@@ -38,21 +40,41 @@ use crate::log::EventLog;
 ///   record of truth for the attempt.
 pub trait TraceSink: Send + Sync + std::fmt::Debug {
     /// Receives one event. `at_ns` is relative to the recorder's origin.
-    fn event(&self, event: Event);
+    ///
+    /// Returning [`Flow::Drop`] is advisory: the sink may have discarded the
+    /// event, but the ring remains the record of truth and the recorder does not
+    /// stop delivering later events.
+    fn event(&self, event: Event) -> Flow;
+}
+
+/// What a sink wants done with an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    /// Keep delivering.
+    Continue,
+    /// This event was dropped by the sink; later events may still be delivered.
+    Drop,
 }
 
 /// Records one request attempt's events against a monotonic origin.
+///
+/// Internal since ADR-0018: callers receive a [`TraceCollector`]. The recorder
+/// owns the ring and the clock; the collector owns the public contract.
 #[derive(Debug)]
-pub struct Recorder {
+pub(crate) struct Recorder {
     origin: Instant,
     log: EventLog,
     /// Where events go besides the ring, when a consumer asked for a stream.
     sink: Option<Arc<dyn TraceSink>>,
+    /// A disabled recorder keeps the origin but records nothing. It is the
+    /// cold-path handle for `Observation::Off` and `Observation::Counters`,
+    /// whose byte evidence lives in a tap, not in this ring.
+    enabled: bool,
 }
 
 impl Recorder {
     /// Begin an egress trace at "now", emitting [`EventKind::Dispatch`] at offset 0.
-    pub fn start(capacity: usize) -> Self {
+    pub(crate) fn start(capacity: usize) -> Self {
         Self::start_at(Instant::now(), capacity)
     }
 
@@ -63,31 +85,47 @@ impl Recorder {
     /// definition of what the trace measures from, and the two directions measure
     /// from different facts: an egress attempt begins when the harness decides to
     /// send, an ingress attempt when the kernel hands over a socket.
-    pub fn start_ingress(capacity: usize) -> Self {
+    pub(crate) fn start_ingress(capacity: usize) -> Self {
         Self::start_ingress_at(Instant::now(), capacity)
     }
 
     /// Begin an ingress trace at an explicit origin (tests, and a capture with its
     /// own clock).
-    pub fn start_ingress_at(origin: Instant, capacity: usize) -> Self {
+    pub(crate) fn start_ingress_at(origin: Instant, capacity: usize) -> Self {
         let mut log = EventLog::with_capacity(capacity);
         log.push_at(0, EventKind::IngressDispatch, 0, 0);
         Self {
             origin,
             log,
             sink: None,
+            enabled: true,
         }
     }
 
     /// Begin an egress trace at an explicit origin (tests, and the L2 probe, which
     /// timestamps against its own capture clock).
-    pub fn start_at(origin: Instant, capacity: usize) -> Self {
+    pub(crate) fn start_at(origin: Instant, capacity: usize) -> Self {
         let mut log = EventLog::with_capacity(capacity);
         log.push_at(0, EventKind::Dispatch, 0, 0);
         Self {
             origin,
             log,
             sink: None,
+            enabled: true,
+        }
+    }
+
+    /// A recorder that keeps the origin but records nothing.
+    ///
+    /// The origin is still available so a caller can create a tap in the same
+    /// time domain; the ring and the sink are not touched. This is how `Off`
+    /// and `Counters` attempts avoid allocating an event ring.
+    pub(crate) fn disabled() -> Self {
+        Self {
+            origin: Instant::now(),
+            log: EventLog::with_capacity(1),
+            sink: None,
+            enabled: false,
         }
     }
 
@@ -96,15 +134,25 @@ impl Recorder {
     /// Consumes and returns `self` so a sink cannot be installed halfway through a trace by
     /// accident: the events before the call would be missing from the stream, and a consumer
     /// reading the stream as the whole record would be wrong.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_sink(mut self, sink: Arc<dyn TraceSink>) -> Self {
-        // The origin event was recorded before the sink existed; replay it so the
-        // stream is complete from offset 0, whichever direction this trace is.
+    pub(crate) fn with_sink(mut self, sink: Arc<dyn TraceSink>) -> Self {
+        self.install_sink(sink);
+        self
+    }
+
+    /// Install a sink in place, replaying the origin event.
+    ///
+    /// The public [`TraceCollector`] uses this so installing a sink does not
+    /// require consuming the collector's shared inner value.
+    pub(crate) fn install_sink(&mut self, sink: Arc<dyn TraceSink>) {
+        if !self.enabled {
+            return;
+        }
         if let Some(event) = self.log.first() {
-            sink.event(event);
+            let _ = sink.event(event);
         }
         self.sink = Some(sink);
-        self
     }
 
     /// Records one event, to the ring and to the sink when there is one.
@@ -117,9 +165,12 @@ impl Recorder {
     /// See [`Event::stream`]: a multiplexed transport interleaves exchanges on one
     /// connection, so the exchange identity has to travel with the event.
     fn push_stream(&mut self, at_ns: u64, stream: u32, kind: EventKind, a: u32, b: u32) {
+        if !self.enabled {
+            return;
+        }
         self.log.push_at_stream(at_ns, stream, kind, a, b);
         if let Some(sink) = &self.sink {
-            sink.event(Event {
+            let _ = sink.event(Event {
                 at_ns,
                 stream,
                 kind,
@@ -134,6 +185,32 @@ impl Recorder {
         self.origin
     }
 
+    /// The ring capacity this recorder was created with.
+    pub fn capacity(&self) -> usize {
+        self.log.capacity()
+    }
+
+    /// The sink installed on this recorder, if any.
+    ///
+    /// A byte-path `Ring` tap can forward the same stream, so a consumer that
+    /// installed one sink for control events does not silently lose `Read` and
+    /// `Write` events.
+    pub fn sink(&self) -> Option<Arc<dyn TraceSink>> {
+        self.sink.clone()
+    }
+
+    /// Merge a byte-path tap log produced against the same origin.
+    ///
+    /// Cold path only. A disabled recorder ignores the merge: its caller selected
+    /// `Off` or `Counters`, and the tap artifact is reported through its own
+    /// channel rather than through an event ring.
+    pub fn merge(&mut self, log: EventLog) {
+        if !self.enabled {
+            return;
+        }
+        self.log.merge(log);
+    }
+
     /// Nanoseconds since origin.
     pub fn now_ns(&self) -> u64 {
         let elapsed = self.origin.elapsed().as_nanos();
@@ -141,6 +218,7 @@ impl Recorder {
     }
 
     /// Record one successful socket read of `bytes`, timestamped by `source`.
+    #[cfg(test)]
     pub fn read(&mut self, bytes: usize, source: TimeSource) {
         let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
         self.push(
@@ -152,6 +230,7 @@ impl Recorder {
     }
 
     /// Record one socket write syscall boundary (`poll_write` returned `bytes`).
+    #[cfg(test)]
     pub fn wrote(&mut self, bytes: usize) {
         let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
         self.push(self.now_ns(), EventKind::Write, bytes, 0);
@@ -222,6 +301,7 @@ impl Recorder {
     }
 
     /// Finish recording and hand over the log.
+    #[cfg(test)]
     pub fn into_log(self) -> EventLog {
         self.log
     }
@@ -229,6 +309,203 @@ impl Recorder {
     /// Borrow the log so far (tests, live inspection).
     pub fn log(&self) -> &EventLog {
         &self.log
+    }
+}
+
+/// The only public handle for an attempt's cold-path trace.
+///
+/// A collector is cheap to clone for the sampler or a second task that emits
+/// phase events. It never exposes `read`/`wrote`: byte events can only come from
+/// a [`crate::Tap`] and arrive through [`TraceCollector::merge`].
+#[derive(Debug, Clone)]
+pub struct TraceCollector {
+    inner: Arc<Mutex<Recorder>>,
+    /// A copy of the recorder's enabled bit so the disabled path can return
+    /// without touching the mutex.
+    enabled: bool,
+}
+
+impl TraceCollector {
+    pub fn start(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Recorder::start(capacity))),
+            enabled: true,
+        }
+    }
+
+    pub fn start_ingress(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Recorder::start_ingress(capacity))),
+            enabled: true,
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Recorder::disabled())),
+            enabled: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_sink(self, sink: Arc<dyn TraceSink>) -> Self {
+        if self.enabled {
+            self.inner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .install_sink(sink);
+        }
+        self
+    }
+
+    pub fn origin(&self) -> Instant {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .origin()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .capacity()
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn sink(&self) -> Option<Arc<dyn TraceSink>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .sink()
+    }
+
+    pub fn now_ns(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .now_ns()
+    }
+
+    /// Record a control/protocol mark at "now".
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, `Read`, `Write` or `Segment` panic: those kinds are
+    /// byte-path facts and must come from a [`crate::Tap`]. Release builds drop
+    /// such a mark rather than manufacturing a syscall timeline.
+    pub fn mark(&self, kind: EventKind, a: u32, b: u32) {
+        debug_assert!(
+            !kind.is_byte_path(),
+            "byte events must come from a Tap, not TraceCollector::mark"
+        );
+        if !self.enabled || kind.is_byte_path() {
+            return;
+        }
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .mark(kind, a, b);
+    }
+
+    /// Record a control/protocol mark for a multiplexed exchange.
+    ///
+    /// Byte-path kinds are rejected exactly as in [`TraceCollector::mark`].
+    pub fn mark_stream(&self, stream: u32, kind: EventKind, a: u32, b: u32) {
+        debug_assert!(
+            !kind.is_byte_path(),
+            "byte events must come from a Tap, not TraceCollector::mark_stream"
+        );
+        if !self.enabled || kind.is_byte_path() {
+            return;
+        }
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .mark_stream(stream, kind, a, b);
+    }
+
+    pub fn frame(&self, class: FrameClass, tokens: u32) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .frame(class, tokens);
+    }
+
+    pub fn reused_connection(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .reused_connection();
+    }
+
+    pub fn tcp_info(&self, rtt_us: u32, retransmits: u32) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .tcp_info(rtt_us, retransmits);
+    }
+
+    pub fn request_head(&self, bytes: usize) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .request_head(bytes);
+    }
+
+    pub fn request_body_end(&self, bytes: usize) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .request_body_end(bytes);
+    }
+
+    pub fn handler_end(&self, status: u16) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .handler_end(status);
+    }
+
+    pub fn response_end(&self, bytes: usize) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .response_end(bytes);
+    }
+
+    /// Merge a byte-path tap log produced against the same origin.
+    ///
+    /// Only [`crate::TapLog`] is accepted; the collector has no public way to
+    /// inject a raw, caller-built `EventLog`.
+    pub fn merge(&self, log: crate::TapLog) {
+        if !self.enabled {
+            return;
+        }
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .merge(log.into_event_log());
+    }
+
+    /// A snapshot of the log. The collector remains usable.
+    pub fn log(&self) -> EventLog {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .log()
+            .clone()
+    }
+
+    pub fn dropped(&self) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .log()
+            .dropped()
     }
 }
 
@@ -296,8 +573,9 @@ mod tests {
     struct CollectingSink(std::sync::Mutex<Vec<Event>>);
 
     impl TraceSink for CollectingSink {
-        fn event(&self, event: Event) {
+        fn event(&self, event: Event) -> Flow {
             self.0.lock().unwrap_or_else(|e| e.into_inner()).push(event);
+            Flow::Continue
         }
     }
 
@@ -330,6 +608,33 @@ mod tests {
         let log = recorder.into_log();
         assert_eq!(log.len(), 2, "the ring kept only its capacity");
         assert_eq!(log.dropped(), 2, "and counted what it dropped");
+    }
+
+    #[test]
+    fn a_collector_merges_the_byte_tap_log_without_exposing_the_recorder() {
+        use crate::{Ring, Tap};
+
+        let collector = TraceCollector::start(8);
+        let mut ring = Ring::new(collector.origin(), 8, None);
+        ring.read(10, TimeSource::Syscall);
+        ring.wrote(20);
+        collector.merge(ring.finish());
+
+        let kinds: Vec<_> = collector.log().iter().map(|event| event.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![EventKind::Dispatch, EventKind::Read, EventKind::Write]
+        );
+        assert_eq!(collector.log().bytes_read(), 10);
+        assert_eq!(collector.log().bytes_written(), 20);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "byte events must come from a Tap")]
+    fn a_collector_rejects_a_byte_event_from_the_control_api() {
+        let collector = TraceCollector::start(8);
+        collector.mark(EventKind::Read, 1, 0);
     }
 
     #[test]

@@ -34,14 +34,13 @@
 //! rather than a zero. That is `[INV-SERVER-02]`: the same contract the egress
 //! derivation obeys, applied to the other direction of travel.
 
-use serde::{Deserialize, Serialize};
-
 use crate::event::EventKind;
 use crate::trace::RequestTrace;
 use crate::verdict::{Reading, Reason};
 
 /// Everything derivable from an ingress trace.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DerivedIngress {
     /// Accept → request head parsed. The slow-peer span.
     pub request_read_us: Reading<u64>,
@@ -393,6 +392,8 @@ mod tests {
                 authority: "0.0.0.0:8080".into(),
             },
             connection: ConnectionInfo::default(),
+            identity: crate::ConnectionIdentity::default(),
+            schema_version: crate::TRACE_SCHEMA_VERSION,
             fidelity: Fidelity::l1(),
             log,
         }

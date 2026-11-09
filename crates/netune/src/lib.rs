@@ -55,6 +55,7 @@ mod evasion;
 #[cfg(feature = "http2")]
 mod h2_client;
 mod pool;
+mod profile;
 mod proxy;
 mod socket;
 mod tcp_info;
@@ -69,7 +70,7 @@ mod ws_session;
 /// Capacity of the throwaway trace ring a [`Client::request`] uses.
 pub const DEFAULT_TRACE_CAPACITY: usize = 1024;
 
-pub use client::{BodyStream, Client, ClientConfig, Response};
+pub use client::{BodyStream, Client, ClientConfig, Observation, Response, TraceConfig};
 pub use connect::{
     ConfinementRefused, Connector, EgressConfinement, Established, Target, TcpConnector, Transport,
     is_public_ip,
@@ -83,15 +84,22 @@ pub use h2_client::H2Client;
 pub use http::{HeaderMap, Method};
 pub use netune_http1::{BodyKind, RequestHead, ResponseHead};
 #[cfg(feature = "http2")]
-pub use netune_http2::{H2ClientConnection, H2Fingerprint, H2Response, PseudoHeaderOrder};
+pub use netune_http2::{
+    H2ClientConnection, H2ConnectionProfile, H2Fingerprint, H2RequestProfile, H2Response,
+    PseudoHeaderOrder,
+};
 /// The byte-path instrumentation, re-exported so a consumer of `netune` reaches
 /// [`TimedIo`] and [`FaultIo`] without naming the leaf crate. They live in
 /// `netune-io` because ingress needs the identical tap and the two
 /// orchestrators must not depend on each other (ADR-0011).
-pub use netune_io::{Fault, FaultIo, FaultScript, TimedIo};
+pub use netune_io::{Fault, FaultIo, FaultScript, RingIo, TimedIo};
+pub use netune_trace::{ConnectionIdentity, EvasionPolicy, Fidelity, RequestTrace, TraceCollector};
 #[cfg(feature = "ws")]
 pub use netune_ws::{CloseCode, CloseReason, Message as WsMessage, Opcode as WsOpcode};
-pub use pool::{IdleConnection, Pool, PoolConfig};
+pub use pool::{IdleConnection, Pool, PoolConfig, PoolKey};
+pub use profile::{ConnectionPlan, H1Registry, H1WireProfile, HeaderCasing, ProfileId};
+#[cfg(feature = "http2")]
+pub use profile::{H2Registry, H2RequestRegistry};
 pub use proxy::{Proxy, ProxyConnector};
 pub use socket::SocketConfig;
 pub use tcp_info::{SAMPLE_INTERVAL, Sampler, TcpSample, sample as sample_tcp_info};

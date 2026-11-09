@@ -24,7 +24,7 @@ use http::Method;
 
 use crate::connection::{H2Connection, LocalSettings, Role};
 use crate::error::H2Error;
-use crate::fingerprint::H2Fingerprint;
+use crate::fingerprint::{H2ConnectionProfile, H2Fingerprint, H2RequestProfile};
 use crate::frame::Frame;
 
 /// A parsed HTTP/2 response.
@@ -140,9 +140,11 @@ const REPLENISH_THRESHOLD: u32 = 16 * 1024;
 /// An established HTTP/2 client connection over an arbitrary transport.
 pub struct H2ClientConnection<T> {
     connection: H2Connection<T>,
-    /// The fingerprint this connection was opened with, kept for per-request
-    /// pseudo-header ordering.
-    fingerprint: H2Fingerprint,
+    /// The connection-fixed half of the fingerprint: what the peer saw in the
+    /// preface and SETTINGS.
+    connection_profile: H2ConnectionProfile,
+    /// The request-fixed half: applied to each HEADERS block, never to the pool.
+    request_profile: H2RequestProfile,
     /// A write failed while returning advisory end-of-stream flow control. The
     /// exchange itself completed, but the socket is no longer safe to reuse.
     unusable: bool,
@@ -160,14 +162,21 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2ClientConnection
     ///
     /// A transport error, or a protocol error from a frame no handshake may carry.
     pub async fn handshake(stream: T, fingerprint: H2Fingerprint) -> Result<Self, H2Error> {
+        let H2Fingerprint {
+            connection: connection_profile,
+            request: request_profile,
+        } = fingerprint;
         // The bounds this end advertises are the bounds it must enforce while
         // reading: a peer may use the largest frame and window we announced.
-        let local = LocalSettings::advertised(&fingerprint.settings, fingerprint.header_table_size);
+        let local = LocalSettings::advertised(
+            &connection_profile.settings,
+            connection_profile.header_table_size,
+        );
         let mut connection = H2Connection::client_handshake(
             stream,
             local,
-            fingerprint.settings.clone(),
-            fingerprint.initial_connection_window_update,
+            connection_profile.settings.clone(),
+            connection_profile.initial_connection_window_update,
         )
         .await?;
 
@@ -205,14 +214,20 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2ClientConnection
 
         Ok(Self {
             connection,
-            fingerprint,
+            connection_profile,
+            request_profile,
             unusable: false,
         })
     }
 
-    /// The fingerprint in force.
-    pub const fn fingerprint(&self) -> &H2Fingerprint {
-        &self.fingerprint
+    /// The connection-fixed half of the fingerprint in force.
+    pub const fn connection_profile(&self) -> &H2ConnectionProfile {
+        &self.connection_profile
+    }
+
+    /// The request-fixed half of the fingerprint in force.
+    pub const fn request_profile(&self) -> &H2RequestProfile {
+        &self.request_profile
     }
 
     /// Write one request and return the stream id it opened.
@@ -236,6 +251,34 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2ClientConnection
         extra_headers: &[(String, String)],
         body: Option<&[u8]>,
     ) -> Result<u32, H2Error> {
+        let profile = self.request_profile;
+        self.start_request_with_profile(
+            method,
+            authority,
+            scheme,
+            path,
+            extra_headers,
+            body,
+            &profile,
+        )
+        .await
+    }
+
+    /// Write one request using an explicit request-header profile.
+    ///
+    /// This is the per-exchange override: the connection profile and the socket
+    /// do not change, only the pseudo-header order in this HEADERS block.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_request_with_profile(
+        &mut self,
+        method: &str,
+        authority: &str,
+        scheme: &str,
+        path: &str,
+        extra_headers: &[(String, String)],
+        body: Option<&[u8]>,
+        request_profile: &H2RequestProfile,
+    ) -> Result<u32, H2Error> {
         let stream_id = self
             .connection
             .allocate_stream_id()
@@ -247,7 +290,7 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2ClientConnection
             (":scheme", scheme),
             (":path", path),
         ];
-        let ordered = self.fingerprint.pseudo_headers_order.order(&pseudo);
+        let ordered = request_profile.pseudo_headers_order.order(&pseudo);
         let mut headers: Vec<(&str, &str)> = ordered;
         for (name, value) in extra_headers {
             headers.push((name.as_str(), value.as_str()));

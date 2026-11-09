@@ -2,12 +2,11 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use bytes::{Bytes, BytesMut};
-use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use netune::{Client, ClientConfig, Pool, Target, TcpConnector, WsMessage};
-use netune_trace::{EventKind, Recorder};
+use netune_trace::{EventKind, TraceCollector};
 use netune_ws::{CloseCode, Frame, FrameDecoder, FrameEncoder, Role, compute_accept_key};
 
 /// Read frames from `socket` until one complete frame decodes.
@@ -101,13 +100,13 @@ async fn test_ws_handshake_and_bidirectional_data() {
         ClientConfig::default(),
     );
     let target = Target::plain(format!("127.0.0.1:{port}"));
-    let recorder = Arc::new(Mutex::new(Recorder::start(1024)));
+    let recorder = TraceCollector::start(1024);
 
     let mut ws = client
         .connect_ws_traced(
             &target,
             "/chat",
-            Arc::clone(&recorder),
+            recorder.clone(),
             netune::WsHandshake::default(),
         )
         .await
@@ -135,10 +134,10 @@ async fn test_ws_handshake_and_bidirectional_data() {
     server_task.await.expect("server join");
 
     // Verify trace events
-    let rec = recorder.lock().unwrap();
-    assert!(rec.log().first_of(EventKind::RequestWriteStart).is_some());
-    assert!(rec.log().first_of(EventKind::HeadComplete).is_some());
-    assert!(rec.log().first_of(EventKind::ProtocolFrame).is_some());
+    let log = recorder.log();
+    assert!(log.first_of(EventKind::RequestWriteStart).is_some());
+    assert!(log.first_of(EventKind::HeadComplete).is_some());
+    assert!(log.first_of(EventKind::ProtocolFrame).is_some());
 }
 
 /// `[INV-WS-05]`: an upgraded socket is never returned to the keep-alive pool.
@@ -214,7 +213,7 @@ async fn inv_ws_05_an_upgraded_socket_never_enters_the_pool() {
     server_task.await.expect("server join");
 
     assert_eq!(
-        pool.idle_count(&authority),
+        pool.idle_count(&client.pool_key(&target).expect("plan")),
         0,
         "an upgraded socket must never be released to the keep-alive pool"
     );

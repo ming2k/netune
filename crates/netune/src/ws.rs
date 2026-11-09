@@ -5,10 +5,9 @@
 //! handshake completion, and nanosecond trace integration via [`TimedIo`].
 
 use bytes::{Bytes, BytesMut};
-use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use netune_trace::{EventKind, FrameClass, Recorder};
+use netune_trace::{EventKind, FrameClass, TraceCollector};
 use netune_ws::{
     CloseCode, CloseReason, Frame, FrameDecoder, FrameEncoder, Limits, Message, MessageAssembler,
     Opcode, Role, generate_mask,
@@ -62,7 +61,7 @@ pub struct WsStream<S> {
     write_buf: BytesMut,
     assembler: MessageAssembler,
     limits: Limits,
-    recorder: Option<Arc<Mutex<Recorder>>>,
+    recorder: Option<TraceCollector>,
     closed: bool,
     /// Payload of the most recent client-issued ping, awaiting its matching
     /// pong. Incoming pongs that carry a different payload are peer-initiated
@@ -75,7 +74,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
     pub fn new(
         stream: S,
         initial_buf: BytesMut,
-        recorder: Option<Arc<Mutex<Recorder>>>,
+        recorder: Option<TraceCollector>,
         limits: Limits,
     ) -> Self {
         Self {
@@ -188,7 +187,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                     },
                 };
                 if let Some(ref rec) = self.recorder {
-                    rec.lock().unwrap_or_else(|e| e.into_inner()).mark(
+                    rec.mark(
                         EventKind::WsFrame,
                         frame_class.code() as u32,
                         frame.payload.len() as u32,
@@ -244,11 +243,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                             Message::Ping(_) | Message::Pong(_) => FrameClass::KeepAlive,
                             Message::Close(_) => FrameClass::Open,
                         };
-                        rec.lock().unwrap_or_else(|e| e.into_inner()).mark(
-                            EventKind::ProtocolFrame,
-                            class.code() as u32,
-                            0,
-                        );
+                        rec.mark(EventKind::ProtocolFrame, class.code() as u32, 0);
                     }
                     return Ok(Some(msg));
                 }

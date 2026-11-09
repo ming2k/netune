@@ -33,6 +33,8 @@ fn trace_with(log: EventLog) -> RequestTrace {
             local_port: Some(51_234),
             age_ns: None,
         },
+        identity: netune_trace::ConnectionIdentity::default(),
+        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: Fidelity::l2(),
         log,
     }
@@ -101,6 +103,7 @@ fn a_recorded_trace_derives_every_scope() {
     assert_eq!(derived.first_token_after_sent_us.value(), Some(520_000));
 }
 
+#[cfg(feature = "serde")]
 #[test]
 fn the_trace_is_the_single_source_after_a_round_trip() {
     let trace = cold_streaming_trace();

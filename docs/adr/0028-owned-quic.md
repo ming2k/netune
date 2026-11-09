@@ -109,8 +109,8 @@ The rewrite lands in reviewable layers:
    recovery; RFC 9001 Appendix A vectors.
 3. Handshake and connection state: TLS CRYPTO streams, packet-number spaces,
    ACK generation, connection IDs, close.
-4. Recovery and congestion: RTT, PTO, retransmission and a bounded AIMD
-   congestion window. Cubic/BBR profile parity remains a follow-up.
+4. Recovery and congestion: RTT, PTO, retransmission, fast loss detection and
+   profile-selected NewReno/Cubic/BBR windows.
 5. Streams and flow control: bidirectional/unidirectional streams, limits,
    RESET/STOP_SENDING, datagrams.
 6. Endpoint and server path: UDP routing, stateless reset, Retry, server
@@ -144,7 +144,6 @@ implemented and must not be inferred from the production switch:
 
 - 0-RTT and session resumption.
 
-- Cubic/BBR congestion-control parity (NewReno-style AIMD is implemented).
 - H3 datagrams and extended CONNECT.
 
 They are separate capabilities, not hidden behaviour.

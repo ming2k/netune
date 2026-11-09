@@ -176,7 +176,10 @@ a failed check is a consumer policy decision and a normal connection close.
   honours the config. Custom congestion control can still be a bad policy; the
   engine bounds its blast radius, not its quality. Keep-alive is a client
   profile policy; a server-side keep-alive policy would be a separate decision
-  with a server consumer.
+  with a server consumer. `Endpoint::server_with_socket` is the low-level
+  ingress seam; `H3Server` does not yet expose a socket factory because no
+  ingress consumer requires one. Wiring it through the orchestrator is a
+  separate decision, not a silently missing code path.
 - **Breaking**: `QuicConnector::with_custom_socket` is removed. Callers implement
   `QuicUdpSocketFactory` and use `with_socket_factory`. The project is pre-1.0
   and publishes from `0.0.x`, so the break is a normal patch-line change.

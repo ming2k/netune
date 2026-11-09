@@ -442,7 +442,7 @@ impl Core {
         while end > 0 && !reason.is_char_boundary(end) {
             end -= 1;
         }
-        self.closed = Some((code, reason.to_string()));
+        self.closed = Some((code, reason[..end].to_string()));
         self.control_frames.push(Frame::ConnectionCloseApplication {
             error_code: code,
             reason: Bytes::copy_from_slice(&reason.as_bytes()[..end]),
@@ -472,10 +472,23 @@ impl Core {
     }
 
     pub(crate) fn max_datagram_size(&self) -> Option<usize> {
-        self.peer_max_datagram.map(|size| {
-            usize::try_from(size.saturating_sub(2))
+        self.peer_max_datagram.map(|frame_max| {
+            // `max_datagram_frame_size` bounds the whole DATAGRAM frame, so the
+            // application payload must leave room for the frame type and the
+            // length varint. Solve p + 1 + varint_len(p) <= frame_max.
+            let frame_max = usize::try_from(frame_max)
                 .unwrap_or(usize::MAX)
-                .min(PACKET_BUDGET - 8)
+                .min(PACKET_BUDGET);
+            let mut payload = frame_max.saturating_sub(2);
+            for _ in 0..3 {
+                let overhead = 1 + crate::wire::varint::encoded_len(payload as u64);
+                let next = frame_max.saturating_sub(overhead);
+                if next >= payload {
+                    break;
+                }
+                payload = next;
+            }
+            payload
         })
     }
 
@@ -2130,6 +2143,19 @@ mod tests {
         let mut bytes = BytesMut::new();
         frame.encode(&mut bytes).expect("encode");
         bytes.freeze()
+    }
+
+    #[test]
+    fn datagram_payload_accounts_for_the_frame_overhead() {
+        let mut core = core();
+        core.peer_max_datagram = Some(64);
+        assert_eq!(core.max_datagram_size(), Some(62));
+        core.send_datagram(Bytes::from(vec![0; 62]))
+            .expect("payload fits");
+        assert!(matches!(
+            core.send_datagram(Bytes::from(vec![0; 63])),
+            Err(QuicError::DatagramTooLarge { .. })
+        ));
     }
 
     #[test]

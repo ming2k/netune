@@ -62,6 +62,7 @@ pub trait QuicUdpSocket: Send + Sync + 'static {
 /// option or reject it. The returned socket is owned by exactly one endpoint
 /// for the lifetime of exactly one connection; a factory that returns the same
 /// socket to concurrent calls would make datagram demultiplexing ambiguous.
+/// `create` runs on the connector's async task and must not block.
 pub trait QuicUdpSocketFactory: Send + Sync + 'static {
     /// Create the socket stack for one new connection to `target`.
     fn create(
@@ -183,7 +184,13 @@ impl QuicSocketConfig {
             #[cfg(target_os = "linux")]
             socket.set_mark(mark)?;
             #[cfg(not(target_os = "linux"))]
-            let _ = mark;
+            {
+                let _ = mark;
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "SO_MARK is only supported on Linux",
+                ));
+            }
         }
 
         // Apply TOS / DSCP.
@@ -200,7 +207,13 @@ impl QuicSocketConfig {
             #[cfg(target_os = "linux")]
             socket.bind_device(Some(device.as_bytes()))?;
             #[cfg(not(target_os = "linux"))]
-            let _ = device;
+            {
+                let _ = device;
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "SO_BINDTODEVICE is only supported on Linux",
+                ));
+            }
         }
 
         // Bind source address if configured, else bind wildcard with matching family.

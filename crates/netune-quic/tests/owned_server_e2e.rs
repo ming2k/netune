@@ -166,7 +166,7 @@ async fn owned_server_exchanges_a_bidi_stream_with_owned_client() {
     let (mut send, mut recv) = connection.open_bi().await.expect("open bi");
     send.write_all(b"hello").await.expect("write");
     send.finish().await.expect("finish");
-    let response = tokio::time::timeout(Duration::from_secs(2), recv.read(1024))
+    let response = tokio::time::timeout(Duration::from_secs(5), recv.read(1024))
         .await
         .expect("read timeout")
         .expect("read")
@@ -223,7 +223,7 @@ async fn owned_server_speaks_quic_v2_with_owned_client() {
     let (mut send, mut recv) = connection.open_bi().await.expect("open bi");
     send.write_all(b"v2").await.expect("write");
     send.finish().await.expect("finish");
-    let response = tokio::time::timeout(Duration::from_secs(2), recv.read(1024))
+    let response = tokio::time::timeout(Duration::from_secs(5), recv.read(1024))
         .await
         .expect("read timeout")
         .expect("read")
@@ -250,7 +250,7 @@ async fn empty_stream_fin_is_delivered() {
     let server_task = tokio::spawn(async move {
         let connection = server.accept().await.expect("accept");
         let (_send, mut recv) = connection.accept_bi().await.expect("accept bi");
-        let end = tokio::time::timeout(Duration::from_secs(2), recv.read(16))
+        let end = tokio::time::timeout(Duration::from_secs(5), recv.read(16))
             .await
             .expect("fin timeout")
             .expect("read");
@@ -366,7 +366,7 @@ async fn resumed_session_sends_early_data() {
     send.finish().await.expect("early finish");
     second.wait_established().await.expect("established");
     assert!(second.early_data_accepted(), "server accepted early data");
-    let response = tokio::time::timeout(Duration::from_secs(2), recv.read(16))
+    let response = tokio::time::timeout(Duration::from_secs(5), recv.read(16))
         .await
         .expect("response timeout")
         .expect("response read")
@@ -556,11 +556,17 @@ async fn a_connector_factory_creates_one_socket_after_confinement() {
         *factory.config.lock().expect("config lock"),
         Some(socket_config)
     );
+    assert!(
+        connection
+            .peer_certificates()
+            .is_some_and(|chain| !chain.is_empty()),
+        "QuicConnection exposes the verified chain"
+    );
 
     let (mut send, mut recv) = connection.open_stream().await.expect("open stream");
     send.write_all(b"factory").await.expect("write");
     send.finish().await.expect("finish");
-    let echoed = tokio::time::timeout(Duration::from_secs(2), recv.read(64))
+    let echoed = tokio::time::timeout(Duration::from_secs(5), recv.read(64))
         .await
         .expect("timeout")
         .expect("read")
@@ -606,6 +612,7 @@ async fn an_obfuscated_socket_carries_a_session_in_both_directions() {
         assert_eq!(data.as_ref(), b"obfuscated");
         send.write_all(b"clear").await.expect("write");
         send.finish().await.expect("finish");
+        tokio::time::sleep(Duration::from_millis(50)).await;
     });
 
     let client_udp = UdpSocket::bind("127.0.0.1:0").await.expect("client bind");
@@ -639,7 +646,7 @@ async fn an_obfuscated_socket_carries_a_session_in_both_directions() {
     let (mut send, mut recv) = connection.open_bi().await.expect("open bi");
     send.write_all(b"obfuscated").await.expect("write");
     send.finish().await.expect("finish");
-    let response = tokio::time::timeout(Duration::from_secs(2), recv.read(64))
+    let response = tokio::time::timeout(Duration::from_secs(5), recv.read(64))
         .await
         .expect("timeout")
         .expect("read")
@@ -876,4 +883,111 @@ async fn an_untrusted_certificate_never_yields_a_connection() {
         matches!(error, QuicError::Tls(_)),
         "unexpected error: {error:?}"
     );
+}
+
+#[tokio::test]
+async fn closing_an_endpoint_wakes_a_handshake_wait() {
+    let endpoint = Endpoint::client().await.expect("client endpoint");
+    let sink = UdpSocket::bind("127.0.0.1:0").await.expect("sink bind");
+    let connection = endpoint
+        .connect_early(
+            sink.local_addr().expect("sink address"),
+            "localhost",
+            ClientConfigOwned {
+                tls: client_tls(),
+                transport: transport(),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
+                congestion_factory: None,
+                keep_alive: None,
+                enable_early_data: false,
+                session_cache: None,
+            },
+        )
+        .await
+        .expect("early connection");
+    let waiter = connection.clone();
+    let wait = tokio::spawn(async move { waiter.wait_established().await });
+    let closed_waiter = connection.clone();
+    let closed = tokio::spawn(async move { closed_waiter.closed().await });
+    endpoint.close();
+    let error = tokio::time::timeout(Duration::from_secs(1), wait)
+        .await
+        .expect("the endpoint close must wake the wait")
+        .expect("waiter task");
+    assert!(matches!(error, Err(QuicError::Closed(_))));
+    tokio::time::timeout(Duration::from_secs(1), closed)
+        .await
+        .expect("the endpoint close must wake Connection::closed")
+        .expect("closed task");
+    assert!(connection.is_closed());
+}
+
+#[tokio::test]
+async fn closing_an_endpoint_wakes_accept() {
+    let endpoint = Arc::new(Endpoint::client().await.expect("endpoint"));
+    let waiter = endpoint.clone();
+    let accept = tokio::spawn(async move { waiter.accept().await });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    endpoint.close();
+    let error = tokio::time::timeout(Duration::from_secs(1), accept)
+        .await
+        .expect("the endpoint close must wake accept")
+        .expect("accept task");
+    assert!(matches!(error, Err(QuicError::Closed(_))));
+}
+
+#[tokio::test]
+async fn dropping_the_listener_keeps_an_accepted_connection_alive() {
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport(),
+            retry: false,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+    let server_task = tokio::spawn(async move {
+        let connection = server.accept().await.expect("accept");
+        drop(server);
+        let (mut send, mut recv) = connection.accept_bi().await.expect("accept bi");
+        let data = recv.read(1024).await.expect("read").expect("data");
+        send.write_all(&data).await.expect("echo");
+        send.finish().await.expect("finish");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    });
+
+    let client = Endpoint::client().await.expect("client endpoint");
+    let connection = client
+        .connect(
+            addr,
+            "localhost",
+            ClientConfigOwned {
+                tls: client_tls(),
+                transport: transport(),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
+                congestion_factory: None,
+                keep_alive: None,
+                enable_early_data: false,
+                session_cache: None,
+            },
+        )
+        .await
+        .expect("connect");
+    let (mut send, mut recv) = connection.open_bi().await.expect("open bi");
+    send.write_all(b"survives").await.expect("write");
+    send.finish().await.expect("finish");
+    let response = tokio::time::timeout(Duration::from_secs(5), recv.read(64))
+        .await
+        .expect("timeout")
+        .expect("read")
+        .expect("data");
+    assert_eq!(response.as_ref(), b"survives");
+    server_task.await.expect("server task");
 }

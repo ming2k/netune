@@ -8,13 +8,13 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use bytes::Bytes;
 use rustls::{ClientConfig, ServerConfig};
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, Notify, mpsc, watch};
+use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 
 use crate::crypto::TlsSession;
 use crate::error::QuicError;
@@ -67,6 +67,11 @@ fn prepare_server_config(mut config: ServerConfigOwned) -> ServerConfigOwned {
 }
 
 /// A bound owned QUIC endpoint.
+///
+/// The endpoint owns the UDP demultiplexer: accepted connections need it alive
+/// to keep receiving datagrams. Dropping the endpoint keeps already-accepted
+/// connections alive and stops the demultiplexer when the last one ends;
+/// [`Endpoint::close`] closes them eagerly and wakes pending waiters.
 pub struct Endpoint {
     inner: Arc<EndpointInner>,
     driver: StdMutex<Option<tokio::task::JoinHandle<()>>>,
@@ -82,7 +87,11 @@ struct EndpointInner {
     reset_key: [u8; 32],
     retry_key: [u8; 32],
     cid_len: usize,
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
+    connections: Arc<AtomicUsize>,
+    driver_stop: Arc<Notify>,
+    close_tx: broadcast::Sender<()>,
+    _close_guard: broadcast::Receiver<()>,
 }
 
 impl Endpoint {
@@ -137,6 +146,7 @@ impl Endpoint {
         let (accept_tx, accept_rx) = mpsc::channel(64);
         let reset_key = random_bytes::<32>()?;
         let retry_key = random_bytes::<32>()?;
+        let (close_tx, close_guard) = broadcast::channel(1);
         let inner = Arc::new(EndpointInner {
             udp,
             local,
@@ -147,7 +157,11 @@ impl Endpoint {
             reset_key,
             retry_key,
             cid_len: 8,
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
+            connections: Arc::new(AtomicUsize::new(0)),
+            driver_stop: Arc::new(Notify::new()),
+            close_tx,
+            _close_guard: close_guard,
         });
         let driver = tokio::spawn(endpoint_driver(inner.clone()));
         Ok(Self {
@@ -182,6 +196,9 @@ impl Endpoint {
         server_name: &str,
         config: ClientConfigOwned,
     ) -> Result<Connection, QuicError> {
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err(QuicError::Closed("endpoint closed".to_string()));
+        }
         let local_cid = random_cid(8)?;
         let original_dcid = random_cid(8)?;
         let mut local_tp = config.transport;
@@ -212,8 +229,14 @@ impl Endpoint {
                 session_key,
             },
         )?;
-        let (connection, outgoing) =
-            spawn_connection(self.inner.clone(), target, core, None).await?;
+        let (connection, outgoing) = spawn_connection(
+            self.inner.clone(),
+            target,
+            core,
+            None,
+            vec![local_cid.clone()],
+        )
+        .await?;
         if let Some(sender) = connection.inner.incoming.clone() {
             self.inner
                 .routes
@@ -228,13 +251,24 @@ impl Endpoint {
     /// Accept the next established server connection.
     pub async fn accept(&self) -> Result<Connection, QuicError> {
         let mut rx = self.inner.accept_rx.lock().await;
-        rx.recv()
-            .await
-            .ok_or_else(|| QuicError::Closed("endpoint closed".to_string()))
+        let mut close_rx = self.inner.close_tx.subscribe();
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err(QuicError::Closed("endpoint closed".to_string()));
+        }
+        tokio::select! {
+            connection = rx.recv() => {
+                connection.ok_or_else(|| QuicError::Closed("endpoint closed".to_string()))
+            }
+            _ = close_rx.recv() => {
+                Err(QuicError::Closed("endpoint closed".to_string()))
+            }
+        }
     }
 
     pub fn close(&self) {
         self.inner.closed.store(true, Ordering::SeqCst);
+        let _ = self.inner.close_tx.send(());
+        self.inner.driver_stop.notify_one();
         if let Some(driver) = self.driver.lock().unwrap_or_else(|e| e.into_inner()).take() {
             driver.abort();
         }
@@ -244,7 +278,10 @@ impl Endpoint {
 impl Drop for Endpoint {
     fn drop(&mut self) {
         self.inner.closed.store(true, Ordering::SeqCst);
-        if let Some(driver) = self.driver.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        self.inner.driver_stop.notify_one();
+        if self.inner.connections.load(Ordering::SeqCst) == 0
+            && let Some(driver) = self.driver.lock().unwrap_or_else(|e| e.into_inner()).take()
+        {
             driver.abort();
         }
     }
@@ -253,12 +290,19 @@ impl Drop for Endpoint {
 async fn endpoint_driver(inner: Arc<EndpointInner>) {
     let mut buffer = vec![0u8; 64 * 1024];
     loop {
-        if inner.closed.load(Ordering::SeqCst) {
+        if inner.closed.load(Ordering::SeqCst) && inner.connections.load(Ordering::SeqCst) == 0 {
             break;
         }
-        let received = match udp_recv_from(&*inner.udp, &mut buffer).await {
-            Ok(received) => received,
-            Err(_) => break,
+        let received = tokio::select! {
+            received = udp_recv_from(&*inner.udp, &mut buffer) => match received {
+                Ok(received) => received,
+                Err(_) => {
+                    inner.closed.store(true, Ordering::SeqCst);
+                    let _ = inner.close_tx.send(());
+                    break;
+                }
+            },
+            _ = inner.driver_stop.notified() => continue,
         };
         let datagram = buffer[..received.0].to_vec();
         let Some(dcid) = parse_dcid(&datagram, &inner.routes, inner.cid_len) else {
@@ -360,11 +404,18 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
                 Ok(core) => core,
                 Err(_) => continue,
             };
-            let (connection, outgoing) =
-                match spawn_connection(inner.clone(), received.1, core, Some(datagram)).await {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                };
+            let (connection, outgoing) = match spawn_connection(
+                inner.clone(),
+                received.1,
+                core,
+                Some(datagram),
+                vec![client_dcid.clone(), local_cid.clone()],
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
             {
                 let mut routes = inner.routes.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(sender) = connection.inner.incoming.clone() {
@@ -397,12 +448,40 @@ struct ConnectionInner {
     readable: Notify,
     established: watch::Sender<bool>,
     closed: watch::Sender<Option<Arc<QuicError>>>,
+    close_rx: broadcast::Receiver<()>,
+    endpoint: Arc<EndpointInner>,
+    route_keys: Vec<Vec<u8>>,
     incoming: Option<mpsc::Sender<IncomingDatagram>>,
     udp: Arc<dyn QuicUdpSocket>,
     peer: StdMutex<SocketAddr>,
     candidate: StdMutex<Option<SocketAddr>>,
     local: SocketAddr,
     driver: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+fn remove_routes(inner: &ConnectionInner) {
+    let mut routes = inner
+        .endpoint
+        .routes
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for key in &inner.route_keys {
+        routes.remove(key);
+    }
+}
+
+impl Drop for ConnectionInner {
+    fn drop(&mut self) {
+        remove_routes(self);
+        let remaining = self
+            .endpoint
+            .connections
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1);
+        if self.endpoint.closed.load(Ordering::SeqCst) && remaining == 0 {
+            self.endpoint.driver_stop.notify_one();
+        }
+    }
 }
 
 /// An established or handshaking owned QUIC connection.
@@ -490,6 +569,7 @@ impl Connection {
     pub async fn wait_established(&self) -> Result<(), QuicError> {
         let mut established = self.inner.established.subscribe();
         let mut closed = self.inner.closed.subscribe();
+        let mut close_rx = self.inner.close_rx.resubscribe();
         loop {
             if *established.borrow() {
                 return Ok(());
@@ -511,6 +591,9 @@ impl Connection {
                             "connection task ended before the handshake completed".to_string(),
                         ));
                     }
+                }
+                _ = close_rx.recv() => {
+                    return Err(QuicError::Closed("endpoint closed".to_string()));
                 }
             }
         }
@@ -537,10 +620,14 @@ impl Connection {
 
     pub async fn closed(&self) {
         let mut closed = self.inner.closed.subscribe();
+        let mut close_rx = self.inner.close_rx.resubscribe();
         if closed.borrow().is_some() {
             return;
         }
-        let _ = closed.changed().await;
+        tokio::select! {
+            _ = closed.changed() => {}
+            _ = close_rx.recv() => {}
+        }
     }
 
     /// Initiate a 1-RTT key update (RFC 9001 Section 6).
@@ -742,16 +829,21 @@ async fn spawn_connection(
     peer: SocketAddr,
     core: Core,
     first: Option<Vec<u8>>,
+    route_keys: Vec<Vec<u8>>,
 ) -> Result<(Connection, Vec<Vec<u8>>), QuicError> {
     let (incoming_tx, mut incoming_rx) = mpsc::channel::<IncomingDatagram>(64);
     let (established_tx, _) = watch::channel(false);
     let (closed_tx, _) = watch::channel(None);
+    endpoint.connections.fetch_add(1, Ordering::SeqCst);
     let inner = Arc::new(ConnectionInner {
         core: StdMutex::new(core),
         notify: Notify::new(),
         readable: Notify::new(),
         established: established_tx,
         closed: closed_tx,
+        close_rx: endpoint.close_tx.subscribe(),
+        endpoint: endpoint.clone(),
+        route_keys,
         incoming: Some(incoming_tx.clone()),
         udp: endpoint.udp.clone(),
         peer: StdMutex::new(peer),
@@ -773,9 +865,15 @@ async fn spawn_connection(
     let driver_inner = inner.clone();
     let driver = tokio::spawn(async move {
         let mut timer = tokio::time::interval(TIMER_INTERVAL);
+        let mut close_rx = driver_inner.close_rx.resubscribe();
         loop {
             let mut outgoing: Vec<Vec<u8>> = Vec::new();
             let mut close_error: Option<QuicError> = None;
+            if let Some(error) = close_error {
+                remove_routes(&driver_inner);
+                let _ = driver_inner.closed.send(Some(Arc::new(error)));
+                break;
+            }
             tokio::select! {
                 Some((datagram, source)) = incoming_rx.recv() => {
                     let current = *driver_inner.peer.lock().unwrap_or_else(|e| e.into_inner());
@@ -839,6 +937,9 @@ async fn spawn_connection(
                         ));
                     }
                 }
+                _ = close_rx.recv() => {
+                    close_error = Some(QuicError::Closed("endpoint closed".to_string()));
+                }
                 _ = timer.tick() => {
                     let mut core = driver_inner.core.lock().unwrap_or_else(|e| e.into_inner());
                     let _ = core.handle_timeout();
@@ -881,6 +982,7 @@ async fn spawn_connection(
                 close_error = Some(QuicError::Closed("connection closed".to_string()));
             }
             if let Some(error) = close_error {
+                remove_routes(&driver_inner);
                 let _ = driver_inner.closed.send(Some(Arc::new(error)));
                 break;
             }
@@ -1104,4 +1206,114 @@ fn random_cid(len: usize) -> Result<Vec<u8>, QuicError> {
         .fill(&mut cid)
         .map_err(|_| QuicError::Config("secure random is unavailable".to_string()))?;
     Ok(cid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, SignatureScheme};
+
+    #[derive(Debug)]
+    struct AcceptAny;
+
+    impl ServerCertVerifier for AcceptAny {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![SignatureScheme::ED25519]
+        }
+    }
+
+    fn client_config() -> std::sync::Arc<rustls::ClientConfig> {
+        let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let mut config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAny))
+            .with_no_client_auth();
+        config.alpn_protocols = vec![b"h3".to_vec()];
+        std::sync::Arc::new(config)
+    }
+
+    #[tokio::test]
+    async fn a_closed_connection_removes_its_endpoint_route() {
+        let endpoint = Endpoint::client().await.expect("endpoint");
+        let sink = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("sink");
+        let connection = endpoint
+            .connect_early(
+                sink.local_addr().expect("sink address"),
+                "localhost",
+                ClientConfigOwned {
+                    tls: client_config(),
+                    transport: TransportParameters {
+                        max_idle_timeout: Some(1_000),
+                        ..TransportParameters::default()
+                    },
+                    versions: vec![crate::wire::packet::VERSION_1],
+                    congestion: crate::profile::CongestionAlgorithm::NewReno,
+                    congestion_factory: None,
+                    keep_alive: None,
+                    enable_early_data: false,
+                    session_cache: None,
+                },
+            )
+            .await
+            .expect("connect early");
+        assert_eq!(
+            endpoint
+                .inner
+                .routes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len(),
+            1
+        );
+        connection.close(0, "done");
+        connection.closed().await;
+        for _ in 0..50 {
+            if endpoint
+                .inner
+                .routes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the closed connection left its route behind");
+    }
 }

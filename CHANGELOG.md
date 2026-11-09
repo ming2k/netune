@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.14] - 2026-11-10
+
+### Fixed
+
+- **Endpoint shutdown wakes every waiter and keeps accepted work alive.**
+  `Endpoint::close` notifies `accept`, `Connection::wait_established`,
+  `Connection::closed` and the per-connection drivers. Dropping the endpoint
+  keeps already-accepted connections alive and stops the demultiplexer when the
+  last connection ends; a socket receive failure closes the endpoint and wakes
+  the same waiters.
+- **QUIC connection routes are removed when a connection ends.** The endpoint
+  routing table no longer grows for the lifetime of a long-running listener;
+  each connection removes its connection-ID entries on driver exit or drop.
+- **DATAGRAM payload limits include the frame overhead.** The advertised
+  `max_datagram_frame_size` bounds the whole DATAGRAM frame, so the engine now
+  solves `payload + 1 + varint_len(payload) <= frame_max` instead of assuming a
+  two-byte overhead. A small peer limit can no longer produce an oversized
+  frame that is queued forever.
+- **Unsupported socket options fail loudly.** `SO_MARK` and
+  `SO_BINDTODEVICE` return `Unsupported` on non-Linux targets instead of being
+  silently ignored, matching `[INV-SOCKET-01]`.
+- **A closed connection stores the same truncated close reason it sends**, so
+  the local and wire views of the close cannot diverge.
+
 ## [0.0.13] - 2026-11-10
 
 ### Changed

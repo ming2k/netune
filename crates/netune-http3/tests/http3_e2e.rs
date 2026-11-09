@@ -514,9 +514,14 @@ async fn extended_connect_protocol_crosses_the_h3_boundary() {
 #[tokio::test]
 async fn resumed_h3_session_sends_early_request() {
     let (server, addr) = make_server_endpoint().await;
+    // A listener owns the UDP demultiplexer; accepted connections need it to
+    // keep routing datagrams while their handlers run. Keep the endpoint alive
+    // for the duration of both exchanges.
+    let server = Arc::new(server);
+    let accept_loop = server.clone();
     tokio::spawn(async move {
         for _ in 0..2 {
-            let Ok(conn) = server.accept().await else {
+            let Ok(conn) = accept_loop.accept().await else {
                 return;
             };
             let settings = netune_http3::H3SettingsProfile::default();
@@ -571,6 +576,7 @@ async fn resumed_h3_session_sends_early_request() {
     assert_eq!(response.head().status(), 200);
     second.wait_handshake().await.expect("handshake");
     assert!(second.early_data_accepted(), "server accepted 0-RTT");
+    drop(server);
 }
 
 #[tokio::test]

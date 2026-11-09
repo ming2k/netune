@@ -33,6 +33,10 @@ pub enum H3Error {
     #[error("http3 frame error: {0}")]
     Frame(#[from] FrameError),
 
+    /// A capsule was malformed or oversized.
+    #[error("capsule error: {0}")]
+    Capsule(#[from] crate::proto::capsule::CapsuleError),
+
     /// QPACK encoding or decoding failed.
     #[error("qpack error: {0}")]
     Qpack(#[from] QpackError),
@@ -66,7 +70,7 @@ impl H3Error {
             Self::Qpack(QpackError::DecoderStream) => {
                 crate::proto::code::error_code::QPACK_DECODER_STREAM_ERROR
             }
-            Self::Header(_) | Self::Frame(_) | Self::Http(_) => {
+            Self::Header(_) | Self::Frame(_) | Self::Http(_) | Self::Capsule(_) => {
                 crate::proto::code::error_code::H3_MESSAGE_ERROR
             }
             _ => crate::proto::code::error_code::H3_INTERNAL_ERROR,

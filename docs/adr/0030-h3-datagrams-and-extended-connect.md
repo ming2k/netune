@@ -82,12 +82,10 @@ were unusable.
 - Datagrams survive the request-stream race through the bounded pending queue.
 - Extended CONNECT uses the existing `http::Request` extension map rather than a
   parallel request type.
-- WebTransport capsule protocols remain an application-layer concern; this ADR
-  provides the HTTP/3 CONNECT and datagram transport, not the capsule state
-  machine.
+- The generic RFC 9297 Capsule Protocol is added by ADR-0032; WebTransport
+  session semantics remain a separate application-layer decision.
 
 ## Known gaps
 
 
-- WebTransport capsules and stream-per-session semantics are not part of this
-  decision.
+- WebTransport session/stream semantics are not part of this decision.

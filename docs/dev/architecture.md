@@ -96,7 +96,7 @@ This document codifies the workspace topology, dependency direction, and non-neg
 - **Engine**: `wire` (varints, packet headers, frames, transport parameters), `crypto` (rustls packet protection and TLS handshake), `owned::core` (spaces, streams, ACK, flow control) and `owned::endpoint` (UDP routing and async handles).
 - **Crypto**: Initial/Handshake/1-RTT keys and packet/header protection come from `rustls::quic` backed by `aws-lc-rs`; no owned cipher or HKDF.
 - **Lifecycle**: Retry/address validation, keyed stateless reset, 1-RTT key update, fast loss detection, receive-window top-up, QUIC v2 and Version Negotiation are owned by `netune-quic` (ADR-0029).
-- **H3 extensions**: RFC 9297 datagrams and RFC 9220 extended CONNECT are SETTINGS-gated and owned by `netune-http3` (ADR-0030).
+- **H3 extensions**: RFC 9297 datagrams, RFC 9297 capsules and RFC 9220 extended CONNECT are owned by `netune-http3` (ADR-0030, ADR-0032). WebTransport draft session semantics remain a product boundary.
 - **0-RTT**: the client caches authenticated QUIC transport parameters; the server enables early data only with stateful single-use tickets; rejected early frames are replayed in 1-RTT (ADR-0031).
 - **Enforcement**: `crates/netune-quic/src/{wire,crypto,owned}/`, `ARCH-005` with an empty `ALLOWED_RUNTIME_DEPS`, and the quinn differential tests.
 

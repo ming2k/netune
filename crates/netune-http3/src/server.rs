@@ -168,6 +168,16 @@ impl H3ServerStream {
         self.stream.next_datagram().await
     }
 
+    /// Send one RFC 9297 capsule in the response body.
+    pub async fn send_capsule(&mut self, capsule: &crate::Capsule) -> Result<(), H3Error> {
+        self.stream.send_capsule(capsule).await
+    }
+
+    /// Read the next RFC 9297 capsule from the request body.
+    pub async fn next_capsule(&mut self) -> Result<Option<crate::Capsule>, H3Error> {
+        self.stream.next_capsule().await
+    }
+
     /// Send one HTTP/3 datagram associated with this request stream.
     pub async fn send_datagram(&mut self, data: &[u8]) -> Result<(), H3Error> {
         self.stream.send_datagram(data).await

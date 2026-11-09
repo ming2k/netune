@@ -35,6 +35,8 @@ Binding decisions for this repository. `Scope` tags identify the subsystems a re
 | [0029](0029-quic-lifecycle-hardening.md) | Harden the Owned QUIC Connection Lifecycle | accepted | transport/quic, protocol/rfc9000, protocol/rfc9001, protocol/rfc9369, crypto/provider, recovery/congestion | Retry/address validation, keyed stateless reset, 1-RTT key update, fast loss detection, receive-window top-up, QUIC v2 and Version Negotiation (`INV-QUIC-10..13`) | 2026-11-09 |
 | [0030](0030-h3-datagrams-and-extended-connect.md) | Own HTTP/3 Datagrams and Extended CONNECT | accepted | protocol/http3, protocol/rfc9220, protocol/rfc9297, transport/quic, api/http3 | SETTINGS-gated RFC 9297 datagrams routed by Quarter Stream ID and RFC 9220 `:protocol` CONNECT through a typed request extension (`INV-H3-09..11`) | 2026-11-09 |
 | [0031](0031-quic-0rtt-and-session-resumption.md) | Own QUIC 0-RTT and Session Resumption | accepted | transport/quic, protocol/rfc9001, crypto/provider, api/http3, security/replay | Authenticated transport-parameter cache, stateful single-use server tickets, 0-RTT packet path, early replay and early H3 requests (`INV-QUIC-16..17`, `INV-H3-12`) | 2026-11-09 |
+| [0032](0032-h3-capsule-protocol.md) | Own the RFC 9297 Capsule Protocol | accepted | protocol/http3, protocol/rfc9297, api/http3 | Varint/type/length capsule codec in HTTP message bodies, bounded partial reads, duplex CONNECT surface; WebTransport session draft remains out of scope (`INV-H3-13..14`) | 2026-11-09 |
+
 
 
 

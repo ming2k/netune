@@ -572,3 +572,74 @@ async fn resumed_h3_session_sends_early_request() {
     second.wait_handshake().await;
     assert!(second.early_data_accepted(), "server accepted 0-RTT");
 }
+
+#[tokio::test]
+async fn capsule_protocol_round_trips_on_extended_connect() {
+    let (server, addr) = make_server_endpoint().await;
+    tokio::spawn(async move {
+        let conn = server.accept().await.expect("server handshake");
+        let settings = netune_http3::H3SettingsProfile::default().with_extended_connect();
+        let mut h3_conn = netune_http3::H3ServerConnection::new(conn, &settings)
+            .await
+            .expect("server h3 connection");
+        let request = h3_conn.accept().await.expect("accept").expect("request");
+        let (_req, mut stream) = request.into_parts();
+        let response = http::Response::builder()
+            .status(200)
+            .body(())
+            .expect("response");
+        stream.send_response(response).await.expect("response head");
+        let capsule = stream
+            .next_capsule()
+            .await
+            .expect("read capsule")
+            .expect("capsule");
+        assert_eq!(capsule.kind, 0x1234);
+        assert_eq!(capsule.value.as_ref(), b"ping");
+        stream
+            .send_capsule(&netune_http3::Capsule::new(
+                0x1234,
+                Bytes::from_static(b"pong"),
+            ))
+            .await
+            .expect("send capsule");
+        stream.finish().await.expect("finish");
+    });
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let client_crypto = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("safe protocols")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    let connector = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto);
+    let mut client = H3Client::connect_with_settings(
+        &connector,
+        addr,
+        "localhost",
+        None,
+        netune_http3::H3SettingsProfile::default().with_extended_connect(),
+    )
+    .await
+    .expect("h3 client");
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let mut session = client
+        .connect_extended("webtransport", "https://localhost/session")
+        .await
+        .expect("extended connect");
+    session
+        .send_capsule(&netune_http3::Capsule::new(
+            0x1234,
+            Bytes::from_static(b"ping"),
+        ))
+        .await
+        .expect("send capsule");
+    let capsule = tokio::time::timeout(std::time::Duration::from_secs(1), session.next_capsule())
+        .await
+        .expect("capsule timeout")
+        .expect("capsule read")
+        .expect("capsule");
+    assert_eq!(capsule.kind, 0x1234);
+    assert_eq!(capsule.value.as_ref(), b"pong");
+}

@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes, BytesMut};
 use http::HeaderMap;
 use netune_quic::owned::{RecvStream, SendStream};
 
@@ -24,6 +24,7 @@ pub(crate) struct H3Stream {
     send: SendStream,
     recv: RecvStream,
     datagrams: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
+    capsule_buffer: BytesMut,
     data_remaining: u64,
     trailers: Option<HeaderMap>,
     head_sent: bool,
@@ -52,6 +53,7 @@ impl H3Stream {
             send,
             recv,
             datagrams,
+            capsule_buffer: BytesMut::new(),
             data_remaining: 0,
             trailers: None,
             head_sent: false,
@@ -152,6 +154,36 @@ impl H3Stream {
     /// Wait for the next HTTP/3 datagram associated with this request stream.
     pub async fn next_datagram(&mut self) -> Option<Bytes> {
         self.datagrams.recv().await
+    }
+
+    /// Send one RFC 9297 capsule in this stream's message body.
+    pub async fn send_capsule(&mut self, capsule: &crate::Capsule) -> Result<(), H3Error> {
+        let mut bytes = BytesMut::new();
+        capsule.encode(&mut bytes, crate::MAX_CAPSULE_VALUE)?;
+        self.send_data(&bytes).await
+    }
+
+    /// Read the next RFC 9297 capsule from this stream's message body.
+    pub async fn next_capsule(&mut self) -> Result<Option<crate::Capsule>, H3Error> {
+        loop {
+            match crate::Capsule::decode(&self.capsule_buffer, crate::MAX_CAPSULE_VALUE) {
+                Ok(Some((capsule, consumed))) => {
+                    self.capsule_buffer.advance(consumed);
+                    return Ok(Some(capsule));
+                }
+                Ok(None) => {}
+                Err(error) => return Err(H3Error::Capsule(error)),
+            }
+            match self.next_chunk(64 * 1024).await? {
+                Some(data) => self.capsule_buffer.extend_from_slice(&data),
+                None if self.capsule_buffer.is_empty() => return Ok(None),
+                None => {
+                    return Err(H3Error::Capsule(
+                        crate::proto::capsule::CapsuleError::Truncated,
+                    ));
+                }
+            }
+        }
     }
 
     pub async fn read_request_head(&mut self) -> Result<http::Request<()>, H3Error> {

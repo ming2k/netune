@@ -51,6 +51,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-H3-01..08]` | H3 request streaming is the primitive; SETTINGS profiles are typed and enforceable; decoded dynamic header sections are acknowledged and blocked streams wait on insertions; header order is independent of QPACK table state; no third-party H3/QPACK runtime ships; critical-stream closure is connection-fatal; QPACK references are bounded. | ADR-0024, ADR-0027 |
 | `[INV-H3-09..11]` | H3 datagrams require bilateral SETTINGS, route only by Quarter Stream ID and are bounded before registration; extended CONNECT is an opt-in typed `:protocol` extension. | ADR-0030 |
 | `[INV-H3-12]` | Early H3 request frames are retained until the handshake decision and replayed in 1-RTT after rejection. | ADR-0031 |
+| `[INV-H3-13..14]` | Capsule values are bounded, incomplete prefixes retained and truncation rejected; duplex CONNECT keeps the request body open after the response head. | ADR-0032 |
 | `[INV-SOCKET-01]` | A `SocketConfig` option is either applied or reported; no pre-connect option may be silently skipped by the fast path (`needs_manual_socket`). | ADR-0006, ADR-0010 |
 | `[INV-TRANSPORT-00..04]` | Replay safety: a pooled socket that drops before any response-head byte is replaced; after that point it is never retried. Idle bound, distinct `Incomplete`. | ADR-0001 (`00`), ADR-0005 (`01..04`) |
 | `[INV-EGRESS-01..03]` | Confinement is checked before connect; private, loopback, link-local and metadata ranges are refused. | ADR-0002 |

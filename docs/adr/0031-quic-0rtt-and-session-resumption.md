@@ -106,5 +106,5 @@ replays, and early stream data must be replayed after rejection.
 
 ## Known gaps
 
-None at the transport level. WebTransport capsule semantics remain outside this
-ADR.
+None at the transport level. WebTransport session semantics remain outside this
+ADR; generic capsules are owned by ADR-0032.

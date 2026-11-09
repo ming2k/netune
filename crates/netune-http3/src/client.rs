@@ -121,6 +121,26 @@ impl H3RequestBody {
         self.stream.send_datagram(data).await
     }
 
+    /// Send one RFC 9297 capsule in the request body.
+    pub async fn send_capsule(&mut self, capsule: &crate::Capsule) -> Result<(), H3Error> {
+        self.stream.send_capsule(capsule).await
+    }
+
+    /// Read the response head while keeping the request body open.
+    ///
+    /// This is the full-duplex form used by CONNECT and WebTransport-style
+    /// sessions: the returned response stream retains both directions.
+    pub async fn into_duplex(self) -> Result<H3ResponseStream, H3Error> {
+        await_response(
+            self.stream,
+            self.recorder,
+            self.context,
+            self.config,
+            self.exchange,
+        )
+        .await
+    }
+
     /// Finish the request without trailers and wait for the response head.
     pub async fn finish(self) -> Result<H3ResponseStream, H3Error> {
         let mut stream = self.stream;
@@ -204,6 +224,16 @@ impl H3ResponseStream {
     /// Wait for the next HTTP/3 datagram associated with this request stream.
     pub async fn next_datagram(&mut self) -> Option<Bytes> {
         self.stream.next_datagram().await
+    }
+
+    /// Send one RFC 9297 capsule on the retained request/response body.
+    pub async fn send_capsule(&mut self, capsule: &crate::Capsule) -> Result<(), H3Error> {
+        self.stream.send_capsule(capsule).await
+    }
+
+    /// Read the next RFC 9297 capsule from the response body.
+    pub async fn next_capsule(&mut self) -> Result<Option<crate::Capsule>, H3Error> {
+        self.stream.next_capsule().await
     }
 
     /// Read the next decoded body chunk, or `None` at the end.
@@ -563,6 +593,27 @@ impl H3Client {
         self.quic
             .as_ref()
             .is_some_and(|quic| quic.connection().early_data_accepted())
+    }
+
+    /// Open an RFC 9220 extended CONNECT and return a full-duplex session.
+    ///
+    /// Capsules are read/written through the returned stream; datagrams remain
+    /// available through `send_datagram`/`next_datagram`.
+    pub async fn connect_extended(
+        &mut self,
+        protocol: &str,
+        uri: &str,
+    ) -> Result<H3ResponseStream, H3Error> {
+        let mut request = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri(uri)
+            .body(())
+            .map_err(H3Error::Http)?;
+        request
+            .extensions_mut()
+            .insert(crate::ExtendedConnectProtocol(protocol.to_string()));
+        let body = self.open_request(request).await?;
+        body.into_duplex().await
     }
 
     /// The resolved QUIC profile that shapes this H3 connection.

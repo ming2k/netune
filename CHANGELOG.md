@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport parameters alongside rustls tickets; the server enables early data
   only with stateful single-use sessions; rejected early frames are replayed in
   1-RTT; H3 can send early requests before the handshake completes (ADR-0031).
+- **RFC 9297 Capsule Protocol.** Capsules are framed inside HTTP/3 message
+  bodies with bounded partial reads, exposed on request/response/server streams,
+  and usable on duplex extended CONNECT sessions (ADR-0032).
 - **HTTP/3 extension surfaces.** SETTINGS-gated RFC 9297 datagrams are routed
   to their request streams by Quarter Stream ID, and RFC 9220 extended CONNECT
   uses a typed `ExtendedConnectProtocol` request extension (ADR-0030).

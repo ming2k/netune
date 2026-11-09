@@ -18,6 +18,8 @@ superseded_by: null
   [ADR-0003](0003-workspace-decomposition-privilege-boundaries.md),
   [ADR-0004](0004-tls-fingerprint-profiles-pool-isolation.md),
   [ADR-0008](0008-datagram-transport-and-socks5-udp-association.md)
+- Amended by: [ADR-0027](0027-owned-h3-qpack.md) — HTTP/3 and QPACK are owned
+  by `netune-http3`; `quinn` remains the approved QUIC runtime.
 
 ---
 

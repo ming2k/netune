@@ -15,6 +15,7 @@ superseded_by: null
 - Amends: [ADR-0016](0016-quic-and-http3-transport.md), [ADR-0021](0021-named-quic-profiles.md)
 - Amended by: [ADR-0023](0023-h3-request-header-order.md) — decision 3's "no request profile" is replaced by an enforced request-order profile in the controlled h3 fork; the connection-identity decision stands.
 - Amended by: [ADR-0026](0026-controlled-dynamic-qpack.md) — H3 SETTINGS gain an enforceable profile recorded separately from the QUIC profile; the QUIC connection identity remains.
+- Amended by: [ADR-0027](0027-owned-h3-qpack.md) — the fork is replaced by the owned H3/QPACK implementation; the connection-identity decision stands.
 
 ---
 
@@ -96,7 +97,8 @@ the request-order profile is now real and request-scoped.
   - H3 request-header order impersonation remains unavailable until an owned QPACK/H3 encoder
     exists. This is a documented capability gap, not a fake surface.
   - `H3Client::into_parts` now returns the optional `QuicConnection` so the endpoint can be
-    retained; callers must keep it alive.
+    retained; callers must keep it alive. (Amended by ADR-0027: the owned encoder removes the
+    runtime handoff, so `into_parts` is no longer part of the public surface.)
 
 ## Rejected Alternatives & Negative Knowledge
 

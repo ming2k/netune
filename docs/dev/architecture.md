@@ -47,9 +47,9 @@ This document codifies the workspace topology, dependency direction, and non-neg
 
 ### 2.1 No Third-Party HTTP Runtime (ADR-0001)
 
-- **Red-line**: no third-party HTTP client, HTTP/2 implementation, or WebSocket runtime may appear in the production dependency graph of any crate.
-- **Permitted exception**: differential-test oracles (`hyper`, `hyper-util`, `tungstenite`) as `dev-dependencies` only, so owned codecs can be compared byte-for-byte against a battle-tested implementation.
-- **Enforcement**: the architecture gate `.github/scripts/check-architecture.py` reads every `Cargo.toml` and fails on a forbidden runtime in any `[dependencies]` section (`ARCH-005`/`ARCH-006`); the differential suites fail if the owned encoder diverges from the oracle.
+- **Red-line**: no third-party HTTP client, HTTP/2 implementation, HTTP/3 implementation, or WebSocket runtime may appear in the production dependency graph of any crate. HTTP/3 and QPACK are owned by `netune-http3` (ADR-0027); QUIC remains the approved `quinn` runtime (ADR-0016).
+- **Permitted exception**: differential-test oracles (`hyper`, `hyper-util`, `tungstenite`, `h3`, `h3-quinn`) as `dev-dependencies` only, so owned codecs can be compared byte-for-byte against a battle-tested implementation.
+- **Enforcement**: the architecture gate `.github/scripts/check-architecture.py` reads every `Cargo.toml` and fails on a forbidden runtime in any `[dependencies]` section (`ARCH-005`/`ARCH-006`), and fails if a `vendor/h3` or `vendor/h3-quinn` tree exists (`ARCH-010`); the differential suites fail if the owned encoder diverges from the oracle.
 
 ### 2.2 Structural Privilege Separation (ADR-0003)
 
@@ -81,8 +81,8 @@ This document codifies the workspace topology, dependency direction, and non-neg
 - **Red-line**: every TLS/H1/H2 profile name used by an attempt is resolved by `Client::plan` before a pool lookup or connector call. An unknown name is a hard error, never a fallback.
 - **Separation**: connection-fixed identity (TLS, SNI, evasion, socket/route, H2 SETTINGS) keys the pool; request-only wire profiles (HTTP/1 header order/casing, HTTP/2 pseudo-header order) do not.
 - **Multiplexed halves**: `H2ConnectionProfile` and `H2RequestProfile` are distinct types; the connection stores both, but only the connection half enters the pool key (`[INV-CUSTOM-12..13]`).
-- **H3 identity**: HTTP/3 has no second handshake; its connection identity is the resolved QUIC profile. Typed HTTP/3 SETTINGS (including QPACK capacity and blocked-stream budget) are a separate connection-fixed profile, and request-header order is request-scoped and enforced before QPACK encoding by the controlled h3 fork (`[INV-CUSTOM-16..20]`, `[INV-H3-03]`).
-- **Enforcement**: `[INV-CUSTOM-08..20]`, `[INV-H3-03]`; `ConnectionPlan` is the only path from `Target` to a request, unknown-profile tests cover H1 and H2, H3/QUIC integration asserts the resolved profile and SETTINGS profile, and the fork's ordered-header test asserts wire order.
+- **H3 identity**: HTTP/3 has no second handshake; its connection identity is the resolved QUIC profile. Typed HTTP/3 SETTINGS (including QPACK capacity and blocked-stream budget) are a separate connection-fixed profile, and request-header order is request-scoped and enforced before QPACK encoding by the owned H3/QPACK implementation (`[INV-CUSTOM-16..19]`, `[INV-H3-03..08]`).
+- **Enforcement**: `[INV-CUSTOM-08..19]`, `[INV-H3-03..08]`; `ConnectionPlan` is the only path from `Target` to a request, unknown-profile tests cover H1 and H2, H3/QUIC integration asserts the resolved profile and SETTINGS profile, and the owned ordered-header test asserts wire order.
 
 ### 2.4.2 H3 Ingress Is a Peer Transport (ADR-0025)
 

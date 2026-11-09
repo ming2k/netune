@@ -13,30 +13,25 @@
 
 use std::collections::HashMap;
 
-use h3::RequestHeaderOrder;
-
 use crate::error::H3Error;
+use crate::proto::headers::RequestHeaderOrder;
+use crate::proto::settings::Settings;
 
 /// An enforceable HTTP/3 SETTINGS profile.
 ///
-/// QPACK dynamic-table capacity is present only because the controlled `h3`
-/// fork now owns both the encoder and decoder streams. A profile that advertises
-/// a capacity the transport cannot enforce is rejected; zero keeps the
-/// stateless path.
+/// QPACK dynamic-table capacity is present because the owned decoder and
+/// encoder enforce it. A profile that advertises a capacity the transport
+/// cannot enforce is rejected; zero keeps the stateless path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H3SettingsProfile {
     pub name: String,
     /// `SETTINGS_MAX_FIELD_SECTION_SIZE`, in bytes.
     pub max_field_section_size: u64,
-    /// `SETTINGS_H3_DATAGRAM`.
-    pub enable_datagram: bool,
-    /// `SETTINGS_ENABLE_CONNECT_PROTOCOL` / extended CONNECT.
-    pub enable_extended_connect: bool,
     /// Whether reserved/grease SETTINGS identifiers are emitted.
     pub send_grease: bool,
     /// `SETTINGS_QPACK_MAX_TABLE_CAPACITY` we advertise for peer encoders.
     ///
-    /// Non-zero requires the QPACK decoder path; this fork owns it and waits
+    /// Non-zero requires the QPACK decoder path; this crate owns it and waits
     /// for missing insertions instead of failing closed.
     pub qpack_max_table_capacity: u64,
     /// `SETTINGS_QPACK_BLOCKED_STREAMS` we advertise.
@@ -48,8 +43,6 @@ impl Default for H3SettingsProfile {
         Self {
             name: "default".to_string(),
             max_field_section_size: 16 * 1024 * 1024,
-            enable_datagram: false,
-            enable_extended_connect: false,
             send_grease: true,
             qpack_max_table_capacity: 0,
             qpack_blocked_streams: 0,
@@ -69,8 +62,6 @@ impl H3SettingsProfile {
     pub fn minimal() -> Self {
         Self {
             name: "minimal".to_string(),
-            enable_datagram: false,
-            enable_extended_connect: false,
             send_grease: false,
             ..Self::default()
         }
@@ -82,16 +73,6 @@ impl H3SettingsProfile {
             name: "dynamic".to_string(),
             qpack_max_table_capacity: 4096,
             qpack_blocked_streams: 16,
-            ..Self::default()
-        }
-    }
-
-    /// Extended CONNECT and HTTP datagrams enabled.
-    pub fn datagrams() -> Self {
-        Self {
-            name: "datagrams".to_string(),
-            enable_datagram: true,
-            enable_extended_connect: true,
             ..Self::default()
         }
     }
@@ -123,7 +104,26 @@ impl H3SettingsProfile {
         if self.qpack_blocked_streams >= 65_535 {
             return Err("http3.qpack_blocked_streams must be below 65535");
         }
+        if self.qpack_max_table_capacity == 0 && self.qpack_blocked_streams != 0 {
+            return Err("http3.qpack_blocked_streams requires a non-zero table capacity");
+        }
         Ok(())
+    }
+
+    /// Lower this profile into the SETTINGS frame payload.
+    pub fn to_settings(&self) -> Settings {
+        Settings {
+            qpack_max_table_capacity: self.qpack_max_table_capacity,
+            max_field_section_size: Some(self.max_field_section_size),
+            qpack_blocked_streams: self.qpack_blocked_streams,
+            enable_connect_protocol: false,
+            h3_datagram: false,
+            grease: if self.send_grease {
+                vec![(0x21, 0)]
+            } else {
+                Vec::new()
+            },
+        }
     }
 }
 
@@ -141,7 +141,6 @@ impl Default for H3SettingsRegistry {
         for profile in [
             H3SettingsProfile::default(),
             H3SettingsProfile::minimal(),
-            H3SettingsProfile::datagrams(),
             H3SettingsProfile::dynamic(),
         ] {
             registry = registry.with_profile(profile);
@@ -343,12 +342,6 @@ mod tests {
     fn settings_profiles_are_enforceable_and_independent() {
         let registry = H3SettingsRegistry::default();
         assert!(!registry.resolve("minimal").expect("minimal").send_grease);
-        assert!(
-            registry
-                .resolve("datagrams")
-                .expect("datagrams")
-                .enable_datagram
-        );
         assert_eq!(
             H3SettingsProfile::default().max_field_section_size,
             16 * 1024 * 1024
@@ -364,6 +357,18 @@ mod tests {
                 .with_qpack(0, 65_536)
                 .validate()
                 .is_err()
+        );
+        assert!(
+            H3SettingsProfile::default()
+                .with_qpack(0, 1)
+                .validate()
+                .is_err()
+        );
+        assert_eq!(
+            H3SettingsProfile::dynamic()
+                .to_settings()
+                .qpack_max_table_capacity,
+            4096
         );
     }
 }

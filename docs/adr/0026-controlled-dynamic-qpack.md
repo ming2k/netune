@@ -1,20 +1,21 @@
 ---
 id: ADR-0026
 title: "Controlled Dynamic QPACK and Typed H3 SETTINGS"
-status: accepted
+status: superseded
 date: 2026-11-09
 scope: [protocol/http3, transport/quic, trace/model, workspace/topology]
-superseded_by: null
+superseded_by: ADR-0027
 ---
 
 # 0026. Controlled Dynamic QPACK and Typed H3 SETTINGS
 
-- Status: Accepted
+- Status: Superseded by [ADR-0027](0027-owned-h3-qpack.md)
 - Date: 2026-11-09
 - Deciders: Ming Li
 - Amends: [ADR-0016](0016-quic-and-http3-transport.md),
   [ADR-0022](0022-http3-connection-identity.md),
   [ADR-0023](0023-h3-request-header-order.md)
+- Superseded by: [ADR-0027](0027-owned-h3-qpack.md) — the owned QPACK codec replaces the fork while preserving the SETTINGS/acknowledgement decisions (INV-H3-03..05).
 
 ---
 

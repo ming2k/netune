@@ -1,19 +1,20 @@
 ---
 id: ADR-0023
 title: "Own H3 Request Header Order Through a Controlled h3 Fork"
-status: accepted
+status: superseded
 date: 2026-11-09
 scope: [protocol/http3, transport/customizability, trace/model]
-superseded_by: null
+superseded_by: ADR-0027
 ---
 
 # 0023. Own H3 Request Header Order Through a Controlled h3 Fork
 
-- Status: Accepted
+- Status: Superseded by [ADR-0027](0027-owned-h3-qpack.md)
 - Date: 2026-11-09
 - Deciders: Ming Li
 - Amends: [ADR-0016](0016-quic-and-http3-transport.md), [ADR-0022](0022-http3-connection-identity.md)
 - Amended by: [ADR-0026](0026-controlled-dynamic-qpack.md) — the fork now also drives dynamic QPACK and typed SETTINGS; the request-order decision stands.
+- Superseded by: [ADR-0027](0027-owned-h3-qpack.md) — the fork is replaced by the owned H3/QPACK implementation; the request-order and request-scoped decisions are preserved.
 
 ---
 

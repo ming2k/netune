@@ -17,10 +17,11 @@ Rules, each mapped to the standard that states it:
     ARCH-007  every crate inherits the workspace version line
     ARCH-008  the transmit path is not reachable without `inject`
     ARCH-009  production dependencies carry an explicit `version` with their `path`
+    ARCH-010  H3/QPACK is owned; no vendored protocol runtime tree
 
 The distinction that matters is production vs. dev: an oracle (`hyper`,
-`tungstenite`) is allowed as a `dev-dependency`, because a differential test
-compares owned bytes against it and never links it into the artifact that
+`tungstenite`, `h3`) is allowed as a `dev-dependency`, because a differential
+test compares owned bytes against it and never links it into the artifact that
 ships. `ARCH-005`/`ARCH-006` therefore read `[dependencies]` only, which is the
 question "what ships", not "what the test suite resolves".
 
@@ -108,7 +109,6 @@ FORBIDDEN_QUIC_RUNTIME = {
 }
 ALLOWED_RUNTIME_DEPS: dict[str, set[str]] = {
     "netune-quic": {"quinn", "quinn-proto"},
-    "netune-http3": {"h3", "h3-quinn"},
 }
 FORBIDDEN_WS_RUNTIME = {
     "tungstenite",
@@ -263,7 +263,7 @@ class Workspace:
                         self.report(
                             "ARCH-005",
                             crate,
-                            f"production dependency on {name} (HTTP/2 or QUIC runtime, ADR-0001/ADR-0010)",
+                            f"production dependency on {name} (third-party protocol runtime, ADR-0001/ADR-0027)",
                         )
                 if name in FORBIDDEN_WS_RUNTIME:
                     self.report(
@@ -365,11 +365,22 @@ class Workspace:
 
     # -- driver -----------------------------------------------------------
 
+    def check_vendor_tree(self) -> None:
+        """ADR-0027 owns H3/QPACK; a vendored runtime tree is a regression."""
+        for name in ("vendor/h3", "vendor/h3-quinn"):
+            if (self.root / name).exists():
+                self.report(
+                    "ARCH-010",
+                    "vendor",
+                    f"{name} exists; H3/QPACK is owned by netune-http3 (ADR-0027)",
+                )
+
     def run(self) -> list[Violation]:
         self.check_edges()
         self.check_protocol_runtimes()
         self.check_versions()
         self.check_transmit_path()
+        self.check_vendor_tree()
         return sorted(set(self.violations))
 
 

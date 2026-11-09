@@ -26,7 +26,7 @@ This guide defines how `netune` is tested, what each test tier is for, and the r
 | Tier | Location | Runs against |
 | :--- | :--- | :--- |
 | 1. Unit | `#[cfg(test)]` modules in `src/` | Pure functions, state machines |
-| 2. Differential | `crates/*/tests/differential.rs`, `tests/golden.rs` | A battle-tested oracle as a **dev-dependency only** |
+| 2. Differential | `crates/*/tests/differential.rs`, `tests/golden.rs`, `crates/netune-http3/tests/h3_interop.rs` | A battle-tested oracle as a **dev-dependency only**; the H3 suite runs the owned stack against `h3`/`h3-quinn` in both directions |
 | 3. Integration | `crates/netune/tests/*.rs`, `crates/netune-server/tests/{ingress,http3_ingress}.rs`, `crates/netune-http3/tests/http3_e2e.rs` | Loopback mock origins, TLS fixtures, `FaultIo`; ingress shedding, slow-peer bounds, drain; H3 streaming upload, dynamic QPACK and per-exchange trace |
 | 4. End-to-end | `crates/netune/tests/{e2e,tls_e2e,ws,ws_session}.rs`, `crates/netune-server/tests/interop.rs`, `crates/netune-server/tests/http3_ingress.rs` | A full client lifecycle over a real socket; our H1/H2 client against our server; our HTTP/3 client against `H3Server` over a real QUIC handshake |
 
@@ -74,8 +74,8 @@ cargo nextest run -p netune-ws
 # Plain cargo, if nextest is unavailable
 cargo test --workspace
 
-# The controlled h3 fork is not a workspace member
-cargo test --manifest-path vendor/h3/Cargo.toml
+# H3/QPACK differential interop against the dev-only h3 oracle
+cargo test -p netune-http3 --test h3_interop
 
 # Deterministic zero-cost gate (requires valgrind + iai-callgrind-runner)
 cargo bench -p netune --bench zero_cost

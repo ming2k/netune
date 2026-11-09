@@ -341,6 +341,52 @@ def test_tungstenite_as_a_dev_oracle_is_allowed() -> None:
     expect_clean("ARCH-005", BASE_FILES, message="the differential oracle as a dev-dependency")
 
 
+def test_h3_in_production_is_reported() -> None:
+    expect(
+        "ARCH-005",
+        merged(
+            **{
+                "crates/netune-http3/Cargo.toml": manifest(
+                    name="netune-http3",
+                    dependencies="""
+                        netune-quic = { path = "../netune-quic", version = "1.2.3" }
+                        h3 = "0.0.8"
+                    """,
+                )
+            }
+        ),
+        message="third-party H3 runtime in a production graph (ADR-0027)",
+    )
+
+
+def test_h3_as_a_dev_oracle_is_allowed() -> None:
+    expect_clean(
+        "ARCH-005",
+        merged(
+            **{
+                "crates/netune-http3/Cargo.toml": manifest(
+                    name="netune-http3",
+                    dependencies="""
+                        netune-quic = { path = "../netune-quic", version = "1.2.3" }
+                    """,
+                    dev_dependencies="""
+                        h3 = "0.0.8"
+                    """,
+                )
+            }
+        ),
+        message="h3 as a dev-only interop oracle",
+    )
+
+
+def test_vendored_h3_tree_is_reported() -> None:
+    expect(
+        "ARCH-010",
+        merged(**{"vendor/h3/Cargo.toml": "[package]\nname = \"h3\"\nversion = \"0.0.8\"\n"}),
+        message="a vendored H3 runtime tree",
+    )
+
+
 def test_hyper_in_production_is_reported() -> None:
     expect(
         "ARCH-006",

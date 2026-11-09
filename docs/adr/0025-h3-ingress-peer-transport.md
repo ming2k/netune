@@ -12,6 +12,7 @@ superseded_by: null
 - Status: Accepted
 - Date: 2026-11-09
 - Deciders: Ming Li
+- Amended by: [ADR-0027](0027-owned-h3-qpack.md) — the H3 state machine is now owned by `netune-http3`; the ingress topology decision is unchanged.
 - Amends: [ADR-0011](0011-server-side-ingress-transport.md),
   [ADR-0012](0012-http2-ingress.md),
   [ADR-0016](0016-quic-and-http3-transport.md)
@@ -110,8 +111,9 @@ per-exchange events and drain behavior are still recorded.
 
 - **`[INV-SERVER-23]` H3 Exchange Identity Is Non-Zero**: every H3 ingress
   exchange gets a distinct non-zero trace id; the wire stream id lives in the
-  `H3StreamStart` event. *Enforced by*: `next_exchange` in `h3::serve_connection`
-  and `http3_ingress` asserting two derived exchanges.
+  `H3StreamStart` event. *Enforced by*: `next_exchange` in
+  `netune-server/src/h3.rs::serve_connection` and `http3_ingress` asserting two
+  derived exchanges.
 
 - **`[INV-SERVER-24]` H3 Owns the Same Bounds**: body timeout, handler timeout,
   write timeout, body ceiling and drain apply to H3 through the same

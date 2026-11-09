@@ -17,7 +17,7 @@ This document provides a factual overview of all crates comprising the `netune` 
 | `netune` | `crates/netune` | `0.0.10` | **Egress** orchestrator: DNS, TCP, TLS, **UDP datagrams**, pool, proxy (incl. SOCKS5 UDP associate), egress confinement, and client request orchestration |
 | `netune-server` | `crates/netune-server` | `0.0.10` | **Ingress** orchestrator: TCP accept loop, admission control, slow-peer bounds, per-connection ingress tracing, graceful drain, HTTP/1.1 + HTTP/2 + optional HTTP/3 over one handler |
 | `netune-quic` | `crates/netune-quic` | `0.0.10` | First-class QUIC transport (RFC 9000, RFC 9221) with `QuicProfile` handshake shaping, abstract socket stack, and unified `aws-lc-rs` crypto (`[INV-QUIC-01..04]`) |
-| `netune-http3` | `crates/netune-http3` | `0.0.10` | HTTP/3 client and server adapter (RFC 9114), controlled dynamic QPACK via the h3 fork, and typed SETTINGS profiles |
+| `netune-http3` | `crates/netune-http3` | `0.0.10` | Owned HTTP/3 client and server transport (RFC 9114), owned dynamic QPACK (RFC 9204), and typed SETTINGS profiles |
 | `netune-probe` | `crates/netune-probe` | `0.0.10` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
 
 ---
@@ -145,17 +145,17 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `AsyncUdpSocket` / `QuicSocketConfig`: Pluggable UDP socket abstraction seam for consumer proxy obfuscation and port-hopping.
 
 ### `netune-http3`
-- **Dependencies**: `netune-quic`, `netune-trace`, `bytes`, `h3`, `h3-quinn`, `http`, `tokio`.
+- **Dependencies**: `netune-quic`, `netune-trace`, `bytes`, `http`, `tokio`. Dev-only interop oracles: `h3`, `h3-quinn` (never linked into the shipping crate).
 - **Key Types**:
   - `H3Client`: Dispatches RFC 9114 HTTP/3 requests over `netune-quic` connections. `open_request` returns a streaming `H3RequestBody`; `send` composes it; `execute` buffers with a configured body ceiling ([ADR-0024](../adr/0024-h3-streaming-request-bodies.md)).
   - `H3Client::connect` / `connect_with_config`: resolves a `QuicConnector` profile, retains the `QuicConnection` (and endpoint) for the H3 driver's lifetime, and exposes `quic_profile()` as the connection identity ([ADR-0022](../adr/0022-http3-connection-identity.md)).
   - `H3ClientConfig`: request/response-head/body-chunk deadlines and `max_body_bytes`.
-  - `H3SettingsProfile` / `H3SettingsRegistry`: typed, validated SETTINGS (QPACK capacity/blocked streams, max field section, datagram, extended CONNECT, grease). `H3SettingsProfile::dynamic()` opts into dynamic QPACK; the default is stateless ([ADR-0026](../adr/0026-controlled-dynamic-qpack.md)).
-  - `H3ServerConnection` / `H3ServerRequest` / `H3ServerStream`: the server-side adapter over the controlled h3 runtime, kept in this leaf so `netune-server` does not import h3 directly.
+  - `H3SettingsProfile` / `H3SettingsRegistry`: typed, validated SETTINGS (QPACK capacity/blocked streams, max field section, grease). `H3SettingsProfile::dynamic()` opts into dynamic QPACK; the default is stateless ([ADR-0027](../adr/0027-owned-h3-qpack.md)).
+  - `H3ServerConnection` / `H3ServerRequest` / `H3ServerStream`: the server-side adapter over the owned H3 state machine, kept in this leaf so `netune-server` does not import a third-party H3 runtime.
   - `H3TraceContext` / `H3ResponseStream::trace` / `H3Response.trace`: per-exchange `RequestTrace` with `Fidelity::l0()`, the resolved QUIC profile as `identity.h3_profile`, and the SETTINGS profile as `identity.h3_settings_profile`.
-  - `H3RequestProfile` / `H3RequestRegistry`: named pseudo-header and regular-header order, applied before QPACK encoding through the controlled h3 fork ([ADR-0023](../adr/0023-h3-request-header-order.md)).
+  - `H3RequestProfile` / `H3RequestRegistry`: named pseudo-header and regular-header order, applied by the owned QPACK encoder before field lines are emitted ([ADR-0027](../adr/0027-owned-h3-qpack.md)).
   - `H3RequestBody`: chunked upload, trailers, and transition to `H3ResponseStream`.
-  - Dynamic QPACK: request/response head and trailer blocks use the fork encoder/decoder, acknowledge decoded sections, and wait for missing insertions.
+  - Dynamic QPACK: request/response head and trailer blocks use the owned encoder/decoder, acknowledge decoded sections, and wait for missing insertions. The encoder references a dynamic entry only after acknowledgement; the decoder enforces the advertised capacity and blocked-stream budget.
   - Request/response lifecycle with deterministic timing derivation in `netune-trace` (`[INV-QUIC-03]`).
 
 ### `netune-probe`

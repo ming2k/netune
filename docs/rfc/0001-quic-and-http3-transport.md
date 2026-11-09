@@ -280,6 +280,7 @@ Once ratified and implemented:
 1. **Owned QPACK vs. Existing Codec**:
    Should `netune-http3` implement a lightweight, zero-allocation QPACK decoder from scratch (consistent with `netune-http2`'s owned HPACK implementation), or wrap an established crate like `h3` during Phase 1?
    * *Recommendation*: Start with `h3` over `netune-quic` for the alpha release, then distill an owned RFC 9204 QPACK implementation for full zero-copy trace fidelity.
+   * *Resolved*: [ADR-0027](../adr/0027-owned-h3-qpack.md) owns both the RFC 9114 state machine and RFC 9204 QPACK in `netune-http3`; `h3` remains a dev-only interop oracle.
 2. **Multipath QUIC**:
    Should `QuicConnector` anticipate Multipath QUIC (draft-ietf-quic-multipath) interfaces now?
    * *Recommendation*: Keep interfaces scoped to single-path RFC 9000 in RFC-0001; reserve multi-connection aggregation for a subsequent RFC.

@@ -12,11 +12,6 @@ readme = "README.md"
 # Shared external dependencies, pinned once here. Crates reference them with
 # `dep = { workspace = true }` (optionally adding features). Internal crates
 # stay as path dependencies in each member's Cargo.toml.
-[patch.crates-io]
-# Narrow, audited fork: exposes request-header order before QPACK encoding.
-# See vendor/h3/PATCHES.md and ADR-0023.
-h3 = { path = "vendor/h3" }
-
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -34,6 +29,8 @@ rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }
 socket2 = { version = "0.6", features = ["all"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 quinn-proto = { version = "0.11", default-features = false, features = ["rustls-aws-lc-rs"] }
+# Dev-only interop oracles. netune-http3 owns its H3 state machine and QPACK
+# codec (ADR-0027); neither crate may appear in a production dependency graph.
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 thiserror = "2.0"

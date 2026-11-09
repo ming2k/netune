@@ -6,8 +6,8 @@ can stream an upload; the server is a separate QUIC listener.
 
 The decisions behind this guide are [ADR-0024](../adr/0024-h3-streaming-request-bodies.md)
 (streaming request bodies), [ADR-0025](../adr/0025-h3-ingress-peer-transport.md)
-(HTTP/3 ingress is a peer transport) and [ADR-0026](../adr/0026-controlled-dynamic-qpack.md)
-(dynamic QPACK and typed SETTINGS).
+(HTTP/3 ingress is a peer transport) and [ADR-0027](../adr/0027-owned-h3-qpack.md)
+(owned H3/QPACK and typed SETTINGS).
 
 ---
 
@@ -45,9 +45,9 @@ let bytes = response.read_to_end().await?;
 
 `send` remains the buffered convenience; it composes `open_request`, so there is
 no second request implementation. `H3SettingsProfile::default()` advertises
-zero QPACK capacity (stateless header blocks); `dynamic()` opts into the
-controlled dynamic path. A SETTINGS profile is connection-fixed and is recorded
-in the trace as `identity.h3_settings_profile`.
+zero QPACK capacity (stateless header blocks); `dynamic()` opts into the owned
+dynamic path. A SETTINGS profile is connection-fixed and is recorded in the
+trace as `identity.h3_settings_profile`.
 
 ## 2. Server: bind a QUIC ingress listener
 

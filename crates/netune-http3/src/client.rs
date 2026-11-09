@@ -6,14 +6,16 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use netune_trace::{
     AttemptRef, ConnectionIdentity, ConnectionInfo, EndpointRef, EventKind, Fidelity, RequestTrace,
     TRACE_SCHEMA_VERSION, TraceCollector, TraceId,
 };
 
+use crate::connection::{Connection, H3Stream, Role};
 use crate::error::H3Error;
 use crate::profile::{H3RequestProfile, H3SettingsProfile};
+use crate::proto::headers::{encode_request, encode_trailers};
 
 /// Bounds and trace identity for one HTTP/3 session.
 #[derive(Debug, Clone)]
@@ -75,11 +77,8 @@ impl H3Response {
 /// Created by [`H3Client::open_request`]. The request head has already been
 /// encoded and written when this value exists; body chunks are written one at
 /// a time, so an upload never has to be buffered in full.
-///
-/// `finish` (or `send_trailers`) consumes the value and yields the streaming
-/// response. Dropping it aborts the request stream.
 pub struct H3RequestBody {
-    stream: h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    stream: H3Stream,
     recorder: Option<TraceCollector>,
     context: Option<H3TraceContext>,
     config: H3ClientConfig,
@@ -112,7 +111,7 @@ impl H3RequestBody {
         deadline(
             "request body",
             self.config.request_timeout,
-            self.stream.send_data(bytes),
+            self.stream.send_data(&bytes),
         )
         .await
     }
@@ -120,11 +119,9 @@ impl H3RequestBody {
     /// Finish the request without trailers and wait for the response head.
     pub async fn finish(self) -> Result<H3ResponseStream, H3Error> {
         let mut stream = self.stream;
-        deadline(
-            "request finish",
-            self.config.request_timeout,
-            stream.finish(),
-        )
+        deadline("request finish", self.config.request_timeout, async {
+            stream.finish_send()
+        })
         .await?;
         await_response(
             stream,
@@ -142,11 +139,12 @@ impl H3RequestBody {
         self,
         trailers: http::HeaderMap,
     ) -> Result<H3ResponseStream, H3Error> {
+        let fields = encode_trailers(&trailers)?;
         let mut stream = self.stream;
         deadline(
             "request trailers",
             self.config.request_timeout,
-            stream.send_trailers(trailers),
+            stream.send_trailers(&fields),
         )
         .await?;
         await_response(
@@ -162,7 +160,7 @@ impl H3RequestBody {
 
 /// A streaming HTTP/3 response.
 pub struct H3ResponseStream {
-    stream: h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    stream: H3Stream,
     head: http::Response<()>,
     recorder: Option<TraceCollector>,
     context: Option<H3TraceContext>,
@@ -201,12 +199,11 @@ impl H3ResponseStream {
         let next = deadline(
             "response body",
             self.config.body_chunk_timeout,
-            self.stream.recv_data(),
+            self.stream.next_chunk(64 * 1024),
         )
         .await?;
         match next {
-            Some(mut chunk) => {
-                let bytes = chunk.copy_to_bytes(chunk.remaining());
+            Some(bytes) => {
                 self.received = self.received.saturating_add(bytes.len());
                 if self.received > self.config.max_body_bytes {
                     return Err(H3Error::BodyTooLarge {
@@ -231,7 +228,7 @@ impl H3ResponseStream {
         deadline(
             "response trailers",
             self.config.body_chunk_timeout,
-            self.stream.recv_trailers(),
+            self.stream.read_trailers(),
         )
         .await
     }
@@ -275,8 +272,7 @@ impl H3ResponseStream {
 
 /// An active HTTP/3 client session driving a QUIC connection.
 pub struct H3Client {
-    driver: tokio::task::JoinHandle<()>,
-    send_request: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
+    connection: Connection,
     recorder: Option<TraceCollector>,
     /// The QUIC connection that owns the endpoint. Present when the client was
     /// built through [`H3Client::connect`]; dropping it would tear down the
@@ -288,9 +284,6 @@ pub struct H3Client {
     settings_profile: H3SettingsProfile,
     request_profile: H3RequestProfile,
     config: H3ClientConfig,
-    /// Exchange id for the next request. One client serves many requests over one
-    /// connection and one recorder, so each exchange needs an identity the trace can be
-    /// split by. Starts at `1`: stream `0` is reserved for connection-level facts.
     next_exchange: u32,
 }
 
@@ -355,36 +348,9 @@ impl H3Client {
         settings
             .validate()
             .map_err(|reason| H3Error::Profile(reason.to_string()))?;
-        let h3_conn = h3_quinn::Connection::new(connection.clone());
-        let mut builder = h3::client::builder();
-        builder
-            .max_field_section_size(settings.max_field_section_size)
-            .send_grease(settings.send_grease)
-            .enable_datagram(settings.enable_datagram)
-            .enable_extended_connect(settings.enable_extended_connect)
-            .qpack_max_table_capacity(settings.qpack_max_table_capacity)
-            .qpack_blocked_streams(settings.qpack_blocked_streams);
-        let (mut driver, send_request) = deadline(
-            "h3 handshake",
-            config.request_timeout,
-            builder.build(h3_conn),
-        )
-        .await
-        .map_err(|error| {
-            if matches!(error, H3Error::Timeout(_)) {
-                error
-            } else {
-                H3Error::H3(format!("h3 client handshake failed: {error}"))
-            }
-        })?;
-
-        let driver_task = tokio::spawn(async move {
-            let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
-        });
-
+        let connection = Connection::start(connection.clone(), &settings, Role::Client).await?;
         Ok(Self {
-            driver: driver_task,
-            send_request,
+            connection,
             recorder,
             quic: None,
             quic_profile: None,
@@ -399,9 +365,7 @@ impl H3Client {
     /// Connect a QUIC transport through `connector`, then start HTTP/3 on it.
     ///
     /// The connector's resolved profile is retained on the H3 session; it is the
-    /// connection identity for this transport. HTTP/3 has no separate TLS
-    /// handshake or connection-level SETTINGS registry of its own — the QUIC
-    /// profile is the identity.
+    /// connection identity for this transport.
     pub async fn connect(
         connector: &netune_quic::QuicConnector,
         target: SocketAddr,
@@ -418,8 +382,7 @@ impl H3Client {
         .await
     }
 
-    /// Connect with explicit bounds and a trace context derived from the QUIC
-    /// profile and the verified server name.
+    /// Connect with explicit bounds.
     pub async fn connect_with_config(
         connector: &netune_quic::QuicConnector,
         target: SocketAddr,
@@ -458,9 +421,6 @@ impl H3Client {
     }
 
     /// Connect with explicit SETTINGS and bounds.
-    ///
-    /// SETTINGS are sent before the first request, so the profile is not
-    /// replaceable after the connection exists.
     pub async fn connect_with_settings_and_config(
         connector: &netune_quic::QuicConnector,
         target: SocketAddr,
@@ -496,10 +456,6 @@ impl H3Client {
     }
 
     /// The resolved QUIC profile that shapes this H3 connection.
-    ///
-    /// `None` when the session was constructed from an already-established
-    /// connection with [`H3Client::new`]; that constructor cannot infer which
-    /// profile produced the connection.
     pub const fn quic_profile(&self) -> Option<&'static str> {
         self.quic_profile
     }
@@ -549,27 +505,6 @@ impl H3Client {
         &self.config
     }
 
-    /// Accesses the underlying Quinn H3 request sender handle.
-    pub fn send_request_handle(
-        &mut self,
-    ) -> &mut h3::client::SendRequest<h3_quinn::OpenStreams, Bytes> {
-        &mut self.send_request
-    }
-
-    /// Deconstructs the client into its raw components.
-    ///
-    /// The caller must keep the returned [`netune_quic::QuicConnection`] alive
-    /// for as long as the H3 driver is used.
-    pub fn into_parts(
-        self,
-    ) -> (
-        h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
-        tokio::task::JoinHandle<()>,
-        Option<netune_quic::QuicConnection>,
-    ) {
-        (self.send_request, self.driver, self.quic)
-    }
-
     /// Send a request whose body is already buffered and return its streaming
     /// response.
     ///
@@ -602,11 +537,17 @@ impl H3Client {
             rec.mark_stream(exchange, EventKind::H3StreamStart, 0, 0);
         }
 
-        let stream = deadline(
+        let fields = encode_request(&request, &self.request_profile.order)?;
+        let mut stream = deadline(
             "request head",
             self.config.request_timeout,
-            self.send_request
-                .send_request_with_order(request, &self.request_profile.order),
+            self.connection.open_bi(),
+        )
+        .await?;
+        deadline(
+            "request head",
+            self.config.request_timeout,
+            stream.send_head(&fields),
         )
         .await?;
 
@@ -635,38 +576,44 @@ impl H3Client {
 }
 
 async fn await_response(
-    mut stream: h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    mut stream: H3Stream,
     recorder: Option<TraceCollector>,
     context: Option<H3TraceContext>,
     config: H3ClientConfig,
     exchange: u32,
 ) -> Result<H3ResponseStream, H3Error> {
-    let response = deadline(
-        "response head",
-        config.response_head_timeout,
-        stream.recv_response(),
-    )
-    .await?;
+    loop {
+        let response = deadline(
+            "response head",
+            config.response_head_timeout,
+            stream.read_response_head(),
+        )
+        .await?;
 
-    if let Some(rec) = &recorder {
-        rec.mark_stream(
+        if response.status().is_informational() {
+            continue;
+        }
+
+        if let Some(rec) = &recorder {
+            rec.mark_stream(
+                exchange,
+                EventKind::H3HeadComplete,
+                response.status().as_u16() as u32,
+                0,
+            );
+        }
+
+        return Ok(H3ResponseStream {
+            stream,
+            head: response,
+            recorder,
+            context,
+            config,
             exchange,
-            EventKind::H3HeadComplete,
-            response.status().as_u16() as u32,
-            0,
-        );
+            received: 0,
+            finished: false,
+        });
     }
-
-    Ok(H3ResponseStream {
-        stream,
-        head: response,
-        recorder,
-        context,
-        config,
-        exchange,
-        received: 0,
-        finished: false,
-    })
 }
 
 async fn deadline<T, E, F>(phase: &'static str, duration: Duration, future: F) -> Result<T, H3Error>

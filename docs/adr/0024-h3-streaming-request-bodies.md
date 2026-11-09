@@ -12,6 +12,7 @@ superseded_by: null
 - Status: Accepted
 - Date: 2026-11-09
 - Deciders: Ming Li
+- Amended by: [ADR-0027](0027-owned-h3-qpack.md) — the implementation moved from the h3 runtime to the owned H3/QPACK state machine; the streaming API shape is unchanged.
 - Amends: [ADR-0016](0016-quic-and-http3-transport.md), [ADR-0022](0022-http3-connection-identity.md)
 
 ---

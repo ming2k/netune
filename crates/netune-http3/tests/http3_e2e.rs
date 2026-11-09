@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use netune_http3::H3Client;
 use netune_quic::QuicConnector;
 use netune_quic::profile::QuicProfile;
@@ -98,22 +98,20 @@ async fn test_http3_client_request_response_and_trace() {
     tokio::spawn(async move {
         if let Some(connecting) = server.accept().await {
             let conn = connecting.await.expect("server handshake");
-            let mut builder = h3::server::builder();
-            builder
-                .qpack_max_table_capacity(4096)
-                .qpack_blocked_streams(16);
-            let mut h3_conn = builder
-                .build(h3_quinn::Connection::new(conn.clone()))
-                .await
-                .expect("server h3 connection");
+            let mut h3_conn = netune_http3::H3ServerConnection::new(
+                conn,
+                &netune_http3::H3SettingsProfile::dynamic(),
+            )
+            .await
+            .expect("server h3 connection");
 
-            while let Some(resolver) = h3_conn.accept().await.expect("accept h3 request") {
-                let (req, mut stream) = resolver.resolve_request().await.expect("resolve request");
+            while let Some(request) = h3_conn.accept().await.expect("accept h3 request") {
+                let (req, mut stream) = request.into_parts();
                 let path = req.uri().path().to_string();
                 tokio::spawn(async move {
                     let mut body = Vec::new();
-                    while let Some(mut chunk) = stream.recv_data().await.expect("recv data") {
-                        body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+                    while let Some(chunk) = stream.recv_data().await.expect("recv data") {
+                        body.extend_from_slice(&chunk);
                     }
                     let trailers = stream
                         .recv_trailers()
@@ -157,8 +155,6 @@ async fn test_http3_client_request_response_and_trace() {
                     stream.finish().await.expect("finish");
                 });
             }
-
-            let _ = conn.closed().await;
         }
     });
 

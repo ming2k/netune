@@ -3,15 +3,13 @@ name = "netune-http3"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "HTTP/3 client and server transport adapter (RFC 9114): streaming uploads, typed SETTINGS, dynamic QPACK"
+description = "Owned HTTP/3 client/server transport (RFC 9114) and QPACK codec (RFC 9204): streaming uploads, typed SETTINGS, dynamic tables"
 repository = "https://github.com/ming2k/netune"
 license.workspace = true
 readme = false
 
 [dependencies]
 bytes = { workspace = true }
-h3 = { workspace = true }
-h3-quinn = { workspace = true }
 http = { workspace = true }
 netune-quic = { path = "../netune-quic", version = "0.0.10" }
 netune-trace = { path = "../netune-trace", version = "0.0.10" }
@@ -19,6 +17,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "time", "sync"] }
 
 [dev-dependencies]
+# Differential oracle only: h3 is never linked into the shipping crate.
+h3 = { workspace = true }
+h3-quinn = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 quinn = { workspace = true }

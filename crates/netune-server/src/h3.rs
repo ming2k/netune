@@ -84,6 +84,7 @@ impl H3Server {
             initial_max_streams_bidi: Some(1024),
             initial_max_streams_uni: Some(1024),
             active_connection_id_limit: Some(4),
+            max_datagram_frame_size: Some(65_535),
             ..Default::default()
         };
         let server_config = netune_quic::owned::ServerConfigOwned {

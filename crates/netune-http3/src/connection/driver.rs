@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use netune_quic::owned::{RecvStream, SendStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -48,6 +48,7 @@ pub(crate) async fn drive(
         decoder: mut decoder_rx,
     } = channels;
     let connection = shared.connection.clone();
+    let datagram_connection = shared.connection.clone();
     let mut tasks = JoinSet::new();
 
     {
@@ -101,6 +102,21 @@ pub(crate) async fn drive(
     loop {
         tokio::select! {
             _ = &mut closed => break,
+            datagram = datagram_connection.recv_datagram() => {
+                if let Ok(data) = datagram {
+                    if !shared.datagrams_enabled() {
+                        shared.set_error(
+                            error_code::H3_MESSAGE_ERROR,
+                            "HTTP/3 datagram received without SETTINGS_H3_DATAGRAM",
+                        );
+                        break;
+                    }
+                    let mut cursor = data.as_ref();
+                    if let Ok(quarter) = crate::proto::varint::decode(&mut cursor) {
+                        shared.route_datagram(quarter.saturating_mul(4), Bytes::copy_from_slice(cursor));
+                    }
+                }
+            }
             accepted = connection.accept_uni() => {
                 match accepted {
                     Ok(recv) => {

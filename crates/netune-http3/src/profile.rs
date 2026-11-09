@@ -36,6 +36,10 @@ pub struct H3SettingsProfile {
     pub qpack_max_table_capacity: u64,
     /// `SETTINGS_QPACK_BLOCKED_STREAMS` we advertise.
     pub qpack_blocked_streams: u64,
+    /// `SETTINGS_ENABLE_CONNECT_PROTOCOL` (RFC 9220).
+    pub enable_connect_protocol: bool,
+    /// `SETTINGS_H3_DATAGRAM` (RFC 9297).
+    pub h3_datagram: bool,
 }
 
 impl Default for H3SettingsProfile {
@@ -46,6 +50,8 @@ impl Default for H3SettingsProfile {
             send_grease: true,
             qpack_max_table_capacity: 0,
             qpack_blocked_streams: 0,
+            enable_connect_protocol: false,
+            h3_datagram: false,
         }
     }
 }
@@ -83,6 +89,20 @@ impl H3SettingsProfile {
         self
     }
 
+    /// Enable RFC 9220 extended CONNECT.
+    #[must_use]
+    pub fn with_extended_connect(mut self) -> Self {
+        self.enable_connect_protocol = true;
+        self
+    }
+
+    /// Enable RFC 9297 HTTP/3 datagrams.
+    #[must_use]
+    pub fn with_datagrams(mut self) -> Self {
+        self.h3_datagram = true;
+        self
+    }
+
     #[must_use]
     pub fn with_qpack(mut self, max_table_capacity: u64, blocked_streams: u64) -> Self {
         self.qpack_max_table_capacity = max_table_capacity;
@@ -116,8 +136,8 @@ impl H3SettingsProfile {
             qpack_max_table_capacity: self.qpack_max_table_capacity,
             max_field_section_size: Some(self.max_field_section_size),
             qpack_blocked_streams: self.qpack_blocked_streams,
-            enable_connect_protocol: false,
-            h3_datagram: false,
+            enable_connect_protocol: self.enable_connect_protocol,
+            h3_datagram: self.h3_datagram,
             grease: if self.send_grease {
                 vec![(0x21, 0)]
             } else {

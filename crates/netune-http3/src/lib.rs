@@ -22,4 +22,5 @@ pub use client::{
 };
 pub use error::H3Error;
 pub use profile::{H3RequestProfile, H3RequestRegistry, H3SettingsProfile, H3SettingsRegistry};
+pub use proto::ExtendedConnectProtocol;
 pub use server::{H3ServerConnection, H3ServerRequest, H3ServerStream};

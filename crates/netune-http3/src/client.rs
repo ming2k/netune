@@ -116,6 +116,11 @@ impl H3RequestBody {
         .await
     }
 
+    /// Send one HTTP/3 datagram associated with this request stream.
+    pub async fn send_datagram(&mut self, data: &[u8]) -> Result<(), H3Error> {
+        self.stream.send_datagram(data).await
+    }
+
     /// Finish the request without trailers and wait for the response head.
     pub async fn finish(self) -> Result<H3ResponseStream, H3Error> {
         let mut stream = self.stream;
@@ -189,6 +194,16 @@ impl H3ResponseStream {
     /// The exchange id carried in `Event::stream`.
     pub const fn exchange(&self) -> u32 {
         self.exchange
+    }
+
+    /// Receive one already-queued HTTP/3 datagram associated with this request stream.
+    pub fn recv_datagram(&mut self) -> Option<Bytes> {
+        self.stream.recv_datagram()
+    }
+
+    /// Wait for the next HTTP/3 datagram associated with this request stream.
+    pub async fn next_datagram(&mut self) -> Option<Bytes> {
+        self.stream.next_datagram().await
     }
 
     /// Read the next decoded body chunk, or `None` at the end.
@@ -537,6 +552,19 @@ impl H3Client {
             rec.mark_stream(exchange, EventKind::H3StreamStart, 0, 0);
         }
 
+        if request
+            .extensions()
+            .get::<crate::proto::ExtendedConnectProtocol>()
+            .is_some()
+            && !self.connection.shared().extended_connect_enabled()
+        {
+            self.connection.shared().wait_settings().await;
+            if !self.connection.shared().extended_connect_enabled() {
+                return Err(H3Error::H3(
+                    "extended CONNECT was not negotiated".to_string(),
+                ));
+            }
+        }
         let fields = encode_request(&request, &self.request_profile.order)?;
         let mut stream = deadline(
             "request head",

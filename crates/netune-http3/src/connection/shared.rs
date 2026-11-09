@@ -3,6 +3,7 @@
 //! Connection-scoped state shared by the H3 driver, request streams, and the
 //! public client/server adapters.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -40,12 +41,19 @@ pub struct Shared {
     insert_tx: watch::Sender<u64>,
     error_tx: watch::Sender<Option<Arc<ConnectionError>>>,
     goaway_tx: watch::Sender<Option<u64>>,
+    settings_tx: watch::Sender<bool>,
     seen_control: AtomicBool,
     seen_encoder: AtomicBool,
     seen_decoder: AtomicBool,
     blocked: AtomicUsize,
     max_blocked: usize,
     max_field_section_size: usize,
+    local_h3_datagram: bool,
+    peer_h3_datagram: AtomicBool,
+    local_connect_protocol: bool,
+    peer_connect_protocol: AtomicBool,
+    datagram_routes: Mutex<HashMap<u64, mpsc::UnboundedSender<Bytes>>>,
+    pending_datagrams: Mutex<HashMap<u64, VecDeque<Bytes>>>,
 }
 
 impl Shared {
@@ -70,6 +78,7 @@ impl Shared {
         let (insert_tx, _) = watch::channel(0u64);
         let (error_tx, _) = watch::channel(None);
         let (goaway_tx, _) = watch::channel(None);
+        let (settings_tx, _) = watch::channel(false);
         Ok(Self {
             connection,
             encoder: Mutex::new(Encoder::new()),
@@ -80,12 +89,19 @@ impl Shared {
             insert_tx,
             error_tx,
             goaway_tx,
+            settings_tx,
             seen_control: AtomicBool::new(false),
             seen_encoder: AtomicBool::new(false),
             seen_decoder: AtomicBool::new(false),
             blocked: AtomicUsize::new(0),
             max_blocked: settings.qpack_blocked_streams as usize,
             max_field_section_size,
+            local_h3_datagram: settings.h3_datagram,
+            peer_h3_datagram: AtomicBool::new(false),
+            local_connect_protocol: settings.enable_connect_protocol,
+            peer_connect_protocol: AtomicBool::new(false),
+            datagram_routes: Mutex::new(HashMap::new()),
+            pending_datagrams: Mutex::new(HashMap::new()),
         })
     }
 
@@ -265,8 +281,89 @@ impl Shared {
         }
     }
 
+    pub fn datagrams_enabled(&self) -> bool {
+        self.local_h3_datagram && self.peer_h3_datagram.load(Ordering::SeqCst)
+    }
+
+    pub fn extended_connect_enabled(&self) -> bool {
+        self.local_connect_protocol && self.peer_connect_protocol.load(Ordering::SeqCst)
+    }
+
+    pub async fn wait_settings(&self) {
+        let mut settings = self.settings_tx.subscribe();
+        if *settings.borrow() {
+            return;
+        }
+        let _ = settings.changed().await;
+    }
+
+    pub fn register_datagrams(&self, stream_id: u64) -> mpsc::UnboundedReceiver<Bytes> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.datagram_routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(stream_id, tx);
+        if let Some(pending) = self
+            .pending_datagrams
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&stream_id)
+        {
+            for datagram in pending {
+                let _ = self
+                    .datagram_routes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&stream_id)
+                    .map(|sender| sender.send(datagram));
+            }
+        }
+        rx
+    }
+
+    pub fn unregister_datagrams(&self, stream_id: u64) {
+        self.datagram_routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&stream_id);
+        self.pending_datagrams
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&stream_id);
+    }
+
+    pub fn route_datagram(&self, stream_id: u64, data: Bytes) {
+        let sender = self
+            .datagram_routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&stream_id)
+            .cloned();
+        if let Some(sender) = sender {
+            let _ = sender.send(data);
+            return;
+        }
+        let mut pending = self
+            .pending_datagrams
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let queue = pending.entry(stream_id).or_default();
+        if queue.len() < 32 {
+            queue.push_back(data);
+        }
+    }
+
     /// Apply the peer's SETTINGS frame to the encoder.
     pub fn update_peer_settings(&self, settings: Settings) {
+        eprintln!(
+            "peer settings connect={} datagram={}",
+            settings.enable_connect_protocol, settings.h3_datagram
+        );
+        self.peer_h3_datagram
+            .store(settings.h3_datagram, Ordering::SeqCst);
+        self.peer_connect_protocol
+            .store(settings.enable_connect_protocol, Ordering::SeqCst);
+        let _ = self.settings_tx.send_replace(true);
         let max_table = usize::try_from(settings.qpack_max_table_capacity).unwrap_or(usize::MAX);
         let max_field = settings
             .max_field_section_size

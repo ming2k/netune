@@ -43,11 +43,11 @@ pub mod error_code {
     pub const H3_EXCESSIVE_LOAD: u64 = 0x0107;
     pub const H3_ID_ERROR: u64 = 0x0108;
     pub const H3_SETTINGS_ERROR: u64 = 0x0109;
+    pub const H3_MESSAGE_ERROR: u64 = 0x010e;
     pub const H3_MISSING_SETTINGS: u64 = 0x010a;
     pub const H3_REQUEST_REJECTED: u64 = 0x010b;
     pub const H3_REQUEST_CANCELLED: u64 = 0x010c;
     pub const H3_REQUEST_INCOMPLETE: u64 = 0x010d;
-    pub const H3_MESSAGE_ERROR: u64 = 0x010e;
     pub const H3_CONNECT_ERROR: u64 = 0x010f;
     pub const H3_VERSION_FALLBACK: u64 = 0x0110;
     pub const QPACK_DECOMPRESSION_FAILED: u64 = 0x0200;

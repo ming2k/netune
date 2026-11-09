@@ -199,3 +199,46 @@ async fn owned_server_speaks_quic_v2_with_owned_client() {
     assert_eq!(response.as_ref(), b"two");
     server_task.await.expect("server task");
 }
+
+#[tokio::test]
+async fn empty_stream_fin_is_delivered() {
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport(),
+            retry: true,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+    let server_task = tokio::spawn(async move {
+        let connection = server.accept().await.expect("accept");
+        let (_send, mut recv) = connection.accept_bi().await.expect("accept bi");
+        let end = tokio::time::timeout(Duration::from_secs(2), recv.read(16))
+            .await
+            .expect("fin timeout")
+            .expect("read");
+        assert!(end.is_none(), "empty FIN must read as end of stream");
+    });
+
+    let client = Endpoint::client().await.expect("client endpoint");
+    let connection = client
+        .connect(
+            addr,
+            "localhost",
+            ClientConfigOwned {
+                tls: client_tls(),
+                transport: transport(),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
+            },
+        )
+        .await
+        .expect("connect");
+    let (mut send, _recv) = connection.open_bi().await.expect("open bi");
+    send.finish().await.expect("finish");
+    server_task.await.expect("server task");
+}

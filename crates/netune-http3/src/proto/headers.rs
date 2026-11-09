@@ -13,6 +13,10 @@ use http::{Method, Request, Response, StatusCode, Version};
 
 use crate::qpack::HeaderField;
 
+/// RFC 9220 extended-CONNECT protocol carried on an `http::Request` extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendedConnectProtocol(pub String);
+
 /// The order in which request pseudo-headers and regular headers are emitted
 /// into the QPACK header block.
 ///
@@ -119,13 +123,17 @@ pub fn encode_request(
     let scheme = uri.scheme_str().unwrap_or("https");
     let path = uri.path_and_query().map_or("/", PathAndQuery::as_str);
     let is_connect = *method == Method::CONNECT;
+    let protocol = request.extensions().get::<ExtendedConnectProtocol>();
+    if protocol.is_some() && !is_connect {
+        return Err(HeaderError::ExtendedConnectUnsupported);
+    }
     if !is_connect && authority.is_none() {
         return Err(HeaderError::MissingPseudo(":authority"));
     }
 
     let mut available: Vec<(&'static str, Vec<u8>)> = Vec::new();
     available.push((":method", method.as_str().as_bytes().to_vec()));
-    if !is_connect {
+    if !is_connect || protocol.is_some() {
         available.push((":scheme", scheme.as_bytes().to_vec()));
         available.push((":path", path.as_bytes().to_vec()));
     }
@@ -134,6 +142,12 @@ pub fn encode_request(
             return Err(HeaderError::InvalidValue);
         }
         available.push((":authority", authority.into_bytes()));
+    }
+    if let Some(protocol) = protocol {
+        if protocol.0.is_empty() || !protocol.0.is_ascii() {
+            return Err(HeaderError::InvalidValue);
+        }
+        available.push((":protocol", protocol.0.as_bytes().to_vec()));
     }
 
     let mut fields = Vec::new();
@@ -194,7 +208,7 @@ pub fn decode_request(fields: &[HeaderField]) -> Result<Request<()>, HeaderError
     let mut scheme = None;
     let mut authority = None;
     let mut path = None;
-    let mut protocol = None;
+    let mut protocol: Option<Vec<u8>> = None;
     let mut headers = HeaderMap::new();
     let mut seen_regular = false;
 
@@ -259,11 +273,11 @@ pub fn decode_request(fields: &[HeaderField]) -> Result<Request<()>, HeaderError
     }
 
     let method = method.ok_or(HeaderError::MissingPseudo(":method"))?;
-    if protocol.is_some() {
-        return Err(HeaderError::ExtendedConnectUnsupported);
-    }
     let is_connect = method == Method::CONNECT;
-    if !is_connect {
+    if protocol.is_some() && !is_connect {
+        return Err(HeaderError::UnexpectedPseudo(":protocol"));
+    }
+    if !is_connect || protocol.is_some() {
         if scheme.is_none() {
             return Err(HeaderError::MissingPseudo(":scheme"));
         }
@@ -302,6 +316,10 @@ pub fn decode_request(fields: &[HeaderField]) -> Result<Request<()>, HeaderError
         .build()
         .map_err(|error| HeaderError::InvalidUri(error.to_string()))?;
 
+    let protocol = match protocol {
+        Some(protocol) => Some(String::from_utf8(protocol).map_err(|_| HeaderError::InvalidValue)?),
+        None => None,
+    };
     Request::builder()
         .method(method)
         .uri(uri)
@@ -309,6 +327,11 @@ pub fn decode_request(fields: &[HeaderField]) -> Result<Request<()>, HeaderError
         .body(())
         .map(|mut request| {
             *request.headers_mut() = headers;
+            if let Some(protocol) = protocol {
+                request
+                    .extensions_mut()
+                    .insert(ExtendedConnectProtocol(protocol));
+            }
             request
         })
         .map_err(|error| HeaderError::Http(error.to_string()))
@@ -461,6 +484,29 @@ mod tests {
             ]
         );
         assert_eq!(fields[7].value, b"two");
+    }
+
+    #[test]
+    fn extended_connect_round_trips_through_the_protocol_extension() {
+        let mut request = Request::builder()
+            .method(Method::CONNECT)
+            .uri("https://example.test/session")
+            .body(())
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(ExtendedConnectProtocol("webtransport".to_string()));
+        let fields = encode_request(&request, &RequestHeaderOrder::default()).expect("encode");
+        assert!(
+            fields
+                .iter()
+                .any(|field| { field.name == b":protocol" && field.value == b"webtransport" })
+        );
+        let decoded = decode_request(&fields).expect("decode");
+        assert_eq!(
+            decoded.extensions().get::<ExtendedConnectProtocol>(),
+            Some(&ExtendedConnectProtocol("webtransport".to_string()))
+        );
     }
 
     #[test]

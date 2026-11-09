@@ -77,6 +77,7 @@ struct SendState {
     data: Vec<u8>,
     sent: u64,
     fin: bool,
+    fin_sent: bool,
     reset: Option<u64>,
     max_data: u64,
 }
@@ -762,8 +763,8 @@ impl Core {
                 if used_next {
                     self.commit_key_update(phase)?;
                 }
-                self.record(Level::OneRtt, pn);
-                self.process_frames(Level::OneRtt, &payload)?;
+                let ack_eliciting = self.process_frames(Level::OneRtt, &payload)?;
+                self.record(Level::OneRtt, pn, ack_eliciting);
                 cursor = &[];
             } else {
                 if cursor.len() >= 5 {
@@ -812,8 +813,8 @@ impl Core {
                 if level == Level::Initial && self.peer_cid.is_empty() {
                     self.peer_cid = parse_scid(cursor, packet_end).unwrap_or_default();
                 }
-                self.record(level, pn);
-                self.process_frames(level, &payload)?;
+                let ack_eliciting = self.process_frames(level, &payload)?;
+                self.record(level, pn, ack_eliciting);
                 cursor = &cursor[packet_end..];
             }
         }
@@ -881,6 +882,7 @@ impl Core {
                     data: Vec::new(),
                     sent: 0,
                     fin: false,
+                    fin_sent: false,
                     reset: None,
                     max_data: window,
                 }),
@@ -915,6 +917,7 @@ impl Core {
                     data: Vec::new(),
                     sent: 0,
                     fin: false,
+                    fin_sent: false,
                     reset: None,
                     max_data: window,
                 }),
@@ -1104,11 +1107,13 @@ impl Core {
         Ok(())
     }
 
-    fn process_frames(&mut self, level: Level, payload: &[u8]) -> Result<(), QuicError> {
+    fn process_frames(&mut self, level: Level, payload: &[u8]) -> Result<bool, QuicError> {
         let mut cursor = payload;
+        let mut ack_eliciting = false;
         while !cursor.is_empty() {
             let frame = Frame::decode(&mut cursor)
                 .map_err(|error| QuicError::Protocol(error.to_string()))?;
+            ack_eliciting |= !matches!(frame, Frame::Ack(_) | Frame::Padding { .. });
             match frame {
                 Frame::Crypto { offset, data } => {
                     self.insert_crypto(level, offset, &data)?;
@@ -1188,7 +1193,8 @@ impl Core {
                 }
             }
         }
-        self.feed_tls()
+        self.feed_tls()?;
+        Ok(ack_eliciting)
     }
 
     fn handle_stream(
@@ -1227,6 +1233,7 @@ impl Core {
                         data: Vec::new(),
                         sent: 0,
                         fin: false,
+                        fin_sent: false,
                         reset: None,
                         max_data: self.peer_stream_window(true),
                     })
@@ -1477,6 +1484,7 @@ impl Core {
                         let end = start + window as usize;
                         let data = Bytes::copy_from_slice(&send.data[start..end]);
                         let fin = send.fin && end == send.data.len();
+                        send.fin_sent |= fin;
                         send.sent += window;
                         self.send_data += window;
                         frame = Some(Frame::Stream {
@@ -1486,6 +1494,14 @@ impl Core {
                             data,
                         });
                     }
+                } else if send.fin && !send.fin_sent {
+                    send.fin_sent = true;
+                    frame = Some(Frame::Stream {
+                        stream_id: id,
+                        offset: send.sent,
+                        fin: true,
+                        data: Bytes::new(),
+                    });
                 }
             }
             if let Some(frame) = frame {
@@ -1507,10 +1523,12 @@ impl Core {
         })
     }
 
-    fn record(&mut self, level: Level, pn: u64) {
+    fn record(&mut self, level: Level, pn: u64, ack_eliciting: bool) {
         let space = &mut self.spaces[level as usize];
         space.received.insert(pn);
-        space.ack_pending = true;
+        if ack_eliciting {
+            space.ack_pending = true;
+        }
     }
 
     fn largest(&self, level: Level) -> u64 {

@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   9001 client Initial vector decrypts and re-protects byte-for-byte.
   `quinn`/`quinn-proto` are dev-only interop oracles; the H3 client and ingress
   now run over the owned transport.
+- **HTTP/3 extension surfaces.** SETTINGS-gated RFC 9297 datagrams are routed
+  to their request streams by Quarter Stream ID, and RFC 9220 extended CONNECT
+  uses a typed `ExtendedConnectProtocol` request extension (ADR-0030).
 - **QUIC lifecycle hardening.** The owned engine now validates addresses with
   stateless Retry tokens, emits keyed stateless resets, rotates 1-RTT keys with
   key-phase reordering, performs fast loss detection, tops up `MAX_DATA` /

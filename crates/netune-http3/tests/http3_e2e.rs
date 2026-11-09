@@ -73,6 +73,7 @@ async fn make_server_endpoint() -> (Endpoint, std::net::SocketAddr) {
         .expect("cert");
     tls.alpn_protocols = vec![b"h3".to_vec()];
     let transport = TransportParameters {
+        max_datagram_frame_size: Some(65_535),
         initial_max_data: Some(16 * 1024 * 1024),
         initial_max_stream_data_bidi_local: Some(1 << 20),
         initial_max_stream_data_bidi_remote: Some(1 << 20),
@@ -387,4 +388,124 @@ async fn test_http3_client_request_response_and_trace() {
         !exchanges[29].e2e_us.is_measured(),
         "the body-ceiling failure must not fabricate an end-to-end span"
     );
+}
+
+#[tokio::test]
+async fn http3_datagrams_are_routed_to_the_request_stream() {
+    let (server, addr) = make_server_endpoint().await;
+    tokio::spawn(async move {
+        let conn = server.accept().await.expect("server handshake");
+        let settings = netune_http3::H3SettingsProfile::dynamic().with_datagrams();
+        let mut h3_conn = netune_http3::H3ServerConnection::new(conn, &settings)
+            .await
+            .expect("server h3 connection");
+        let request = h3_conn.accept().await.expect("accept").expect("request");
+        let (_req, mut stream) = request.into_parts();
+        while stream.recv_data().await.expect("body").is_some() {}
+        let datagram =
+            tokio::time::timeout(std::time::Duration::from_secs(1), stream.next_datagram())
+                .await
+                .expect("datagram timeout")
+                .expect("datagram");
+        assert_eq!(datagram.as_ref(), b"ping");
+        stream.send_datagram(b"pong").await.expect("send datagram");
+        let response = http::Response::builder()
+            .status(200)
+            .body(())
+            .expect("response");
+        stream.send_response(response).await.expect("response head");
+        stream.finish().await.expect("finish");
+    });
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let client_crypto = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("safe protocols")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    let connector = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto);
+    let mut client = H3Client::connect_with_settings(
+        &connector,
+        addr,
+        "localhost",
+        None,
+        netune_http3::H3SettingsProfile::dynamic().with_datagrams(),
+    )
+    .await
+    .expect("h3 client");
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("https://localhost/datagrams")
+        .body(())
+        .expect("request");
+    let mut body = client.open_request(request).await.expect("open request");
+    body.send_datagram(b"ping").await.expect("send datagram");
+    let mut response = body.finish().await.expect("response");
+    let datagram =
+        tokio::time::timeout(std::time::Duration::from_secs(1), response.next_datagram())
+            .await
+            .expect("datagram timeout")
+            .expect("datagram");
+    assert_eq!(datagram.as_ref(), b"pong");
+}
+
+#[tokio::test]
+async fn extended_connect_protocol_crosses_the_h3_boundary() {
+    let (server, addr) = make_server_endpoint().await;
+    tokio::spawn(async move {
+        let conn = server.accept().await.expect("server handshake");
+        let settings = netune_http3::H3SettingsProfile::default().with_extended_connect();
+        let mut h3_conn = netune_http3::H3ServerConnection::new(conn, &settings)
+            .await
+            .expect("server h3 connection");
+        let request = h3_conn.accept().await.expect("accept").expect("request");
+        let (req, mut stream) = request.into_parts();
+        assert_eq!(
+            req.extensions()
+                .get::<netune_http3::ExtendedConnectProtocol>(),
+            Some(&netune_http3::ExtendedConnectProtocol(
+                "webtransport".to_string()
+            ))
+        );
+        let response = http::Response::builder()
+            .status(200)
+            .body(())
+            .expect("response");
+        stream.send_response(response).await.expect("response head");
+        stream.finish().await.expect("finish");
+    });
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let client_crypto = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("safe protocols")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    let connector = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto);
+    let mut client = H3Client::connect_with_settings(
+        &connector,
+        addr,
+        "localhost",
+        None,
+        netune_http3::H3SettingsProfile::default().with_extended_connect(),
+    )
+    .await
+    .expect("h3 client");
+    let mut request = http::Request::builder()
+        .method(http::Method::CONNECT)
+        .uri("https://localhost/session")
+        .body(())
+        .expect("request");
+    request
+        .extensions_mut()
+        .insert(netune_http3::ExtendedConnectProtocol(
+            "webtransport".to_string(),
+        ));
+    let response = client
+        .send(request.map(|_| Bytes::new()))
+        .await
+        .expect("send");
+    assert_eq!(response.head().status(), 200);
 }

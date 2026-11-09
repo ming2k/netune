@@ -74,6 +74,21 @@ impl H3ServerConnection {
             let resolved = tokio::time::timeout(head_timeout, stream.read_request_head()).await;
             match resolved {
                 Ok(Ok(request)) => {
+                    if request
+                        .extensions()
+                        .get::<crate::proto::ExtendedConnectProtocol>()
+                        .is_some()
+                        && !self.connection.shared().extended_connect_enabled()
+                    {
+                        self.connection.shared().set_error(
+                            crate::proto::code::error_code::H3_MESSAGE_ERROR,
+                            "extended CONNECT was not negotiated",
+                        );
+                        stream.cancel_body();
+                        return Err(H3Error::H3(
+                            "extended CONNECT was not negotiated".to_string(),
+                        ));
+                    }
                     return Ok(Some(H3ServerRequest {
                         request,
                         stream: H3ServerStream { stream },
@@ -141,6 +156,21 @@ impl H3ServerStream {
     /// The wire stream id, for trace correlation.
     pub fn id(&self) -> u64 {
         self.stream.id()
+    }
+
+    /// Receive one already-queued HTTP/3 datagram associated with this request stream.
+    pub fn recv_datagram(&mut self) -> Option<Bytes> {
+        self.stream.recv_datagram()
+    }
+
+    /// Wait for the next HTTP/3 datagram associated with this request stream.
+    pub async fn next_datagram(&mut self) -> Option<Bytes> {
+        self.stream.next_datagram().await
+    }
+
+    /// Send one HTTP/3 datagram associated with this request stream.
+    pub async fn send_datagram(&mut self, data: &[u8]) -> Result<(), H3Error> {
+        self.stream.send_datagram(data).await
     }
 
     /// Read the next request-body chunk, or `None` at end of stream.

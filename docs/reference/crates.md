@@ -136,11 +136,12 @@ This document provides a factual overview of all crates comprising the `netune` 
 
 ### `netune-quic`
 - **Dependencies**: `netune-egress`, `netune-trace`, `bytes`, `rustls`, `rustls-platform-verifier`, `socket2`, `thiserror`, `tokio`. Compiles strictly against `aws-lc-rs` (`[INV-QUIC-01]`). Dev-only oracles: `quinn`.
+- **Owned H3 extensions (ADR-0030)**: SETTINGS-gated RFC 9297 datagrams routed by Quarter Stream ID, and RFC 9220 extended CONNECT through `ExtendedConnectProtocol`.
 - **Owned QUIC engine (ADR-0028)**: `wire` owns the packet/frame/transport-parameter codec, `crypto` owns rustls packet protection and TLS key changes, and `owned::{core,endpoint}` owns handshake, stream, ACK, flow-control, UDP routing and async handles. `quinn` is dev-only.
 - **Key Types**:
   - `QuicConnector`: Coordinates egress confinement (`with_confinement` / `strict_public`), manual socket pre-configuration, and QUIC client endpoint creation. Confinement is checked on the resolved address **before** the UDP socket is created ([INV-QUIC-02](../adr/0016-quic-and-http3-transport.md)).
   - `QuicConnection`: Established QUIC session with bidirectional and unidirectional stream allocation.
-  - `QuicProfile` / `QuicTransportParameters`: Explicit declarative control over QUIC transport parameters, ALPN and congestion policy (NewReno/Cubic/BBR). Retry/address validation, keyed stateless reset, 1-RTT key update, QUIC v2 and Version Negotiation are owned (ADR-0029). Migration uses PATH_CHALLENGE/PATH_RESPONSE. 0-RTT and H3 datagrams/extended CONNECT remain open.
+  - `QuicProfile` / `QuicTransportParameters`: Explicit declarative control over QUIC transport parameters, ALPN and congestion policy (NewReno/Cubic/BBR). Retry/address validation, keyed stateless reset, 1-RTT key update, QUIC v2 and Version Negotiation are owned (ADR-0029). Migration uses PATH_CHALLENGE/PATH_RESPONSE. RFC 9297 datagrams and RFC 9220 extended CONNECT are owned (ADR-0030). 0-RTT remains open.
   - `QuicProfileRegistry`: one resolution path for built-in and caller-supplied profiles; `QuicConnector::from_registry` fails loudly on unknown names ([ADR-0021](../adr/0021-named-quic-profiles.md)).
   - `QuicDatagramSession`: RFC 9221 unreliable datagram session with MTU bound checks (`[INV-QUIC-04]`).
   - `QuicSocketConfig`: L3/L4 socket options applied before the first packet ([INV-SOCKET-01]).

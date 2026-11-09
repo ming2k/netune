@@ -232,6 +232,8 @@ they are not vendored, and a default build of `netune-http3` links neither.
   [ADR-0026](0026-controlled-dynamic-qpack.md)
 - Amended by: [ADR-0028](0028-owned-quic.md) — QUIC is now owned by
   `netune-quic`; the H3/QPACK decision is unchanged.
+- Amended by: [ADR-0030](0030-h3-datagrams-and-extended-connect.md) — RFC 9297
+  datagrams and RFC 9220 extended CONNECT are now owned extension surfaces.
 - RFCs: [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114),
   [RFC 9204](https://www.rfc-editor.org/rfc/rfc9204),
   [RFC 7541](https://www.rfc-editor.org/rfc/rfc7541)

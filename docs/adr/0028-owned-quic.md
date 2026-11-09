@@ -144,7 +144,6 @@ implemented and must not be inferred from the production switch:
 
 - 0-RTT and session resumption.
 
-- H3 datagrams and extended CONNECT.
 
 They are separate capabilities, not hidden behaviour.
 

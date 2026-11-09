@@ -23,6 +23,7 @@ pub(crate) struct H3Stream {
     id: u64,
     send: SendStream,
     recv: RecvStream,
+    datagrams: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
     data_remaining: u64,
     trailers: Option<HeaderMap>,
     head_sent: bool,
@@ -44,11 +45,13 @@ impl std::fmt::Debug for H3Stream {
 
 impl H3Stream {
     pub fn new(shared: Arc<Shared>, id: u64, send: SendStream, recv: RecvStream) -> Self {
+        let datagrams = shared.register_datagrams(id);
         Self {
             shared,
             id,
             send,
             recv,
+            datagrams,
             data_remaining: 0,
             trailers: None,
             head_sent: false,
@@ -118,6 +121,37 @@ impl H3Stream {
             .map_err(|error| H3Error::H3(format!("finish request stream: {error}")))?;
         self.writer_done = true;
         Ok(())
+    }
+
+    /// Send one HTTP/3 datagram associated with this request stream.
+    pub async fn send_datagram(&mut self, data: &[u8]) -> Result<(), H3Error> {
+        if !self.shared.datagrams_enabled() {
+            self.shared.wait_settings().await;
+            if !self.shared.datagrams_enabled() {
+                return Err(H3Error::H3(
+                    "HTTP/3 datagrams were not negotiated".to_string(),
+                ));
+            }
+        }
+        let mut payload = bytes::BytesMut::new();
+        crate::proto::varint::encode(&mut payload, self.id / 4)
+            .map_err(|error| H3Error::H3(format!("datagram quarter stream id: {error}")))?;
+        payload.extend_from_slice(data);
+        self.shared
+            .connection
+            .send_datagram(payload.freeze())
+            .await
+            .map_err(|error| H3Error::H3(format!("HTTP/3 datagram send failed: {error}")))
+    }
+
+    /// Receive one already-queued HTTP/3 datagram.
+    pub fn recv_datagram(&mut self) -> Option<Bytes> {
+        self.datagrams.try_recv().ok()
+    }
+
+    /// Wait for the next HTTP/3 datagram associated with this request stream.
+    pub async fn next_datagram(&mut self) -> Option<Bytes> {
+        self.datagrams.recv().await
     }
 
     pub async fn read_request_head(&mut self) -> Result<http::Request<()>, H3Error> {
@@ -291,6 +325,7 @@ impl H3Stream {
 
 impl Drop for H3Stream {
     fn drop(&mut self) {
+        self.shared.unregister_datagrams(self.id);
         if !self.writer_done {
             self.send.reset(error_code::H3_REQUEST_CANCELLED);
         }

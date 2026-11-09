@@ -103,6 +103,11 @@ and whether peer implementations can negotiate a version at all.
 - **`[INV-QUIC-13]` No Unconfigured Downgrade**: Version Negotiation can select
   only a version in the client's configured list; a listed current version is
   not a downgrade signal. *Enforced by*: `handle_version_negotiation`.
+- **`[INV-QUIC-14]` Migrate Only After Path Validation**: a source-address change
+  starts PATH_CHALLENGE on the candidate path; the endpoint switches only after
+  a matching PATH_RESPONSE, and drops the change when migration is disabled.
+  *Enforced by*: `begin_path_validation`, `path_validated`, endpoint candidate
+  routing, and the path-challenge unit tests.
 
 ## Consequences
 
@@ -118,8 +123,6 @@ and whether peer implementations can negotiate a version at all.
 
 Still deliberately absent and not implied by this ADR:
 
-- Active connection migration and full path validation. PATH_CHALLENGE is
-  answered with PATH_RESPONSE, but the endpoint does not switch peer addresses.
 - 0-RTT and session resumption.
 - Cubic/BBR congestion-control parity. Recovery is NewReno-style AIMD.
 - H3 datagrams and extended CONNECT.

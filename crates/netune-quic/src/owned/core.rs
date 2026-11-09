@@ -167,6 +167,9 @@ pub(crate) struct Core {
     retry_source_cid: Option<Vec<u8>>,
     version: u32,
     supported_versions: Vec<u32>,
+    migration_disabled: bool,
+    path_challenge: Option<[u8; 8]>,
+    path_validated: bool,
 }
 
 impl Core {
@@ -183,6 +186,7 @@ impl Core {
         let initial = initial_keys_for_version(&original_dcid, Side::Client, version)?;
         let local_max_data = local_tp.initial_max_data.unwrap_or(0);
         let client_tp = local_tp.clone();
+        let migration_disabled = local_tp.disable_active_migration;
         let initial_odcid = original_dcid.clone();
         let encoded_tp = local_tp
             .encode()
@@ -255,6 +259,9 @@ impl Core {
             retry_source_cid: None,
             version,
             supported_versions,
+            migration_disabled,
+            path_challenge: None,
+            path_validated: false,
         };
         core.drain_tls()?;
         Ok(core)
@@ -271,6 +278,7 @@ impl Core {
         let initial = initial_keys_for_version(&original_dcid, Side::Server, version)?;
         let local_max_data = local_tp.initial_max_data.unwrap_or(0);
         let initial_odcid = original_dcid.clone();
+        let migration_disabled = local_tp.disable_active_migration;
         Ok(Self {
             side: Side::Server,
             tls,
@@ -332,6 +340,9 @@ impl Core {
             retry_source_cid: None,
             version,
             supported_versions: vec![version],
+            migration_disabled,
+            path_challenge: None,
+            path_validated: false,
         })
     }
 
@@ -356,6 +367,20 @@ impl Core {
             error_code: code,
             reason: Bytes::copy_from_slice(reason.as_bytes()),
         });
+    }
+
+    pub(crate) fn migration_disabled(&self) -> bool {
+        self.migration_disabled
+    }
+
+    pub(crate) fn begin_path_validation(&mut self, challenge: [u8; 8]) {
+        self.path_challenge = Some(challenge);
+        self.path_validated = false;
+        self.control_frames.push(Frame::PathChallenge(challenge));
+    }
+
+    pub(crate) fn path_validated(&self) -> bool {
+        self.path_validated
     }
 
     pub(crate) fn max_datagram_size(&self) -> Option<usize> {
@@ -1159,7 +1184,12 @@ impl Core {
                 Frame::PathChallenge(data) => {
                     self.control_frames.push(Frame::PathResponse(data));
                 }
-                Frame::PathResponse(_) => {}
+                Frame::PathResponse(data) => {
+                    if self.path_challenge == Some(data) {
+                        self.path_challenge = None;
+                        self.path_validated = true;
+                    }
+                }
                 Frame::Datagram { data } => {
                     if self.recv_datagrams.len() < 64 {
                         self.recv_datagrams.push_back(data);
@@ -1577,3 +1607,99 @@ fn parse_scid(datagram: &[u8], packet_end: usize) -> Option<Vec<u8>> {
 
 /// The amount of time until the next recovery timer is due.
 pub(crate) const TIMER_INTERVAL: Duration = Duration::from_millis(100);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, SignatureScheme};
+
+    #[derive(Debug)]
+    struct AcceptAny;
+
+    impl ServerCertVerifier for AcceptAny {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            vec![SignatureScheme::ED25519]
+        }
+    }
+
+    fn core() -> Core {
+        let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let mut tls = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("versions")
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAny))
+            .with_no_client_auth();
+        tls.alpn_protocols = vec![b"h3".to_vec()];
+        Core::client(
+            std::sync::Arc::new(tls),
+            ServerName::try_from("localhost").expect("name"),
+            vec![1; 8],
+            vec![2; 8],
+            TransportParameters::default(),
+            crate::wire::packet::VERSION_1,
+            vec![crate::wire::packet::VERSION_1],
+        )
+        .expect("core")
+    }
+
+    fn frame_bytes(frame: Frame) -> Bytes {
+        let mut bytes = BytesMut::new();
+        frame.encode(&mut bytes).expect("encode");
+        bytes.freeze()
+    }
+
+    #[test]
+    fn path_challenge_validation_tracks_response() {
+        let mut core = core();
+        core.begin_path_validation([7; 8]);
+        assert!(core.control_frames.iter().any(|frame| {
+            matches!(frame, Frame::PathChallenge(challenge) if *challenge == [7; 8])
+        }));
+        core.process_frames(Level::OneRtt, &frame_bytes(Frame::PathResponse([7; 8])))
+            .expect("path response");
+        assert!(core.path_validated());
+    }
+
+    #[test]
+    fn path_challenge_is_answered() {
+        let mut core = core();
+        core.process_frames(Level::OneRtt, &frame_bytes(Frame::PathChallenge([9; 8])))
+            .expect("path challenge");
+        assert!(core.control_frames.iter().any(|frame| {
+            matches!(frame, Frame::PathResponse(challenge) if *challenge == [9; 8])
+        }));
+    }
+}

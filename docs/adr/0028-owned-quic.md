@@ -143,8 +143,7 @@ reset, key update, QUIC v2 and Version Negotiation (ADR-0029). The following RFC
 implemented and must not be inferred from the production switch:
 
 - 0-RTT and session resumption.
-- Active connection migration and full path validation (PATH_CHALLENGE is
-  answered, but address switching is not enabled).
+
 - Cubic/BBR congestion-control parity (NewReno-style AIMD is implemented).
 - H3 datagrams and extended CONNECT.
 

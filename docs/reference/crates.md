@@ -140,7 +140,7 @@ This document provides a factual overview of all crates comprising the `netune` 
 - **Key Types**:
   - `QuicConnector`: Coordinates egress confinement (`with_confinement` / `strict_public`), manual socket pre-configuration, and QUIC client endpoint creation. Confinement is checked on the resolved address **before** the UDP socket is created ([INV-QUIC-02](../adr/0016-quic-and-http3-transport.md)).
   - `QuicConnection`: Established QUIC session with bidirectional and unidirectional stream allocation.
-  - `QuicProfile` / `QuicTransportParameters`: Explicit declarative control over QUIC transport parameters and ALPN. Recovery and congestion policy live in the owned engine. Retry/address validation, keyed stateless reset, 1-RTT key update, QUIC v2 and Version Negotiation are owned (ADR-0029). 0-RTT, active migration, Cubic/BBR and H3 datagrams/extended CONNECT remain open.
+  - `QuicProfile` / `QuicTransportParameters`: Explicit declarative control over QUIC transport parameters and ALPN. Recovery and congestion policy live in the owned engine. Retry/address validation, keyed stateless reset, 1-RTT key update, QUIC v2 and Version Negotiation are owned (ADR-0029). Migration uses PATH_CHALLENGE/PATH_RESPONSE. 0-RTT, Cubic/BBR and H3 datagrams/extended CONNECT remain open.
   - `QuicProfileRegistry`: one resolution path for built-in and caller-supplied profiles; `QuicConnector::from_registry` fails loudly on unknown names ([ADR-0021](../adr/0021-named-quic-profiles.md)).
   - `QuicDatagramSession`: RFC 9221 unreliable datagram session with MTU bound checks (`[INV-QUIC-04]`).
   - `QuicSocketConfig`: L3/L4 socket options applied before the first packet ([INV-SOCKET-01]).

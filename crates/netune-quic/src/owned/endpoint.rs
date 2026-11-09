@@ -22,6 +22,8 @@ use crate::wire::transport_parameters::TransportParameters;
 
 use super::core::{Core, ReadResult, TIMER_INTERVAL};
 
+type IncomingDatagram = (Vec<u8>, SocketAddr);
+
 /// A client configuration for the owned endpoint.
 #[derive(Clone)]
 pub struct ClientConfigOwned {
@@ -49,7 +51,7 @@ pub struct Endpoint {
 struct EndpointInner {
     udp: Arc<UdpSocket>,
     local: SocketAddr,
-    routes: StdMutex<HashMap<Vec<u8>, mpsc::Sender<Vec<u8>>>>,
+    routes: StdMutex<HashMap<Vec<u8>, mpsc::Sender<IncomingDatagram>>>,
     accept_tx: mpsc::Sender<Connection>,
     accept_rx: Mutex<mpsc::Receiver<Connection>>,
     server: Option<ServerConfigOwned>,
@@ -213,7 +215,7 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
             .get(&dcid)
             .cloned();
         if let Some(route) = route {
-            let _ = route.send(datagram).await;
+            let _ = route.send((datagram, received.1)).await;
             continue;
         }
         if inner.server.is_some()
@@ -324,9 +326,10 @@ struct ConnectionInner {
     readable: Notify,
     established: watch::Sender<bool>,
     closed: watch::Sender<Option<Arc<QuicError>>>,
-    incoming: Option<mpsc::Sender<Vec<u8>>>,
+    incoming: Option<mpsc::Sender<IncomingDatagram>>,
     udp: Arc<UdpSocket>,
-    peer: SocketAddr,
+    peer: StdMutex<SocketAddr>,
+    candidate: StdMutex<Option<SocketAddr>>,
     local: SocketAddr,
     driver: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -339,7 +342,7 @@ pub struct Connection {
 
 impl Connection {
     pub fn remote_address(&self) -> SocketAddr {
-        self.inner.peer
+        *self.inner.peer.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn local_address(&self) -> SocketAddr {
@@ -577,7 +580,7 @@ async fn spawn_connection(
     core: Core,
     first: Option<Vec<u8>>,
 ) -> Result<(Connection, Vec<Vec<u8>>), QuicError> {
-    let (incoming_tx, mut incoming_rx) = mpsc::channel(64);
+    let (incoming_tx, mut incoming_rx) = mpsc::channel::<IncomingDatagram>(64);
     let (established_tx, _) = watch::channel(false);
     let (closed_tx, _) = watch::channel(None);
     let inner = Arc::new(ConnectionInner {
@@ -588,7 +591,8 @@ async fn spawn_connection(
         closed: closed_tx,
         incoming: Some(incoming_tx.clone()),
         udp: endpoint.udp.clone(),
-        peer,
+        peer: StdMutex::new(peer),
+        candidate: StdMutex::new(None),
         local: endpoint.local,
         driver: StdMutex::new(None),
     });
@@ -610,11 +614,47 @@ async fn spawn_connection(
             let mut outgoing: Vec<Vec<u8>> = Vec::new();
             let mut closed = false;
             tokio::select! {
-                Some(datagram) = incoming_rx.recv() => {
+                Some((datagram, source)) = incoming_rx.recv() => {
+                    let current = *driver_inner.peer.lock().unwrap_or_else(|e| e.into_inner());
                     let mut core = driver_inner.core.lock().unwrap_or_else(|e| e.into_inner());
+                    if source != current {
+                        if core.migration_disabled() {
+                            continue;
+                        }
+                        let known_candidate = *driver_inner
+                            .candidate
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if known_candidate != Some(source) {
+                            let Ok(challenge) = random_bytes::<8>() else {
+                                continue;
+                            };
+                            core.begin_path_validation(challenge);
+                            *driver_inner
+                                .candidate
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = Some(source);
+                        }
+                    }
                     if core.receive(&datagram).is_err() {
                         closed |= true;
                     } else {
+                        if core.path_validated() {
+                            let candidate = *driver_inner
+                                .candidate
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            if let Some(candidate) = candidate {
+                                *driver_inner
+                                    .peer
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner()) = candidate;
+                                *driver_inner
+                                    .candidate
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner()) = None;
+                            }
+                        }
                         let _ = core.poll_transmit();
                         outgoing = core.take_outgoing();
                         closed |= core.is_closed();
@@ -636,13 +676,14 @@ async fn spawn_connection(
                     closed |= core.is_closed();
                 }
             }
+            let target = *driver_inner
+                .candidate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .unwrap_or(&*driver_inner.peer.lock().unwrap_or_else(|e| e.into_inner()));
             for datagram in outgoing {
-                if driver_inner
-                    .udp
-                    .send_to(&datagram, driver_inner.peer)
-                    .await
-                    .is_err()
-                {
+                if driver_inner.udp.send_to(&datagram, target).await.is_err() {
                     closed |= true;
                     break;
                 }
@@ -675,7 +716,7 @@ async fn send_outgoing(udp: &UdpSocket, peer: SocketAddr, outgoing: Vec<Vec<u8>>
 
 fn parse_dcid(
     datagram: &[u8],
-    routes: &StdMutex<HashMap<Vec<u8>, mpsc::Sender<Vec<u8>>>>,
+    routes: &StdMutex<HashMap<Vec<u8>, mpsc::Sender<IncomingDatagram>>>,
     cid_len: usize,
 ) -> Option<Vec<u8>> {
     if datagram.len() < 5 {

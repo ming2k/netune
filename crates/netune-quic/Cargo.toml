@@ -8,6 +8,12 @@ repository = "https://github.com/ming2k/netune"
 license.workspace = true
 readme = false
 
+[features]
+default = []
+# The owned QUIC engine (ADR-0028). It becomes the production path only after
+# the handshake, recovery and stream parity gates pass.
+owned-quic = []
+
 [dependencies]
 bytes = { workspace = true }
 libc = { workspace = true }

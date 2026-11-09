@@ -66,6 +66,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-SERVER-14..16]` | A request is grammatical before it is routed (target form, `Host` grammar, CRLF strictness), a body bound is cumulative and a declared length is checked before the body, and every refusal is a status line rather than a reset socket. | ADR-0014 |
 | `[INV-SERVER-22..24]` | H3 ingress is a separate QUIC listener; its exchanges use non-zero trace ids; body, handler, write and drain bounds come from the same `ServerConfig`. | ADR-0025 |
 | `[INV-QUIC-01..04]` | Crypto unification on `aws-lc-rs` (`ring` forbidden); pre-connect socket options and confinement precede QUIC initial packet; pure trace derivation; predictable datagram sizing failure. | ADR-0016 |
+| `[INV-QUIC-05..09]` | After the ADR-0028 migration gate, QUIC is owned by `netune-quic`: no quinn production path, delegated rustls/aws-lc-rs crypto, validate-before-mutate, trace-derived recovery, and flow control before buffering. | ADR-0028 |
 
 The authoritative wording of each invariant lives in its ADR. This table is an index, not a second source of truth; if the two disagree, the ADR wins and this table is corrected.
 

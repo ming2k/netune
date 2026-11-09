@@ -17,6 +17,14 @@ pub mod profile;
 pub mod socket;
 pub mod stream;
 
+/// The owned QUIC wire codec and, eventually, the owned engine (ADR-0028).
+#[cfg(feature = "owned-quic")]
+pub mod wire;
+
+/// The owned QUIC packet-protection layer (ADR-0028).
+#[cfg(feature = "owned-quic")]
+pub mod crypto;
+
 pub use connector::{QuicConnection, QuicConnector};
 pub use datagram::QuicDatagramSession;
 pub use error::QuicError;

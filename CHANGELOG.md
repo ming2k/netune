@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Owned QUIC foundation.** `netune-quic` now carries the RFC 9000 wire codec
+  (varints, long/short headers, all core frames, transport parameters) and the
+  RFC 9001 packet-protection wiring backed by `rustls`/`aws-lc-rs`. The RFC 9001
+  client Initial vector decrypts and re-protects byte-for-byte. The engine is
+  behind the `owned-quic` feature until the ADR-0028 parity gate; `quinn`
+  remains the production runtime.
+
 ### Changed
 
 - **HTTP/3 and QPACK are owned.** `netune-http3` now implements the RFC 9114

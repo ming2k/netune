@@ -136,6 +136,7 @@ This document provides a factual overview of all crates comprising the `netune` 
 
 ### `netune-quic`
 - **Dependencies**: `netune-io`, `netune-trace`, `bytes`, `libc`, `quinn`, `quinn-proto`, `rustls`, `rustls-platform-verifier`, `socket2`, `tokio`. Compiles strictly against `aws-lc-rs` (`[INV-QUIC-01]`).
+- **Owned QUIC foundation (ADR-0028)**: the `owned-quic` feature compiles the owned wire codec (`wire`), transport parameters, and packet-protection layer (`crypto`). It is not yet the production path; `quinn` remains the runtime until the ADR-0028 parity gate.
 - **Key Types**:
   - `QuicConnector`: Coordinates egress confinement (`with_confinement` / `strict_public`), manual socket pre-configuration, and QUIC client endpoint creation. Confinement is checked on the resolved address **before** the UDP socket is created ([INV-QUIC-02](../adr/0016-quic-and-http3-transport.md)).
   - `QuicConnection`: Established QUIC session with bidirectional and unidirectional stream allocation.

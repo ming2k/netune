@@ -77,6 +77,9 @@ cargo test --workspace
 # H3/QPACK differential interop against the dev-only h3 oracle
 cargo test -p netune-http3 --test h3_interop
 
+# Owned QUIC foundation (ADR-0028): wire, transport parameters, packet protection
+cargo test -p netune-quic --features owned-quic
+
 # Deterministic zero-cost gate (requires valgrind + iai-callgrind-runner)
 cargo bench -p netune --bench zero_cost
 ```

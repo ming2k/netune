@@ -90,6 +90,13 @@ This document codifies the workspace topology, dependency direction, and non-neg
 - **Exchange identity**: H3 wire stream `0` is a valid request, so ingress traces use non-zero exchange ids and record the wire stream id in the H3 start event (`[INV-SERVER-22..24]`).
 - **Enforcement**: `crates/netune-server/src/h3.rs`, `crates/netune-http3/src/server.rs`, and `crates/netune-server/tests/http3_ingress.rs`.
 
+### 2.4.3 QUIC Ownership Migration (ADR-0028)
+
+- **Red-line (migration target)**: `netune-quic` owns the RFC 9000 state machine, RFC 9001 packet protection wiring and RFC 9002 recovery; `quinn`/`quinn-proto` disappear from the production graph after the parity gate.
+- **Current posture**: `quinn` remains the production runtime while the owned engine is built behind the non-default `owned-quic` feature. The wire codec, transport parameters and packet-protection layer are tested there, including the RFC 9001 client Initial vector.
+- **Crypto**: Initial/Handshake/1-RTT keys and packet/header protection come from `rustls::quic` backed by `aws-lc-rs`; no owned cipher or HKDF.
+- **Enforcement**: `crates/netune-quic/src/{wire,crypto}/`, `cargo test -p netune-quic --features owned-quic`, and the eventual `ARCH-005` switch that removes `quinn` from `ALLOWED_RUNTIME_DEPS`.
+
 ### 2.5 Codecs Never Open Sockets
 
 - **Red-line**: `netune-http1`, `netune-http2` and `netune-ws` operate on caller-provided byte buffers or `AsyncRead`/`AsyncWrite` handles. They never resolve, connect, listen, or own a socket; transport policy belongs to an orchestrator.

@@ -101,6 +101,15 @@ impl TlsSession {
         .map(Vec::from)
     }
 
+    /// The peer's certificate chain, when the handshake presented one.
+    pub fn peer_certificates(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        match self {
+            Self::Client(session) => session.peer_certificates(),
+            Self::Server(session) => session.peer_certificates(),
+        }
+        .map(<[rustls::pki_types::CertificateDer<'static>]>::to_vec)
+    }
+
     /// Early data keys if the resumed session offers 0-RTT.
     pub fn zero_rtt_keys(&self) -> Option<rustls::quic::DirectionalKeys> {
         match self {

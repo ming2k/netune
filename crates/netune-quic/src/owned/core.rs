@@ -22,7 +22,7 @@ use crate::crypto::{
 use crate::error::QuicError;
 use crate::profile::CongestionAlgorithm;
 
-use super::congestion::Congestion;
+use super::congestion::{Congestion, CongestionControllerFactory};
 use super::session::SessionCache;
 use crate::wire::frame::{AckFrame, AckRange, Frame};
 use crate::wire::packet::{LongPacket, LongType, ShortPacket, VersionNegotiation};
@@ -119,7 +119,9 @@ pub(crate) struct ClientOptions {
     pub version: u32,
     pub supported_versions: Vec<u32>,
     pub congestion: CongestionAlgorithm,
+    pub congestion_factory: Option<std::sync::Arc<dyn CongestionControllerFactory>>,
     pub early_data: bool,
+    pub keep_alive: Option<Duration>,
     pub session_cache: Option<std::sync::Arc<SessionCache>>,
     pub session_key: String,
 }
@@ -188,6 +190,7 @@ pub(crate) struct Core {
     early_frames: Vec<Frame>,
     early_data_accepted: bool,
     early_data_available: bool,
+    keep_alive: Option<Duration>,
     session_cache: Option<std::sync::Arc<SessionCache>>,
     session_key: String,
 }
@@ -272,7 +275,11 @@ impl Core {
             peer_max_datagram: None,
             send_datagrams: VecDeque::new(),
             recv_datagrams: VecDeque::new(),
-            congestion: Congestion::new(options.congestion, Instant::now()),
+            congestion: Congestion::new_with_factory(
+                options.congestion,
+                options.congestion_factory.as_ref(),
+                Instant::now(),
+            ),
             bytes_in_flight: 0,
             peer_opened_bidi: 0,
             peer_opened_uni: 0,
@@ -295,6 +302,7 @@ impl Core {
             early_frames: Vec::new(),
             early_data_accepted: false,
             early_data_available,
+            keep_alive: options.keep_alive,
             session_cache: options.session_cache,
             session_key: options.session_key,
         };
@@ -385,6 +393,7 @@ impl Core {
             early_frames: Vec::new(),
             early_data_accepted: false,
             early_data_available: false,
+            keep_alive: None,
             session_cache: None,
             session_key: String::new(),
         })
@@ -460,6 +469,14 @@ impl Core {
 
     pub(crate) fn handle_timeout(&mut self) -> Result<(), QuicError> {
         let now = Instant::now();
+        if let Some(interval) = self.keep_alive
+            && now.saturating_duration_since(self.last_activity) >= interval
+        {
+            // A PING keeps the NAT mapping and the peer's idle timer alive. It is a
+            // retransmittable control frame, so it takes the normal send path.
+            self.retransmit[Level::OneRtt as usize].push(Frame::Ping);
+            self.last_activity = now;
+        }
         let Some(earliest) = self.sent.iter().map(|packet| packet.time).min() else {
             return Ok(());
         };
@@ -483,6 +500,12 @@ impl Core {
 
     pub(crate) fn rtt(&self) -> Option<Duration> {
         self.srtt
+    }
+
+    pub(crate) fn peer_certificates(
+        &self,
+    ) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        self.tls.peer_certificates()
     }
 
     fn handle_version_negotiation(&mut self, bytes: &[u8]) -> Result<(), QuicError> {
@@ -746,7 +769,8 @@ impl Core {
         });
         self.bytes_in_flight = self.bytes_in_flight.saturating_sub(acked_bytes);
         if !lost.is_empty() {
-            self.congestion.on_loss(now);
+            let lost_bytes = lost.iter().map(|(size, _)| *size).sum();
+            self.congestion.on_loss(now, lost_bytes);
             for (size, frames) in lost {
                 self.bytes_in_flight = self.bytes_in_flight.saturating_sub(size);
                 for frame in frames {
@@ -1891,7 +1915,9 @@ mod tests {
                 version: crate::wire::packet::VERSION_1,
                 supported_versions: vec![crate::wire::packet::VERSION_1],
                 congestion: CongestionAlgorithm::NewReno,
+                congestion_factory: None,
                 early_data: false,
+                keep_alive: None,
                 session_cache: None,
                 session_key: "localhost".to_string(),
             },

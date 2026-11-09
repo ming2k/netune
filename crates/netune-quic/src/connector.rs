@@ -13,7 +13,7 @@ use rustls_platform_verifier::BuilderVerifierExt;
 use crate::error::QuicError;
 use crate::owned::{ClientConfigOwned, Connection, Endpoint, SessionCache};
 use crate::profile::{QuicProfile, QuicProfileRegistry};
-use crate::socket::QuicSocketConfig;
+use crate::socket::{QuicSocketConfig, QuicUdpSocket};
 use crate::wire::transport_parameters::TransportParameters;
 
 /// Establishes and shapes QUIC connections.
@@ -23,6 +23,8 @@ pub struct QuicConnector {
     socket_config: QuicSocketConfig,
     confinement: EgressConfinement,
     custom_tls: Option<rustls::ClientConfig>,
+    custom_socket: Option<Arc<dyn QuicUdpSocket>>,
+    congestion_factory: Option<Arc<dyn crate::CongestionControllerFactory>>,
     session_cache: SessionCache,
     client_tls: Arc<std::sync::Mutex<Option<Arc<rustls::ClientConfig>>>>,
 }
@@ -50,6 +52,8 @@ impl QuicConnector {
             socket_config: QuicSocketConfig::default(),
             confinement: EgressConfinement::Unrestricted,
             custom_tls: None,
+            custom_socket: None,
+            congestion_factory: None,
             session_cache: SessionCache::new(),
             client_tls: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -88,6 +92,27 @@ impl QuicConnector {
     pub fn with_tls_config(mut self, tls: rustls::ClientConfig) -> Self {
         self.custom_tls = Some(tls);
         self.client_tls = Arc::new(std::sync::Mutex::new(None));
+        self
+    }
+
+    /// Uses a caller-supplied UDP socket stack instead of creating one.
+    ///
+    /// This is the seam for protocol-specific datagram transforms such as
+    /// obfuscation and port hopping. The caller must apply `SocketConfig` and
+    /// egress confinement to the sockets it provides; `connect_early` still
+    /// checks `confinement` against the target before any packet is sent.
+    pub fn with_custom_socket(mut self, socket: Arc<dyn QuicUdpSocket>) -> Self {
+        self.custom_socket = Some(socket);
+        self
+    }
+
+    /// Uses a caller-supplied congestion controller instead of the profile's
+    /// built-in algorithm. The factory is consulted once per connection.
+    pub fn with_congestion_factory(
+        mut self,
+        factory: Arc<dyn crate::CongestionControllerFactory>,
+    ) -> Self {
+        self.congestion_factory = Some(factory);
         self
     }
 
@@ -134,8 +159,13 @@ impl QuicConnector {
 
         let tls = self.build_tls_config()?;
         let transport = self.transport_parameters();
-        let udp = self.socket_config.create_tokio_socket(target_addr)?;
-        let endpoint = Endpoint::client_with_udp(udp).await?;
+        let endpoint = match &self.custom_socket {
+            Some(socket) => Endpoint::client_with_socket(Arc::clone(socket)).await?,
+            None => {
+                let udp = self.socket_config.create_tokio_socket(target_addr)?;
+                Endpoint::client_with_udp(udp).await?
+            }
+        };
         let connection = match endpoint
             .connect_early(
                 target_addr,
@@ -148,7 +178,9 @@ impl QuicConnector {
                         crate::wire::packet::VERSION_2,
                     ],
                     congestion: self.profile.congestion,
+                    congestion_factory: self.congestion_factory.clone(),
                     enable_early_data: self.profile.enable_0rtt,
+                    keep_alive: self.profile.keep_alive,
                     session_cache: Some(self.session_cache.clone().into()),
                 },
             )

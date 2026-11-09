@@ -18,6 +18,8 @@ use tokio::sync::{Mutex, Notify, mpsc, watch};
 
 use crate::crypto::TlsSession;
 use crate::error::QuicError;
+use crate::owned::congestion::CongestionControllerFactory;
+use crate::socket::{QuicUdpSocket, recv_from as udp_recv_from, send_to as udp_send_to};
 use crate::wire::transport_parameters::TransportParameters;
 
 use super::core::{Core, ReadResult, TIMER_INTERVAL};
@@ -32,8 +34,12 @@ pub struct ClientConfigOwned {
     /// Preferred QUIC version first; later entries are Version Negotiation fallbacks.
     pub versions: Vec<u32>,
     pub congestion: crate::profile::CongestionAlgorithm,
+    /// Overrides the profile's built-in controller when present.
+    pub congestion_factory: Option<Arc<dyn CongestionControllerFactory>>,
     /// Enable 0-RTT when a resumed TLS session offers early keys.
     pub enable_early_data: bool,
+    /// Send a PING after this much receive inactivity.
+    pub keep_alive: Option<std::time::Duration>,
     /// QUIC transport parameters remembered from prior authenticated sessions.
     pub session_cache: Option<Arc<super::session::SessionCache>>,
 }
@@ -57,7 +63,7 @@ pub struct Endpoint {
 }
 
 struct EndpointInner {
-    udp: Arc<UdpSocket>,
+    udp: Arc<dyn QuicUdpSocket>,
     local: SocketAddr,
     routes: StdMutex<HashMap<Vec<u8>, mpsc::Sender<IncomingDatagram>>>,
     accept_tx: mpsc::Sender<Connection>,
@@ -88,25 +94,34 @@ impl Endpoint {
 
     /// Bind a client endpoint over an already-configured tokio UDP socket.
     pub async fn client_with_udp(udp: UdpSocket) -> Result<Self, QuicError> {
-        Self::from_udp(udp, None).await
+        Self::client_with_socket(Arc::new(udp)).await
+    }
+
+    /// Bind a client endpoint over an abstract socket stack.
+    ///
+    /// The caller owns socket configuration and egress confinement: this is the
+    /// seam for obfuscation and port-hopping wrappers, and it must be used only
+    /// after the same checks [`crate::QuicConnector`] performs before it
+    /// creates a socket.
+    pub async fn client_with_socket(udp: Arc<dyn QuicUdpSocket>) -> Result<Self, QuicError> {
+        Self::from_socket(udp, None).await
     }
 
     async fn bind(address: &str, server: Option<ServerConfigOwned>) -> Result<Self, QuicError> {
         let udp = UdpSocket::bind(address).await.map_err(QuicError::Socket)?;
-        Self::from_udp(udp, server).await
+        Self::from_socket(Arc::new(udp), server).await
     }
 
-    async fn from_udp(
-        udp: UdpSocket,
+    async fn from_socket(
+        udp: Arc<dyn QuicUdpSocket>,
         server: Option<ServerConfigOwned>,
     ) -> Result<Self, QuicError> {
         let local = udp.local_addr().map_err(QuicError::Socket)?;
-        let udp = Arc::new(udp);
         let (accept_tx, accept_rx) = mpsc::channel(64);
         let reset_key = random_bytes::<32>()?;
         let retry_key = random_bytes::<32>()?;
         let inner = Arc::new(EndpointInner {
-            udp: udp.clone(),
+            udp,
             local,
             routes: StdMutex::new(HashMap::new()),
             accept_tx,
@@ -173,7 +188,9 @@ impl Endpoint {
                 version,
                 supported_versions: versions,
                 congestion: config.congestion,
+                congestion_factory: config.congestion_factory,
                 early_data: config.enable_early_data,
+                keep_alive: config.keep_alive,
                 session_cache: config.session_cache,
                 session_key,
             },
@@ -222,7 +239,7 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
         if inner.closed.load(Ordering::SeqCst) {
             break;
         }
-        let received = match inner.udp.recv_from(&mut buffer).await {
+        let received = match udp_recv_from(&*inner.udp, &mut buffer).await {
             Ok(received) => received,
             Err(_) => break,
         };
@@ -265,7 +282,7 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
                 ],
             };
             if let Ok(packet) = negotiation.encode() {
-                let _ = inner.udp.send_to(&packet, received.1).await;
+                let _ = udp_send_to(&*inner.udp, &packet, received.1).await;
             }
             continue;
         }
@@ -290,7 +307,7 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
                         token,
                         &client_dcid,
                     ) {
-                        let _ = inner.udp.send_to(&packet, received.1).await;
+                        let _ = udp_send_to(&*inner.udp, &packet, received.1).await;
                     }
                     continue;
                 }
@@ -357,7 +374,7 @@ struct ConnectionInner {
     established: watch::Sender<bool>,
     closed: watch::Sender<Option<Arc<QuicError>>>,
     incoming: Option<mpsc::Sender<IncomingDatagram>>,
-    udp: Arc<UdpSocket>,
+    udp: Arc<dyn QuicUdpSocket>,
     peer: StdMutex<SocketAddr>,
     candidate: StdMutex<Option<SocketAddr>>,
     local: SocketAddr,
@@ -385,6 +402,15 @@ impl Connection {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .rtt()
+    }
+
+    /// The peer's certificate chain, when the handshake presented one.
+    pub fn peer_certificates(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        self.inner
+            .core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .peer_certificates()
     }
 
     pub fn max_datagram_size(&self) -> Option<usize> {
@@ -449,6 +475,15 @@ impl Connection {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_established()
+    }
+
+    /// Whether the connection has closed, locally or by peer.
+    pub fn is_closed(&self) -> bool {
+        self.inner
+            .core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_closed()
     }
 
     pub async fn closed(&self) {
@@ -736,7 +771,10 @@ async fn spawn_connection(
                 .as_ref()
                 .unwrap_or(&*driver_inner.peer.lock().unwrap_or_else(|e| e.into_inner()));
             for datagram in outgoing {
-                if driver_inner.udp.send_to(&datagram, target).await.is_err() {
+                if udp_send_to(&*driver_inner.udp, &datagram, target)
+                    .await
+                    .is_err()
+                {
                     closed |= true;
                     break;
                 }
@@ -761,9 +799,9 @@ async fn spawn_connection(
     Ok((connection, outgoing))
 }
 
-async fn send_outgoing(udp: &UdpSocket, peer: SocketAddr, outgoing: Vec<Vec<u8>>) {
+async fn send_outgoing(udp: &Arc<dyn QuicUdpSocket>, peer: SocketAddr, outgoing: Vec<Vec<u8>>) {
     for datagram in outgoing {
-        let _ = udp.send_to(&datagram, peer).await;
+        let _ = udp_send_to(&**udp, &datagram, peer).await;
     }
 }
 
@@ -941,7 +979,7 @@ async fn send_stateless_reset(
     reset[0] = 0x40 | (reset[0] & 0x3f);
     let token = reset_token(&inner.reset_key, destination_connection_id);
     reset[len - 16..].copy_from_slice(&token);
-    let _ = inner.udp.send_to(&reset, peer).await;
+    let _ = udp_send_to(&*inner.udp, &reset, peer).await;
 }
 
 fn reset_token(key: &[u8; 32], connection_id: &[u8]) -> [u8; 16] {

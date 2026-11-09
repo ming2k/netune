@@ -9,6 +9,7 @@
 //! BBR implementation is model-window based and intentionally does not claim
 //! pacing parity with a full BBRv3 deployment.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::profile::CongestionAlgorithm;
@@ -16,10 +17,35 @@ use crate::profile::CongestionAlgorithm;
 const MSS: u64 = 1200;
 const MIN_CWND: u64 = 2 * MSS;
 
+/// A pluggable congestion controller for the owned QUIC engine.
+///
+/// The engine calls these methods with monotonic timestamps and byte counts;
+/// an implementation returns the congestion window it wants enforced. This is
+/// the seam for protocol-specific controllers such as Hysteria 2's Brutal,
+/// which pins a window to an operator-declared rate instead of inferring one
+/// from loss.
+pub trait CongestionController: Send + Sync {
+    /// The current congestion window in bytes.
+    fn window(&self) -> u64;
+    /// One ACKed batch of bytes.
+    fn on_ack(&mut self, acked_bytes: u64, now: Instant, rtt: Option<Duration>);
+    /// One loss event; `lost_bytes` is the total size of the packets declared lost.
+    fn on_loss(&mut self, now: Instant, lost_bytes: u64);
+    /// A probe timeout expired.
+    fn on_pto(&mut self, now: Instant);
+}
+
+/// Builds one controller per connection.
+pub trait CongestionControllerFactory: Send + Sync {
+    /// Construct a controller for a new connection.
+    fn build(&self, now: Instant, mtu: u16) -> Box<dyn CongestionController>;
+}
+
 pub(crate) enum Congestion {
     NewReno(NewReno),
     Cubic(Cubic),
     Bbr(Bbr),
+    Custom(Box<dyn CongestionController>),
 }
 
 impl Congestion {
@@ -31,11 +57,25 @@ impl Congestion {
         }
     }
 
+    /// Builds the profile-selected controller, or the caller's factory when
+    /// one was supplied.
+    pub(crate) fn new_with_factory(
+        algorithm: CongestionAlgorithm,
+        factory: Option<&Arc<dyn CongestionControllerFactory>>,
+        now: Instant,
+    ) -> Self {
+        match factory {
+            Some(factory) => Self::Custom(factory.build(now, MSS as u16)),
+            None => Self::new(algorithm, now),
+        }
+    }
+
     pub(crate) fn window(&self) -> u64 {
         match self {
             Self::NewReno(state) => state.cwnd,
             Self::Cubic(state) => state.cwnd,
             Self::Bbr(state) => state.cwnd,
+            Self::Custom(state) => state.window(),
         }
     }
 
@@ -44,14 +84,16 @@ impl Congestion {
             Self::NewReno(state) => state.on_ack(acked_bytes),
             Self::Cubic(state) => state.on_ack(acked_bytes, now),
             Self::Bbr(state) => state.on_ack(acked_bytes, now, rtt),
+            Self::Custom(state) => state.on_ack(acked_bytes, now, rtt),
         }
     }
 
-    pub(crate) fn on_loss(&mut self, now: Instant) {
+    pub(crate) fn on_loss(&mut self, now: Instant, lost_bytes: u64) {
         match self {
             Self::NewReno(state) => state.on_loss(),
             Self::Cubic(state) => state.on_loss(),
             Self::Bbr(state) => state.on_loss(now),
+            Self::Custom(state) => state.on_loss(now, lost_bytes),
         }
     }
 
@@ -60,6 +102,7 @@ impl Congestion {
             Self::NewReno(state) => state.on_loss(),
             Self::Cubic(state) => state.on_loss(),
             Self::Bbr(state) => state.on_pto(now),
+            Self::Custom(state) => state.on_pto(now),
         }
     }
 }
@@ -268,5 +311,40 @@ mod tests {
         assert!(state.max_bw > 0.0);
         state.on_pto(now + Duration::from_millis(30));
         assert!(state.cwnd >= 4 * MSS);
+    }
+
+    #[test]
+    fn a_custom_factory_overrides_the_profile_algorithm() {
+        // A product controller (Hysteria 2's Brutal) must be able to pin the window without
+        // the engine knowing the product. The factory is consulted once and its window is
+        // what `poll_transmit` sees.
+        #[derive(Debug)]
+        struct Fixed;
+        impl CongestionController for Fixed {
+            fn window(&self) -> u64 {
+                77 * MSS
+            }
+            fn on_ack(&mut self, _acked_bytes: u64, _now: Instant, _rtt: Option<Duration>) {}
+            fn on_loss(&mut self, _now: Instant, _lost_bytes: u64) {}
+            fn on_pto(&mut self, _now: Instant) {}
+        }
+        #[derive(Debug)]
+        struct Factory;
+        impl CongestionControllerFactory for Factory {
+            fn build(&self, _now: Instant, _mtu: u16) -> Box<dyn CongestionController> {
+                Box::new(Fixed)
+            }
+        }
+
+        let factory: Arc<dyn CongestionControllerFactory> = Arc::new(Factory);
+        let mut control = Congestion::new_with_factory(
+            CongestionAlgorithm::NewReno,
+            Some(&factory),
+            Instant::now(),
+        );
+        assert_eq!(control.window(), 77 * MSS);
+        control.on_ack(MSS, Instant::now(), None);
+        control.on_loss(Instant::now(), MSS);
+        assert_eq!(control.window(), 77 * MSS);
     }
 }

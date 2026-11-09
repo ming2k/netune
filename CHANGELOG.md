@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12] - 2026-11-09
+
+### Added
+
+- **Consumer seams on the owned QUIC transport.** `netune-quic` exposes
+  `QuicUdpSocket`, an abstract datagram socket accepted by
+  `QuicConnector::with_custom_socket`, so protocol-specific obfuscation and
+  port-hopping layers can sit below the engine without forking it.
+  `CongestionControllerFactory` does the same for congestion control: a
+  per-connection controller selected by `QuicConnector::with_congestion_factory`
+  overrides the profile algorithm. `QuicProfile.keep_alive` sends a PING after
+  the configured receive inactivity, and `Connection::peer_certificates` exposes
+  the post-handshake chain a `pin-sha256` check needs. These are the capabilities
+  daer's Hysteria 2 outbound consumed from `quinn` before the owned migration.
+
 ## [0.0.11] - 2026-11-09
 
 ### Added

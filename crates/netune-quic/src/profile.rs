@@ -116,6 +116,8 @@ pub struct QuicProfile {
     pub congestion: CongestionAlgorithm,
     /// Whether a resumed session may use 0-RTT early data.
     pub enable_0rtt: bool,
+    /// Send a QUIC PING after this much receive inactivity.
+    pub keep_alive: Option<Duration>,
     /// ALPN strings in wire preference order.
     pub alpn: Vec<Vec<u8>>,
 }
@@ -134,6 +136,7 @@ impl QuicProfile {
             transport_parameters: QuicTransportParameters::default(),
             congestion: CongestionAlgorithm::NewReno,
             enable_0rtt: false,
+            keep_alive: None,
             alpn: vec![b"h3".to_vec()],
         }
     }
@@ -156,6 +159,7 @@ impl QuicProfile {
             },
             congestion: CongestionAlgorithm::Bbr,
             enable_0rtt: true,
+            keep_alive: None,
             alpn: vec![b"h3".to_vec()],
         }
     }
@@ -178,6 +182,7 @@ impl QuicProfile {
             },
             congestion: CongestionAlgorithm::Bbr,
             enable_0rtt: true,
+            keep_alive: None,
             alpn: vec![b"h3".to_vec()],
         }
     }

@@ -13,8 +13,86 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::task::{Context, Poll};
 
 use socket2::{Domain, Protocol, Socket, Type};
+use tokio::net::UdpSocket;
+
+/// An abstract asynchronous UDP socket used by the owned QUIC endpoint.
+///
+/// This is the extension seam for datagram transforms such as Hysteria 2's
+/// Salamander/Gecko obfuscation and port hopping. The endpoint owns the trait
+/// object, so a wrapper can rewrite the bytes and the local socket underneath
+/// without the QUIC state machine knowing.
+///
+/// Implementations must be cheap to poll and must not block. `poll_recv_from`
+/// fills `buf` with one datagram and returns its length and peer address; a
+/// datagram larger than `buf` may be truncated (QUIC packets are at most
+/// 1200 bytes, so the endpoint's buffer is always larger).
+pub trait QuicUdpSocket: Send + Sync + 'static {
+    /// Poll for one datagram from any peer.
+    fn poll_recv_from(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr)>>;
+
+    /// Poll until one datagram has been sent to `target`.
+    fn poll_send_to(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        target: SocketAddr,
+    ) -> Poll<io::Result<usize>>;
+
+    /// The local address the socket is bound to.
+    fn local_addr(&self) -> io::Result<SocketAddr>;
+}
+
+impl QuicUdpSocket for UdpSocket {
+    fn poll_recv_from(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        let mut read = tokio::io::ReadBuf::new(buf);
+        match UdpSocket::poll_recv_from(self, cx, &mut read) {
+            Poll::Ready(Ok(address)) => Poll::Ready(Ok((read.filled().len(), address))),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_send_to(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        target: SocketAddr,
+    ) -> Poll<io::Result<usize>> {
+        UdpSocket::poll_send_to(self, cx, buf, target)
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        UdpSocket::local_addr(self)
+    }
+}
+
+/// Waits for one datagram on an abstract socket.
+pub(crate) async fn recv_from(
+    socket: &dyn QuicUdpSocket,
+    buf: &mut [u8],
+) -> io::Result<(usize, SocketAddr)> {
+    std::future::poll_fn(|cx| socket.poll_recv_from(cx, buf)).await
+}
+
+/// Sends one datagram on an abstract socket.
+pub(crate) async fn send_to(
+    socket: &dyn QuicUdpSocket,
+    buf: &[u8],
+    target: SocketAddr,
+) -> io::Result<usize> {
+    std::future::poll_fn(|cx| socket.poll_send_to(cx, buf, target)).await
+}
 
 /// L3/L4 pre-connect socket parameters for QUIC datagram endpoints.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -95,5 +173,70 @@ impl QuicSocketConfig {
 
         let std_socket: std::net::UdpSocket = socket.into();
         tokio::net::UdpSocket::from_std(std_socket)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct CountingSocket {
+        inner: UdpSocket,
+        sends: AtomicUsize,
+    }
+
+    impl QuicUdpSocket for CountingSocket {
+        fn poll_recv_from(
+            &self,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<(usize, SocketAddr)>> {
+            QuicUdpSocket::poll_recv_from(&self.inner, cx, buf)
+        }
+
+        fn poll_send_to(
+            &self,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+            target: SocketAddr,
+        ) -> Poll<io::Result<usize>> {
+            let result = QuicUdpSocket::poll_send_to(&self.inner, cx, buf, target);
+            if matches!(result, Poll::Ready(Ok(_))) {
+                self.sends.fetch_add(1, Ordering::Relaxed);
+            }
+            result
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.local_addr()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_abstract_socket_carries_a_datagram_and_counts_the_send() {
+        // The seam is only useful if the endpoint actually polls the wrapper. This proves the
+        // wrapper's send and receive paths move bytes, and that the wrapper sees the call.
+        let sender = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.expect("binds");
+        let target = receiver.local_addr().expect("address");
+        let sender = Arc::new(CountingSocket {
+            inner: sender,
+            sends: AtomicUsize::new(0),
+        });
+
+        let sent = send_to(sender.as_ref(), b"quic", target)
+            .await
+            .expect("sends");
+        assert_eq!(sent, 4);
+        assert_eq!(sender.sends.load(Ordering::Relaxed), 1);
+
+        let mut buffer = [0u8; 16];
+        let (received, peer) = recv_from(&receiver, &mut buffer).await.expect("receives");
+        assert_eq!(&buffer[..received], b"quic");
+        assert_eq!(peer, sender.local_addr().expect("local address"));
     }
 }

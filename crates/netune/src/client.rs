@@ -29,9 +29,9 @@ use crate::connect::{Connector, Target};
 use crate::decompress::Decoder;
 use crate::error::NetError;
 use crate::pool::{IdleConnection, Pool, PoolKey, Protocol};
-use crate::profile::{ConnectionPlan, H1Registry, H1WireProfile, ProfileId};
+use crate::profile::{ConnectionPlan, H1Registry, H1WireProfile};
 #[cfg(feature = "http2")]
-use crate::profile::{H2Registry, H2RequestRegistry};
+use crate::profile::{H2Registry, H2RequestRegistry, ProfileId};
 use crate::tcp_info::{SAMPLE_INTERVAL, Sampler, start as start_sampler};
 #[cfg(feature = "ws")]
 use netune_io::RingIo;

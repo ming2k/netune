@@ -14,7 +14,7 @@ categories = ["network-programming", "development-tools::debugging"]
 all-features = true
 
 [dependencies]
-netune-trace = { path = "../netune-trace", version = "0.0.11" }
+netune-trace = { path = "../netune-trace", version = "0.0.12" }
 tokio = { workspace = true, features = ["io-util", "rt", "time"] }
 
 [dev-dependencies]

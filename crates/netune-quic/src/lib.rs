@@ -24,5 +24,6 @@ pub use connector::{QuicConnection, QuicConnector};
 pub use datagram::QuicDatagramSession;
 pub use error::QuicError;
 pub use netune_egress::EgressConfinement;
+pub use owned::congestion::{CongestionController, CongestionControllerFactory};
 pub use profile::{CongestionAlgorithm, QuicProfile, QuicProfileRegistry, QuicTransportParameters};
-pub use socket::QuicSocketConfig;
+pub use socket::{QuicSocketConfig, QuicUdpSocket};

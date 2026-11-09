@@ -136,6 +136,8 @@ async fn owned_endpoint_exchanges_a_bidi_stream_with_quinn() {
                 transport: transport(),
                 versions: vec![netune_quic::wire::packet::VERSION_1],
                 congestion: netune_quic::CongestionAlgorithm::NewReno,
+                congestion_factory: None,
+                keep_alive: None,
                 enable_early_data: false,
                 session_cache: None,
             },

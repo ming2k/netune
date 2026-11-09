@@ -273,7 +273,7 @@ pub fn long_packet_number_offset(packet: &[u8]) -> Result<usize, CryptoError> {
     long_header_info(packet).map(|(offset, _)| offset)
 }
 
-fn long_header_info(packet: &[u8]) -> Result<(usize, usize), CryptoError> {
+pub fn long_header_info(packet: &[u8]) -> Result<(usize, usize), CryptoError> {
     use crate::wire::packet::LongType;
     use crate::wire::varint;
 

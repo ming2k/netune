@@ -33,7 +33,7 @@ impl LongType {
         }
     }
 
-    pub(crate) fn from_bits(bits: u8) -> Self {
+    pub fn from_bits(bits: u8) -> Self {
         match bits & 0x30 {
             0x00 => Self::Initial,
             0x10 => Self::ZeroRtt,

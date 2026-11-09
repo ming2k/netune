@@ -8,5 +8,6 @@ pub mod tls;
 pub use tls::TlsSession;
 
 pub use packet::{
-    CryptoError, initial_keys, protect_long, protect_short, unprotect_long, unprotect_short,
+    CryptoError, initial_keys, long_header_info, protect_long, protect_short, unprotect_long,
+    unprotect_short,
 };

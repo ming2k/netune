@@ -14,4 +14,4 @@ the other `docs/` sections; see the [documentation index](../index.md).
 | [System Invariants](invariants.md) | Invariant admissibility matrix, 3-condition gate, and active invariant families |
 | [Operational Workflows & Review Gates](workflow.md) | Verification commands, code-to-doc trigger matrix, and release hygiene |
 | [Release & Versioning](release-and-versioning.md) | Lockstep versioning, git tagging workflow, and release automation |
-| [Engineering Standards](standards/README.md) | Universal meta-standards for taxonomy, ADRs, RFCs, runbooks, and postmortems |
+| [Engineering Standards](standards/README.md) | Universal meta-standards for taxonomy, ADRs, runbooks, and postmortems |

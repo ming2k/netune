@@ -16,7 +16,7 @@ This reference document defines system boundaries, layering models, and behavior
 │ netune: Egress Orchestrator       │ │ netune-server: Ingress Orchestrator│
 │  - Redirect & Credential Stripping│ │  - Accept Loop & Admission Control│
 │  - Pool (authority#profile slice) │ │  - Phase Timeouts & Ingress Traces│
-│  - Keep-Alive Stale Replay Safety │ │  - Unified Handler (H1/H2)        │
+│  - Keep-Alive Stale Replay Safety │ │  - Unified Handler (H1/H2/H3)     │
 │  - WebSocket Client Upgrade       │ │  - ResponseWriter State Machine   │
 │  - QUIC / H3 Client Facade        │ │  - Self-Terminated Ingress TLS    │
 └─────────┬─────────┬───────────────┘ └───────┬───────────┬───────────────┘
@@ -32,7 +32,7 @@ This reference document defines system boundaries, layering models, and behavior
 ┌───────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
 │ netune-quic / http3   │ │ netune-ws: RFC 6455   │ │ netune-probe: L2    │
 │  - RFC 9000 / 9221    │ │  - Role Masking Enforc│ │  - Pure Frame Math  │
-│  - aws-lc-rs Unified  │ │  - Bounded Reassembly │ │  - Opt-in Inject    │
+│  - RFC 9114 / 9204    │ │  - Bounded Reassembly │ │  - Opt-in Inject    │
 └───────────────────────┘ └───────────────────────┘ └─────────────────────┘
 ```
 
@@ -70,8 +70,13 @@ The architectural evolution is governed by the following decisions:
 | [ADR-0024](../adr/0024-h3-streaming-request-bodies.md) | H3 Streaming Request Bodies | `open_request` is the primitive; buffered `send` composes it (`INV-H3-01..02`). |
 | [ADR-0025](../adr/0025-h3-ingress-peer-transport.md) | H3 Ingress Peer Transport | Separate QUIC listener, non-zero exchange ids, shared handler and bounds (`INV-SERVER-22..24`). |
 | [ADR-0026](../adr/0026-controlled-dynamic-qpack.md) | Controlled Dynamic QPACK | Superseded by ADR-0027: owned QPACK critical streams, ACKs and blocked streams; typed SETTINGS profiles (`INV-H3-03..05`). |
-| [ADR-0027](../adr/0027-owned-h3-qpack.md) | Owned HTTP/3 and QPACK | `netune-http3` owns RFC 9114 and RFC 9204; no `h3`/`h3-quinn` production dependency or `vendor/` tree; `quinn` remains the QUIC runtime (`INV-H3-03..08`). |
-| [ADR-0028](../adr/0028-owned-quic.md) | Owned QUIC Transport | `netune-quic` owns RFC 9000/9001/9002; `quinn`/`quinn-proto` are dev-only oracles (`INV-QUIC-05..09`). |
+| [ADR-0027](../adr/0027-owned-h3-qpack.md) | Owned HTTP/3 and QPACK | `netune-http3` owns RFC 9114 and RFC 9204; no `h3`/`h3-quinn` production dependency or `vendor/` tree (`INV-H3-03..08`). |
+| [ADR-0028](../adr/0028-owned-quic.md) | Owned QUIC Transport | `netune-quic` owns RFC 9000/9001/9002/9221; `quinn`/`quinn-proto` are dev-only oracles (`INV-QUIC-05..09`). |
+| [ADR-0029](../adr/0029-quic-lifecycle-hardening.md) | QUIC Lifecycle Hardening | Retry, stateless reset, key update, loss detection, flow-control top-up, QUIC v2 and Version Negotiation are owned by `netune-quic`. |
+| [ADR-0030](../adr/0030-h3-datagrams-and-extended-connect.md) | H3 Datagrams and Extended CONNECT | SETTINGS-gated RFC 9297 datagrams and RFC 9220 extended CONNECT are owned H3 surfaces (`INV-H3-09..11`). |
+| [ADR-0031](../adr/0031-quic-0rtt-and-session-resumption.md) | QUIC 0-RTT and Resumption | Authenticated transport-parameter cache, stateful single-use tickets, and safe early-frame replay. |
+| [ADR-0032](../adr/0032-h3-capsule-protocol.md) | Owned RFC 9297 Capsule Protocol | Capsules are framed inside HTTP/3 message bodies with bounded partial reads (`INV-H3-13..14`). |
+| [ADR-0033](../adr/0033-webtransport-over-http3.md) | WebTransport over HTTP/3 | Separate draft-17 product crate; generic H3/QUIC seams only (`INV-WT-01..04`). |
 
 ---
 

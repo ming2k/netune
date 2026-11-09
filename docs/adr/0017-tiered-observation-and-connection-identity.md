@@ -203,7 +203,7 @@ must be generic over `Tap`; `Box<dyn Tap>` is forbidden.
   `TimedIo<I, Counters>` adds no clock read or allocation. *Enforced by*: the `size_of`
   assertion in `crates/netune-io/src/timed.rs`, the fixed-width `Counters` assertion in
   `netune-trace`, and `cargo bench -p netune --bench zero_cost` under
-  `iai-callgrind` with an `ir=0%` baseline gate in CI; no `Mutex<Recorder>` field in `TimedIo`.
+  `gungraun` with an `ir=0%` baseline gate in CI; no `Mutex<Recorder>` field in `TimedIo`.
 
 - **`[INV-TRACE-05]` Fidelity Truth**: `RequestTrace::fidelity` equals the fidelity of the
   tap that produced the log. A trace cannot claim `syscall` detail that was not recorded.

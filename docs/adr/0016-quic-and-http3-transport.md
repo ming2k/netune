@@ -13,7 +13,6 @@ superseded_by: null
 - Date: 2026-11-07
 - Deciders: Ming Li
 - Supersedes: Decision 1 of [ADR-0010](0010-quic-ownership-and-trace-sink.md) (QUIC deferral)
-- Distilled From: [RFC-0001](../rfc/0001-quic-and-http3-transport.md)
 - Related: [ADR-0001](0001-owned-transport-trace-model.md),
   [ADR-0003](0003-workspace-decomposition-privilege-boundaries.md),
   [ADR-0004](0004-tls-fingerprint-profiles-pool-isolation.md),

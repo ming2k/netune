@@ -40,7 +40,7 @@ The WebSocket guide's code samples are also compiled and executed by `crates/net
 
 1. **No live network.** Tests must not depend on the public internet or a real third-party service. Mock origins bind to `127.0.0.1:0`.
 2. **No sleep-based synchronisation.** Wait on a condition, a channel, or a deadline; a `sleep` that "usually works" is a flaky test.
-3. **No wall-clock assertions.** Timing invariants are asserted as *derivations from recorded events*, not as elapsed wall time. A benchmark may print elapsed numbers for a human, but the gate is deterministic: `size_of`, event counts, or instruction counts (e.g. `iai-callgrind`). A wall-clock tolerance is a flake, not a budget.
+3. **No wall-clock assertions.** Timing invariants are asserted as *derivations from recorded events*, not as elapsed wall time. A benchmark may print elapsed numbers for a human, but the gate is deterministic: `size_of`, event counts, or instruction counts (e.g. `gungraun`). A wall-clock tolerance is a flake, not a budget.
 4. **RAII fixtures.** Temporary files and directories clean up on drop; a test must not leave state behind for the next one.
 5. **Feature isolation.** The default build carries no transmission path. The `inject` suite is run separately so both configurations are proven.
 
@@ -80,7 +80,7 @@ cargo test -p netune-http3 --test h3_interop
 # Owned QUIC engine (ADR-0028): wire, packet protection, handshake and streams
 cargo test -p netune-quic
 
-# Deterministic zero-cost gate (requires valgrind + iai-callgrind-runner)
+# Deterministic zero-cost gate (requires valgrind + gungraun-runner)
 cargo bench -p netune --bench zero_cost
 ```
 

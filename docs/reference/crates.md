@@ -8,18 +8,18 @@ This document provides a factual overview of all crates comprising the `netune` 
 
 | Crate | Directory | Current Version | Primary Responsibility |
 | :--- | :--- | :--- | :--- |
-| `netune-trace` | `crates/netune-trace` | `0.0.10` | Zero-allocation trace ring buffer, pure timing derivations, JA3/JA4 TLS ClientHello parser |
-| `netune-http1` | `crates/netune-http1` | `0.0.10` | HTTP/1.1 line protocol parser and serializer, differential-tested against `hyper` |
-| `netune-http2` | `crates/netune-http2` | `0.0.10` | HTTP/2 wire protocol (RFC 9113) in both roles, HPACK header compression (RFC 7541), and Akamai fingerprint impersonation |
-| `netune-ws` | `crates/netune-ws` | `0.0.10` | Pure RFC 6455 WebSocket codec: frame encoder/decoder, role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys |
-| `netune-io` | `crates/netune-io` | `0.0.10` | Byte-path transport adapters shared by both orchestrators: the `TimedIo` syscall tap and the `FaultIo` chaos twin. No socket, no policy |
-| `netune-egress` | `crates/netune-egress` | `0.0.10` | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the single source of truth every outbound transport (TCP, UDP, QUIC) confines with. No I/O, no socket |
-| `netune` | `crates/netune` | `0.0.10` | **Egress** orchestrator: DNS, TCP, TLS, **UDP datagrams**, pool, proxy (incl. SOCKS5 UDP associate), egress confinement, and client request orchestration |
-| `netune-server` | `crates/netune-server` | `0.0.10` | **Ingress** orchestrator: TCP accept loop, admission control, slow-peer bounds, per-connection ingress tracing, graceful drain, HTTP/1.1 + HTTP/2 + optional HTTP/3 over one handler |
-| `netune-quic` | `crates/netune-quic` | `0.0.10` | First-class QUIC transport (RFC 9000, RFC 9221) with `QuicProfile` handshake shaping, abstract socket stack, and unified `aws-lc-rs` crypto (`[INV-QUIC-01..04]`) |
-| `netune-http3` | `crates/netune-http3` | `0.0.10` | Owned HTTP/3 client and server transport (RFC 9114), owned dynamic QPACK (RFC 9204), and typed SETTINGS profiles |
-| `netune-webtransport` | `crates/netune-webtransport` | `0.0.10` | Owned WebTransport over HTTP/3 draft-17 wire model: session IDs, SETTINGS, stream signals, control/flow capsules and error mapping |
-| `netune-probe` | `crates/netune-probe` | `0.0.10` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
+| `netune-trace` | `crates/netune-trace` | `0.0.11` | Zero-allocation trace ring buffer, pure timing derivations, JA3/JA4 TLS ClientHello parser |
+| `netune-http1` | `crates/netune-http1` | `0.0.11` | HTTP/1.1 line protocol parser and serializer, differential-tested against `hyper` |
+| `netune-http2` | `crates/netune-http2` | `0.0.11` | HTTP/2 wire protocol (RFC 9113) in both roles, HPACK header compression (RFC 7541), and Akamai fingerprint impersonation |
+| `netune-ws` | `crates/netune-ws` | `0.0.11` | Pure RFC 6455 WebSocket codec: frame encoder/decoder, role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys |
+| `netune-io` | `crates/netune-io` | `0.0.11` | Byte-path transport adapters shared by both orchestrators: the `TimedIo` syscall tap and the `FaultIo` chaos twin. No socket, no policy |
+| `netune-egress` | `crates/netune-egress` | `0.0.11` | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the single source of truth every outbound transport (TCP, UDP, QUIC) confines with. No I/O, no socket |
+| `netune` | `crates/netune` | `0.0.11` | **Egress** orchestrator: DNS, TCP, TLS, **UDP datagrams**, pool, proxy (incl. SOCKS5 UDP associate), egress confinement, and client request orchestration |
+| `netune-server` | `crates/netune-server` | `0.0.11` | **Ingress** orchestrator: TCP accept loop, admission control, slow-peer bounds, per-connection ingress tracing, graceful drain, HTTP/1.1 + HTTP/2 + optional HTTP/3 over one handler |
+| `netune-quic` | `crates/netune-quic` | `0.0.11` | First-class QUIC transport (RFC 9000, RFC 9221) with `QuicProfile` handshake shaping, abstract socket stack, and unified `aws-lc-rs` crypto (`[INV-QUIC-01..04]`) |
+| `netune-http3` | `crates/netune-http3` | `0.0.11` | Owned HTTP/3 client and server transport (RFC 9114), owned dynamic QPACK (RFC 9204), and typed SETTINGS profiles |
+| `netune-webtransport` | `crates/netune-webtransport` | `0.0.11` | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, control/flow capsules and error mapping (reliable reset and browser interop still outstanding) |
+| `netune-probe` | `crates/netune-probe` | `0.0.11` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
 
 ---
 
@@ -66,13 +66,12 @@ This document provides a factual overview of all crates comprising the `netune` 
 - **Dependencies**: `bytes`, `http`, `tokio` (io-util, sync, time). No third-party HTTP/2 or HPACK implementation.
 - **Key Types**:
   - `H2Connection` / `Role`: the direction-agnostic connection machine — frame reading bounded by the *local* advertised maximum, SETTINGS exchange and acknowledgement, PING echo, GOAWAY bookkeeping, HPACK table, `CONTINUATION` contiguity, and both flow-control windows. `Role` is a field, not a second module ([INV-SERVER-08](../adr/0012-http2-ingress.md)).
-  - `client::H2ClientConnection`: the client role — preface, odd stream ids, fingerprinted SETTINGS and pseudo-header order.
+  - `client::H2ClientConnection`: the client role — preface, odd stream ids, fingerprinted SETTINGS and pseudo-header order; it stores the connection and request halves separately, and `start_request` reads only the request half ([ADR-0020](../adr/0020-split-multiplexed-profiles.md)).
   - `server::ServerSession` / `H2Handler` / `H2Request` / `SessionObserver`: the server role — stream table, `REFUSED_STREAM` shedding, credit replenished on handler consumption, one writer task, and a wake-up channel so a finished handler is written without waiting for the peer to speak ([INV-SERVER-11](../adr/0012-http2-ingress.md)).
   - `HpackEncoder` / `HpackDecoder`: RFC 7541 static and dynamic tables plus the 257-symbol Huffman coder.
   - `H2ConnectionProfile`: initial SETTINGS order/values, connection window, HPACK table size and priority-frame policy; this half keys the pool.
   - `H2RequestProfile`: pseudo-header order; applied per `HEADERS` block and not part of connection identity. `H2RequestRegistry` resolves custom request profiles independently.
   - `H2Fingerprint`: a preset pairing of the two halves; use `.connection` or `.request` when the lifetime matters.
-  - `H2ClientConnection`: stores the halves separately; `start_request` reads only the request half ([ADR-0020](../adr/0020-split-multiplexed-profiles.md)).
 - **Distribution**: consumed from this repository by git tag; the version is inherited from the workspace.
 
 ### `netune-ws`
@@ -136,21 +135,20 @@ This document provides a factual overview of all crates comprising the `netune` 
 - **Not implemented, by decision**: WebSocket upgrade serving is a separate, later decision ([ADR-0011](../adr/0011-server-side-ingress-transport.md)); client certificates and resumption tuning belong to the deployment's `rustls::ServerConfig`.
 
 ### `netune-quic`
-- **Dependencies**: `netune-egress`, `netune-trace`, `bytes`, `rustls`, `rustls-platform-verifier`, `socket2`, `thiserror`, `tokio`. Compiles strictly against `aws-lc-rs` (`[INV-QUIC-01]`). Dev-only oracles: `quinn`.
-- **Owned H3 extensions (ADR-0030)**: SETTINGS-gated RFC 9297 datagrams routed by Quarter Stream ID, and RFC 9220 extended CONNECT through `ExtendedConnectProtocol`.
+- **Dependencies**: `aws-lc-rs`, `netune-egress`, `netune-trace`, `bytes`, `rustls`, `rustls-platform-verifier`, `socket2`, `thiserror`, `tokio`. Compiles strictly against `aws-lc-rs` (`[INV-QUIC-01]`). Dev-only oracles: `quinn`.
 - **Owned QUIC engine (ADR-0028)**: `wire` owns the packet/frame/transport-parameter codec, `crypto` owns rustls packet protection and TLS key changes, and `owned::{core,endpoint}` owns handshake, stream, ACK, flow-control, UDP routing and async handles. `quinn` is dev-only.
 - **Key Types**:
   - `QuicConnector`: Coordinates egress confinement (`with_confinement` / `strict_public`), manual socket pre-configuration, and QUIC client endpoint creation. Confinement is checked on the resolved address **before** the UDP socket is created ([INV-QUIC-02](../adr/0016-quic-and-http3-transport.md)).
   - `QuicConnection`: Established or handshaking QUIC session with bidirectional/unidirectional stream allocation, `connect_early`, `early_data_available`, `early_data_accepted` and `wait_established`.
   - `SessionCache`: authenticated peer transport parameters used for 0-RTT stream limits.
-  - `Capsule`: RFC 9297 type/length/value framing carried in HTTP message bodies.
-  - `QuicProfile` / `QuicTransportParameters`: Explicit declarative control over QUIC transport parameters, ALPN and congestion policy (NewReno/Cubic/BBR). Retry/address validation, keyed stateless reset, 1-RTT key update, QUIC v2 and Version Negotiation are owned (ADR-0029). Migration uses PATH_CHALLENGE/PATH_RESPONSE. RFC 9297 datagrams, RFC 9297 capsules and RFC 9220 extended CONNECT are owned (ADR-0030, ADR-0032). Session resumption and 0-RTT use a transport-parameter cache, stateful single-use tickets, early-frame replay and early H3 requests (ADR-0031).
+  - `QuicProfile` / `QuicTransportParameters`: Explicit declarative control over QUIC transport parameters, ALPN and congestion policy (NewReno/Cubic/BBR). Retry/address validation, keyed stateless reset, 1-RTT key update, QUIC v2 and Version Negotiation are owned (ADR-0029). Migration uses PATH_CHALLENGE/PATH_RESPONSE. Session resumption and 0-RTT use a transport-parameter cache, stateful single-use tickets, early-frame replay and early H3 requests (ADR-0031).
   - `QuicProfileRegistry`: one resolution path for built-in and caller-supplied profiles; `QuicConnector::from_registry` fails loudly on unknown names ([ADR-0021](../adr/0021-named-quic-profiles.md)).
   - `QuicDatagramSession`: RFC 9221 unreliable datagram session with MTU bound checks (`[INV-QUIC-04]`).
   - `QuicSocketConfig`: L3/L4 socket options applied before the first packet ([INV-SOCKET-01]).
 
 ### `netune-http3`
 - **Dependencies**: `netune-quic`, `netune-trace`, `bytes`, `http`, `thiserror`, `tokio`. Dev-only interop oracles: `h3`, `h3-quinn`, `quinn` (never linked into the shipping crate).
+- **Owned H3 extensions (ADR-0030, ADR-0032)**: SETTINGS-gated RFC 9297 datagrams routed by Quarter Stream ID, RFC 9220 extended CONNECT through `ExtendedConnectProtocol`, and the RFC 9297 Capsule Protocol in HTTP message bodies.
 - **Key Types**:
   - `H3Client`: Dispatches RFC 9114 HTTP/3 requests over `netune-quic` connections. `open_request` returns a streaming `H3RequestBody`; `send` composes it; `execute` buffers with a configured body ceiling ([ADR-0024](../adr/0024-h3-streaming-request-bodies.md)).
   - `H3Client::connect` / `connect_with_config`: resolves a `QuicConnector` profile, retains the `QuicConnection` (and endpoint) for the H3 driver's lifetime, and exposes `quic_profile()` as the connection identity ([ADR-0022](../adr/0022-http3-connection-identity.md)).
@@ -160,11 +158,12 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `H3TraceContext` / `H3ResponseStream::trace` / `H3Response.trace`: per-exchange `RequestTrace` with `Fidelity::l0()`, the resolved QUIC profile as `identity.h3_profile`, and the SETTINGS profile as `identity.h3_settings_profile`.
   - `H3RequestProfile` / `H3RequestRegistry`: named pseudo-header and regular-header order, applied by the owned QPACK encoder before field lines are emitted ([ADR-0027](../adr/0027-owned-h3-qpack.md)).
   - `H3RequestBody`: chunked upload, trailers, and transition to `H3ResponseStream`.
+  - `Capsule` / `ExtendedConnectProtocol`: RFC 9297 type/length/value framing carried in HTTP message bodies, and the typed `:protocol` extension for RFC 9220 CONNECT.
   - Dynamic QPACK: request/response head and trailer blocks use the owned encoder/decoder, acknowledge decoded sections, and wait for missing insertions. The encoder references a dynamic entry only after acknowledgement; the decoder enforces the advertised capacity and blocked-stream budget.
   - Request/response lifecycle with deterministic timing derivation in `netune-trace` (`[INV-QUIC-03]`).
 
 ### `netune-webtransport`
-- **Dependencies**: `netune-http3`, `netune-quic`, `bytes`, `thiserror`. Dev-only tokio for tests. No third-party WebTransport runtime.
+- **Dependencies**: `netune-http3`, `netune-quic`, `bytes`, `thiserror`, `tokio` (sync). Dev-only tokio for tests. No third-party WebTransport runtime.
 - **Draft pin**: `draft-ietf-webtrans-http3-17`; wire constants and API are draft-scoped, not RFC.
 - **Key Types**:
   - `WebTransportClient` / `WebTransportServer`: H3-backed session acceptance.

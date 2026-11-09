@@ -109,7 +109,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y valgrind
-          cargo install iai-callgrind-runner --version 0.16.1
+          cargo install gungraun-runner --version 0.20.0 --locked
           cargo bench -p netune --bench zero_cost -- --save-baseline=ci
           cargo bench -p netune --bench zero_cost -- --baseline=ci --callgrind-limits='ir=0%'
       # Both feature postures are checked: `--all-features` proves the opt-in

@@ -32,7 +32,6 @@ Do not guess repository rules. Consult the authoritative specification when the 
 - Topology & structural red-lines: [`docs/dev/architecture.md`](docs/dev/architecture.md)
 - Invariant policy: [`docs/dev/invariants.md`](docs/dev/invariants.md)
 - ADR authoring & lifecycle: [`docs/dev/standards/adr.md`](docs/dev/standards/adr.md)
-- RFCs: [`docs/dev/standards/rfc.md`](docs/dev/standards/rfc.md)
 - Documentation taxonomy & firewall: [`docs/dev/standards/taxonomy.md`](docs/dev/standards/taxonomy.md)
 - Markdown & link style: [`docs/dev/standards/style.md`](docs/dev/standards/style.md)
 - Verification gates & code-doc sync: [`docs/dev/workflow.md`](docs/dev/workflow.md)

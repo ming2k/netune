@@ -2,10 +2,10 @@
 
 An owned, observable, and *intervention-capable* network stack in Rust.
 
-netune owns every layer from DNS to the HTTP message — in both directions, HTTP/1.1
-and HTTP/2 — with no third-party HTTP implementation in the production dependency
-graph, and makes the transport itself an object you can inspect, fingerprint, and
-change:
+netune owns every layer from DNS to the HTTP message — in both directions, HTTP/1.1,
+HTTP/2 and HTTP/3, plus a draft-pinned WebTransport layer — with no third-party HTTP
+implementation in the production dependency graph, and makes the transport itself an
+object you can inspect, fingerprint, and change:
 
 | Crate | What it is |
 |---|---|
@@ -16,8 +16,10 @@ change:
 | [`netune-quic`] | First-class QUIC (RFC 9000/9221) with named handshake profiles, pre-connect confinement, datagrams, streams and `aws-lc-rs` crypto. |
 | [`netune-http3`] | HTTP/3 client and server adapter (RFC 9114): streaming uploads and trailers, typed SETTINGS, controlled dynamic QPACK (encoder/decoder/ACKs/blocked streams), and request-header order. |
 | [`netune-io`] | The byte path both directions share: `TimedIo` records every syscall boundary, `FaultIo` injects chaos. No socket, no policy. |
+| [`netune-egress`] | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the one predicate every outbound transport (TCP, UDP, QUIC) checks before opening a socket. No I/O. |
 | [`netune`] | **Egress**: DNS, TCP, TLS (rustls), connection pool (`Pool`), TLS fingerprint presets and routing (`TlsProfile`, `Preset`), proxies (HTTP CONNECT & SOCKS5), egress confinement, redirects, decompression, client WebSocket upgrade (`connect_ws`), stale-socket absorption. |
 | [`netune-server`] | **Ingress**: an observable listener serving **HTTP/1.1, HTTP/2 and optional HTTP/3** behind one handler — accept loop, admission control that sheds instead of queueing, separate phase bounds, streaming responses, request validation before dispatch, per-connection ingress traces, graceful drain. HTTP/3 is a peer QUIC listener, not a mode of the TCP server. A transport, not a framework. |
+| [`netune-webtransport`] | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, flow-control/close capsules and multi-session routing. Reliable `RESET_STREAM_AT` and browser interop remain outstanding (ADR-0033). |
 | [`netune-probe`] | The L2 probe: `AF_PACKET` capture of one TCP flow, pure Ethernet/IPv4/TCP parse **and build** (forge), plus an opt-in `inject` feature for frame transmission. |
 
 ## Capability surface
@@ -83,8 +85,8 @@ The crates are consumed from this repository by tag:
 
 ```toml
 [dependencies]
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.10" }
-netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.10" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.11" }
+netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.11" }
 ```
 
 Pin a `tag` (or a `rev` for the strictest reproducibility) and upgrade
@@ -160,7 +162,7 @@ stages as if they had not happened.
 
 ## Status
 
-Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.10`.
+Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.11`.
 
 MSRV: 1.95. License: MIT.
 
@@ -171,6 +173,8 @@ MSRV: 1.95. License: MIT.
 [`netune-quic`]: crates/netune-quic
 [`netune-http3`]: crates/netune-http3
 [`netune-io`]: crates/netune-io
+[`netune-egress`]: crates/netune-egress
+[`netune-webtransport`]: crates/netune-webtransport
 [`netune`]: crates/netune
 [`netune-server`]: crates/netune-server
 [`netune-probe`]: crates/netune-probe

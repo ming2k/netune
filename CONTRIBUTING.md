@@ -11,7 +11,7 @@ Thank you for contributing to `netune`.
 
 | You are looking for… | Go to |
 | :--- | :--- |
-| Engineering meta-standards (taxonomy, ADR, RFC, runbooks, testing, style) | [docs/dev/standards/](docs/dev/standards/README.md) |
+| Engineering meta-standards (taxonomy, ADR, runbooks, testing, style) | [docs/dev/standards/](docs/dev/standards/README.md) |
 | Architecture governance & topology | [docs/dev/architecture.md](docs/dev/architecture.md) |
 | System invariants | [docs/dev/invariants.md](docs/dev/invariants.md) |
 | Ratified architectural decisions | [ADR Registry](docs/adr/index.md) |

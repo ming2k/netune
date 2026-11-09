@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11] - 2026-11-09
+
 ### Added
 
 - **Owned QUIC foundation.** `netune-quic` now owns the RFC 9000 wire codec
@@ -62,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directions while keeping both crates dev-only.
 - **SETTINGS honesty.** `H3SettingsProfile` no longer advertises HTTP/3
   datagrams or extended CONNECT until their public transport surface exists.
+- **Benchmark harness.** The deterministic zero-cost instruction gate now uses
+  `gungraun` 0.20 instead of `iai-callgrind` 0.16, removing the unmaintained
+  `bincode`/`proc-macro-error2` dev-only chain while keeping the same
+  `ir=0%` Callgrind baseline.
 
 ### Removed
 

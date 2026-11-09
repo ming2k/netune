@@ -15,7 +15,6 @@ architectural consensus is ratified, and how operational runbooks are maintained
 | :--- | :--- |
 | **[`taxonomy.md`](taxonomy.md)** | **Documentation Taxonomy & Pipeline**: The Diátaxis layout, audience boundaries, repository root whitelist, and the 4-stage knowledge crystallization pipeline. |
 | **[`adr.md`](adr.md)** | **Architectural Decision Records**: The 3-question qualification test, frontmatter schema, in-place lifecycle (`draft`, `accepted`, `superseded`, `rejected`), and template. |
-| **[`rfc.md`](rfc.md)** | **Request for Comments (RFC)**: Consensus and deliberation protocol for high-reversal-cost subsystem redesigns prior to ADR ratification. |
 | **[`runbooks.md`](runbooks.md)** | **Subsystem Runbooks & Playbooks**: Operational standards for complex protocol bring-up, wire quirks registries, and hands-on diagnostic playbooks. |
 | **[`postmortems.md`](postmortems.md)** | **Incident Postmortems**: Blameless timeline reconstruction, detection gap analysis, and defense-in-depth principles for major production/runtime failures. |
 | **[`style.md`](style.md)** | **Markdown & Hyperlink Style**: Canonical relative links, anchor consistency, formatting rules, and prose guidelines. |

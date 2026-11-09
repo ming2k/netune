@@ -124,6 +124,13 @@ BASE_FILES: dict[str, str] = {
             netune-trace = { path = "../netune-trace", version = "1.2.3" }
         """,
     ),
+    "crates/netune-webtransport/Cargo.toml": manifest(
+        name="netune-webtransport",
+        dependencies="""
+            netune-http3 = { path = "../netune-http3", version = "1.2.3" }
+            netune-quic = { path = "../netune-quic", version = "1.2.3" }
+        """,
+    ),
     "crates/netune-probe/src/capture.rs": """
         pub struct Capture;
 

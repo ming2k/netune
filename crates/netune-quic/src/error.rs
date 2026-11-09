@@ -52,6 +52,9 @@ pub enum QuicError {
 
 impl From<crate::crypto::CryptoError> for QuicError {
     fn from(error: crate::crypto::CryptoError) -> Self {
-        Self::Protocol(error.to_string())
+        match error {
+            crate::crypto::CryptoError::Handshake(message) => Self::Tls(message),
+            other => Self::Protocol(other.to_string()),
+        }
     }
 }

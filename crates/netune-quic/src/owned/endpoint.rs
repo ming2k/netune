@@ -56,6 +56,16 @@ pub struct ServerConfigOwned {
     pub enable_early_data: bool,
 }
 
+fn prepare_server_config(mut config: ServerConfigOwned) -> ServerConfigOwned {
+    if config.enable_early_data {
+        let mut tls = (*config.tls).clone();
+        tls.max_early_data_size = u32::MAX;
+        tls.session_storage = rustls::server::ServerSessionMemoryCache::new(1024);
+        config.tls = Arc::new(tls);
+    }
+    config
+}
+
 /// A bound owned QUIC endpoint.
 pub struct Endpoint {
     inner: Arc<EndpointInner>,
@@ -82,14 +92,21 @@ impl Endpoint {
     }
 
     /// Bind a server endpoint.
-    pub async fn server(address: &str, mut config: ServerConfigOwned) -> Result<Self, QuicError> {
-        if config.enable_early_data {
-            let mut tls = (*config.tls).clone();
-            tls.max_early_data_size = u32::MAX;
-            tls.session_storage = rustls::server::ServerSessionMemoryCache::new(1024);
-            config.tls = Arc::new(tls);
-        }
-        Self::bind(address, Some(config)).await
+    pub async fn server(address: &str, config: ServerConfigOwned) -> Result<Self, QuicError> {
+        Self::bind(address, Some(prepare_server_config(config))).await
+    }
+
+    /// Bind a server endpoint over an abstract socket stack.
+    ///
+    /// The caller owns binding, socket configuration and ingress admission for
+    /// the supplied socket. The endpoint drives exactly one socket for its
+    /// lifetime; a caller that needs a new socket per connection builds a new
+    /// endpoint.
+    pub async fn server_with_socket(
+        udp: Arc<dyn QuicUdpSocket>,
+        config: ServerConfigOwned,
+    ) -> Result<Self, QuicError> {
+        Self::from_socket(udp, Some(prepare_server_config(config))).await
     }
 
     /// Bind a client endpoint over an already-configured tokio UDP socket.
@@ -151,7 +168,7 @@ impl Endpoint {
         config: ClientConfigOwned,
     ) -> Result<Connection, QuicError> {
         let connection = self.connect_early(target, server_name, config).await?;
-        connection.wait_established().await;
+        connection.wait_established().await?;
         Ok(connection)
     }
 
@@ -359,7 +376,14 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
             let accept = inner.accept_tx.clone();
             tokio::spawn(async move {
                 let mut established = connection.inner.established.subscribe();
-                if !*established.borrow() && established.changed().await.is_ok() {
+                let mut closed = connection.inner.closed.subscribe();
+                if !*established.borrow() {
+                    tokio::select! {
+                        _ = established.changed() => {}
+                        _ = closed.changed() => {}
+                    }
+                }
+                if *established.borrow() && closed.borrow().is_none() {
                     let _ = accept.send(connection).await;
                 }
             });
@@ -462,10 +486,33 @@ impl Connection {
             .early_data_accepted()
     }
 
-    pub async fn wait_established(&self) {
+    /// Wait for the handshake, surfacing a failure instead of waiting forever.
+    pub async fn wait_established(&self) -> Result<(), QuicError> {
         let mut established = self.inner.established.subscribe();
-        if !*established.borrow() {
-            let _ = established.changed().await;
+        let mut closed = self.inner.closed.subscribe();
+        loop {
+            if *established.borrow() {
+                return Ok(());
+            }
+            if let Some(error) = closed.borrow().as_ref() {
+                return Err(clone_error(error));
+            }
+            tokio::select! {
+                changed = established.changed() => {
+                    if changed.is_err() {
+                        return Err(QuicError::Closed(
+                            "connection task ended before the handshake completed".to_string(),
+                        ));
+                    }
+                }
+                changed = closed.changed() => {
+                    if changed.is_err() {
+                        return Err(QuicError::Closed(
+                            "connection task ended before the handshake completed".to_string(),
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -479,11 +526,13 @@ impl Connection {
 
     /// Whether the connection has closed, locally or by peer.
     pub fn is_closed(&self) -> bool {
-        self.inner
-            .core
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_closed()
+        self.inner.closed.borrow().is_some()
+            || self
+                .inner
+                .core
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_closed()
     }
 
     pub async fn closed(&self) {
@@ -504,6 +553,8 @@ impl Connection {
         Ok(())
     }
 
+    /// Close the connection. The reason is a short diagnostic and is truncated
+    /// to keep the CONNECTION_CLOSE frame inside one packet.
     pub fn close(&self, code: u64, reason: &str) {
         {
             let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());
@@ -662,6 +713,30 @@ impl RecvStream {
     }
 }
 
+fn clone_error(error: &QuicError) -> QuicError {
+    match error {
+        QuicError::Dns { host, detail } => QuicError::Dns {
+            host: host.clone(),
+            detail: detail.clone(),
+        },
+        QuicError::Socket(error) => {
+            QuicError::Socket(std::io::Error::new(error.kind(), error.to_string()))
+        }
+        QuicError::Connect(message) => QuicError::Connect(message.clone()),
+        QuicError::Timeout => QuicError::Timeout,
+        QuicError::Stream(message) => QuicError::Stream(message.clone()),
+        QuicError::DatagramTooLarge { max, size } => QuicError::DatagramTooLarge {
+            max: *max,
+            size: *size,
+        },
+        QuicError::DatagramsNotSupported => QuicError::DatagramsNotSupported,
+        QuicError::Tls(message) => QuicError::Tls(message.clone()),
+        QuicError::Config(message) => QuicError::Config(message.clone()),
+        QuicError::Protocol(message) => QuicError::Protocol(message.clone()),
+        QuicError::Closed(message) => QuicError::Closed(message.clone()),
+    }
+}
+
 async fn spawn_connection(
     endpoint: Arc<EndpointInner>,
     peer: SocketAddr,
@@ -700,7 +775,7 @@ async fn spawn_connection(
         let mut timer = tokio::time::interval(TIMER_INTERVAL);
         loop {
             let mut outgoing: Vec<Vec<u8>> = Vec::new();
-            let mut closed = false;
+            let mut close_error: Option<QuicError> = None;
             tokio::select! {
                 Some((datagram, source)) = incoming_rx.recv() => {
                     let current = *driver_inner.peer.lock().unwrap_or_else(|e| e.into_inner());
@@ -724,8 +799,8 @@ async fn spawn_connection(
                                 .unwrap_or_else(|e| e.into_inner()) = Some(source);
                         }
                     }
-                    if core.receive(&datagram).is_err() {
-                        closed |= true;
+                    if let Err(error) = core.receive(&datagram) {
+                        close_error = Some(error);
                     } else {
                         if core.path_validated() {
                             let candidate = *driver_inner
@@ -745,7 +820,11 @@ async fn spawn_connection(
                         }
                         let _ = core.poll_transmit();
                         outgoing = core.take_outgoing();
-                        closed |= core.is_closed();
+                        if core.is_closed() {
+                            close_error = Some(QuicError::Closed(
+                                "connection closed".to_string(),
+                            ));
+                        }
                         driver_inner.readable.notify_waiters();
                         driver_inner.readable.notify_one();
                     }
@@ -754,14 +833,22 @@ async fn spawn_connection(
                     let mut core = driver_inner.core.lock().unwrap_or_else(|e| e.into_inner());
                     let _ = core.poll_transmit();
                     outgoing = core.take_outgoing();
-                    closed |= core.is_closed();
+                    if core.is_closed() {
+                        close_error = Some(QuicError::Closed(
+                            "connection closed".to_string(),
+                        ));
+                    }
                 }
                 _ = timer.tick() => {
                     let mut core = driver_inner.core.lock().unwrap_or_else(|e| e.into_inner());
                     let _ = core.handle_timeout();
                     let _ = core.poll_transmit();
                     outgoing = core.take_outgoing();
-                    closed |= core.is_closed();
+                    if core.is_closed() {
+                        close_error = Some(QuicError::Closed(
+                            "connection closed".to_string(),
+                        ));
+                    }
                 }
             }
             let target = *driver_inner
@@ -771,11 +858,8 @@ async fn spawn_connection(
                 .as_ref()
                 .unwrap_or(&*driver_inner.peer.lock().unwrap_or_else(|e| e.into_inner()));
             for datagram in outgoing {
-                if udp_send_to(&*driver_inner.udp, &datagram, target)
-                    .await
-                    .is_err()
-                {
-                    closed |= true;
+                if let Err(error) = udp_send_to(&*driver_inner.udp, &datagram, target).await {
+                    close_error = Some(QuicError::Socket(error));
                     break;
                 }
             }
@@ -787,10 +871,17 @@ async fn spawn_connection(
             if established && !*driver_inner.established.borrow() {
                 let _ = driver_inner.established.send(true);
             }
-            if closed {
-                let _ = driver_inner.closed.send(Some(Arc::new(QuicError::Closed(
-                    "connection closed".to_string(),
-                ))));
+            if close_error.is_none()
+                && driver_inner
+                    .core
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_closed()
+            {
+                close_error = Some(QuicError::Closed("connection closed".to_string()));
+            }
+            if let Some(error) = close_error {
+                let _ = driver_inner.closed.send(Some(Arc::new(error)));
                 break;
             }
         }

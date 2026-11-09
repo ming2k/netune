@@ -98,7 +98,8 @@ This document codifies the workspace topology, dependency direction, and non-neg
 - **Lifecycle**: Retry/address validation, keyed stateless reset, 1-RTT key update, fast loss detection, receive-window top-up, QUIC v2 and Version Negotiation are owned by `netune-quic` (ADR-0029).
 - **H3 extensions**: RFC 9297 datagrams, RFC 9297 capsules and RFC 9220 extended CONNECT are owned by `netune-http3` (ADR-0030, ADR-0032). WebTransport over HTTP/3 is a separate `netune-webtransport` product layer pinned to draft-17 (ADR-0033); H3/QUIC only expose generic seams and reliable-reset support.
 - **0-RTT**: the client caches authenticated QUIC transport parameters; the server enables early data only with stateful single-use tickets; rejected early frames are replayed in 1-RTT (ADR-0031).
-- **Enforcement**: `crates/netune-quic/src/{wire,crypto,owned}/`, `ARCH-005` with an empty `ALLOWED_RUNTIME_DEPS`, and the quinn differential tests.
+- **Consumer seams**: a per-connection `QuicUdpSocketFactory` (invoked after confinement and before the first Initial), a per-connection `CongestionControllerFactory`, `QuicProfile.keep_alive`, RFC 9000 idle timeout and verified `peer_certificates` are the only product extension points. They never grant flow-control credit, change packet sizing or bypass TLS verification (ADR-0034).
+- **Enforcement**: `crates/netune-quic/src/{wire,crypto,owned}/`, `ARCH-005` with an empty `ALLOWED_RUNTIME_DEPS`, the quinn differential tests, and the consumer-seam tests in `crates/netune-quic/tests/owned_server_e2e.rs`.
 
 ### 2.5 Codecs Never Open Sockets
 

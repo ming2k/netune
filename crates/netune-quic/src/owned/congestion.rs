@@ -37,8 +37,9 @@ pub trait CongestionController: Send + Sync {
 
 /// Builds one controller per connection.
 pub trait CongestionControllerFactory: Send + Sync {
-    /// Construct a controller for a new connection.
-    fn build(&self, now: Instant, mtu: u16) -> Box<dyn CongestionController>;
+    /// Construct a controller for a new connection. `mss` is the engine's
+    /// packet payload ceiling, not a discovered path MTU.
+    fn build(&self, now: Instant, mss: u16) -> Box<dyn CongestionController>;
 }
 
 pub(crate) enum Congestion {

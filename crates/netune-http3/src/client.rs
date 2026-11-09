@@ -580,7 +580,7 @@ impl H3Client {
             .connect_early(target, server_name, recorder.clone())
             .await?;
         if !quic.connection().early_data_available() {
-            quic.connection().wait_established().await;
+            quic.connection().wait_established().await?;
         }
         let settings_name = settings.name.clone();
         let mut client =
@@ -602,10 +602,11 @@ impl H3Client {
     }
 
     /// Wait for the underlying QUIC handshake to complete.
-    pub async fn wait_handshake(&self) {
+    pub async fn wait_handshake(&self) -> Result<(), H3Error> {
         if let Some(quic) = &self.quic {
-            quic.connection().wait_established().await;
+            quic.connection().wait_established().await?;
         }
+        Ok(())
     }
 
     /// Whether the server accepted this session's 0-RTT data.

@@ -569,7 +569,7 @@ async fn resumed_h3_session_sends_early_request() {
         .expect("early h3 session");
     let response = second.send(request()).await.expect("early response");
     assert_eq!(response.head().status(), 200);
-    second.wait_handshake().await;
+    second.wait_handshake().await.expect("handshake");
     assert!(second.early_data_accepted(), "server accepted 0-RTT");
 }
 

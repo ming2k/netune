@@ -58,11 +58,9 @@ QUIC handshakes are explicit data via `QuicProfile` and `QuicTransportParameters
 * Client transport parameters (flow control limits, stream concurrency, idle timeout, connection ID limits).
 * ALPN list ordering and TLS 1.3 ClientHello shaping via `TlsProfile`.
 
-### 4. Socket Invariants & Abstract Extension Seam
-* **`[INV-SOCKET-01]` & `[INV-EGRESS-01]` Enforcement**: `QuicConnector` configures the UDP socket with `SocketConfig` (`so_mark`, `bind_device`, `bind_address`, `tos`) before the initial QUIC datagram is sent.
-* **`QuicUdpSocket` Seam**: Advanced consumers (such as proxy obfuscation and port-hopping) supply an implementation of `QuicUdpSocket` through `QuicConnector::with_custom_socket`; the endpoint polls the trait object without modifying the QUIC state machine.
-* **`CongestionControllerFactory` Seam**: A product that pins a rate or otherwise owns its congestion policy supplies a controller through `QuicConnector::with_congestion_factory`; it overrides the profile's built-in NewReno/Cubic/BBR selection for that connection.
-* **Keep-alive and Peer Identity**: `QuicProfile.keep_alive` sends a PING after receive inactivity, and `Connection::peer_certificates` exposes the post-handshake chain for a consumer's `pin-sha256`-style check.
+### 4. Socket Invariants and Consumer Seams
+* **`[INV-SOCKET-01]` & `[INV-EGRESS-01]` Enforcement**: `QuicConnector` checks egress confinement and applies `SocketConfig` (`so_mark`, `bind_device`, `bind_address`, `tos`) before the initial QUIC datagram is sent.
+* **Consumer seams**: the per-connection `QuicUdpSocketFactory`, `CongestionControllerFactory`, keep-alive/idle policy and verified peer-certificate access are governed by [ADR-0034](0034-quic-consumer-seams.md). The engine keeps packet sizing, flow control, trace and confinement authority; product obfuscation, rate policy and pinning stay in the consumer.
 
 ### 5. Deterministic Trace Observability
 `netune-trace` carries the ordered boundaries of a QUIC/HTTP-3 exchange: `QuicStart` /

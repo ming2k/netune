@@ -37,6 +37,7 @@ Binding decisions for this repository. `Scope` tags identify the subsystems a re
 | [0031](0031-quic-0rtt-and-session-resumption.md) | Own QUIC 0-RTT and Session Resumption | accepted | transport/quic, protocol/rfc9001, crypto/provider, api/http3, security/replay | Authenticated transport-parameter cache, stateful single-use server tickets, 0-RTT packet path, early replay and early H3 requests (`INV-QUIC-16..17`, `INV-H3-12`) | 2026-11-09 |
 | [0032](0032-h3-capsule-protocol.md) | Own the RFC 9297 Capsule Protocol | accepted | protocol/http3, protocol/rfc9297, api/http3 | Varint/type/length capsule codec in HTTP message bodies, bounded partial reads, duplex CONNECT surface; WebTransport session draft remains out of scope (`INV-H3-13..14`) | 2026-11-09 |
 | [0033](0033-webtransport-over-http3.md) | Own WebTransport over HTTP/3 as a Separate Product Layer | accepted | protocol/webtransport, protocol/http3, protocol/quic, api/webtransport, product/web | Pin draft-17, separate `netune-webtransport` crate, H3 extension seams, QUIC RESET_STREAM_AT, session/stream/datagram/flow-control/close model (`INV-WT-01..04`) | 2026-11-09 |
+| [0034](0034-quic-consumer-seams.md) | Consumer Seams for the Owned QUIC Transport | accepted | transport/quic, api/quic, security/egress, security/tls, recovery/congestion | Per-connection `QuicUdpSocketFactory`, `CongestionControllerFactory`, keep-alive/idle timeout and verified peer-certificate access; product policy stays outside the engine (`INV-QUIC-18..22`) | 2026-11-10 |
 
 
 

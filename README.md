@@ -13,7 +13,7 @@ object you can inspect, fingerprint, and change:
 | [`netune-http1`] | The HTTP/1.1 codec. Differential-tested against hyper (dev-dependency only) over recorded byte streams. |
 | [`netune-http2`] | RFC 9113, both roles over one connection machine: frame codec, HPACK with a full dynamic table (RFC 7541), Huffman coding, per-stream and connection flow control, `PADDED`/`PRIORITY` stripping, `CONTINUATION` reassembly, `PUSH_PROMISE` refusal, a server session with `REFUSED_STREAM` shedding, and declarative Akamai fingerprint impersonation (ADR-0006, ADR-0012). |
 | [`netune-ws`] | Pure RFC 6455 WebSocket codec: role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys. No I/O runtime. |
-| [`netune-quic`] | First-class QUIC (RFC 9000/9221) with named handshake profiles, pre-connect confinement, datagrams, streams and `aws-lc-rs` crypto. |
+| [`netune-quic`] | First-class QUIC (RFC 9000/9221) with named handshake profiles, pre-connect confinement, datagrams, streams and `aws-lc-rs` crypto. Consumer seams: per-connection socket and congestion factories, keep-alive/idle policy and verified peer-certificate access (ADR-0034). |
 | [`netune-http3`] | HTTP/3 client and server adapter (RFC 9114): streaming uploads and trailers, typed SETTINGS, controlled dynamic QPACK (encoder/decoder/ACKs/blocked streams), and request-header order. |
 | [`netune-io`] | The byte path both directions share: `TimedIo` records every syscall boundary, `FaultIo` injects chaos. No socket, no policy. |
 | [`netune-egress`] | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the one predicate every outbound transport (TCP, UDP, QUIC) checks before opening a socket. No I/O. |
@@ -85,8 +85,8 @@ The crates are consumed from this repository by tag:
 
 ```toml
 [dependencies]
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.12" }
-netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.12" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.13" }
+netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.13" }
 ```
 
 Pin a `tag` (or a `rev` for the strictest reproducibility) and upgrade
@@ -162,7 +162,7 @@ stages as if they had not happened.
 
 ## Status
 
-Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.12`.
+Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.13`.
 
 MSRV: 1.95. License: MIT.
 

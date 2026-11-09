@@ -13,7 +13,7 @@ use rustls_platform_verifier::BuilderVerifierExt;
 use crate::error::QuicError;
 use crate::owned::{ClientConfigOwned, Connection, Endpoint, SessionCache};
 use crate::profile::{QuicProfile, QuicProfileRegistry};
-use crate::socket::{QuicSocketConfig, QuicUdpSocket};
+use crate::socket::{QuicSocketConfig, QuicUdpSocketFactory, TokioUdpSocketFactory};
 use crate::wire::transport_parameters::TransportParameters;
 
 /// Establishes and shapes QUIC connections.
@@ -23,7 +23,7 @@ pub struct QuicConnector {
     socket_config: QuicSocketConfig,
     confinement: EgressConfinement,
     custom_tls: Option<rustls::ClientConfig>,
-    custom_socket: Option<Arc<dyn QuicUdpSocket>>,
+    socket_factory: Arc<dyn QuicUdpSocketFactory>,
     congestion_factory: Option<Arc<dyn crate::CongestionControllerFactory>>,
     session_cache: SessionCache,
     client_tls: Arc<std::sync::Mutex<Option<Arc<rustls::ClientConfig>>>>,
@@ -52,7 +52,7 @@ impl QuicConnector {
             socket_config: QuicSocketConfig::default(),
             confinement: EgressConfinement::Unrestricted,
             custom_tls: None,
-            custom_socket: None,
+            socket_factory: Arc::new(TokioUdpSocketFactory),
             congestion_factory: None,
             session_cache: SessionCache::new(),
             client_tls: Arc::new(std::sync::Mutex::new(None)),
@@ -95,14 +95,16 @@ impl QuicConnector {
         self
     }
 
-    /// Uses a caller-supplied UDP socket stack instead of creating one.
+    /// Uses a caller-supplied factory for the UDP socket stack.
     ///
     /// This is the seam for protocol-specific datagram transforms such as
-    /// obfuscation and port hopping. The caller must apply `SocketConfig` and
-    /// egress confinement to the sockets it provides; `connect_early` still
-    /// checks `confinement` against the target before any packet is sent.
-    pub fn with_custom_socket(mut self, socket: Arc<dyn QuicUdpSocket>) -> Self {
-        self.custom_socket = Some(socket);
+    /// obfuscation and port hopping. The factory is invoked once per new
+    /// connection, after egress confinement has accepted the target and before
+    /// the first Initial packet. It receives the connector's
+    /// [`QuicSocketConfig`], so the custom stack can honour or reject every
+    /// pre-connect option.
+    pub fn with_socket_factory(mut self, factory: Arc<dyn QuicUdpSocketFactory>) -> Self {
+        self.socket_factory = factory;
         self
     }
 
@@ -129,7 +131,12 @@ impl QuicConnector {
         let connection = self
             .connect_early(target_addr, server_name, recorder.clone())
             .await?;
-        connection.connection().wait_established().await;
+        if let Err(error) = connection.connection().wait_established().await {
+            if let Some(rec) = &recorder {
+                rec.mark(EventKind::QuicEnd, 0, 0);
+            }
+            return Err(error);
+        }
         if let Some(rec) = &recorder {
             rec.mark(EventKind::QuicEnd, 1, 0);
         }
@@ -151,22 +158,41 @@ impl QuicConnector {
         if let Some(rec) = &recorder {
             rec.mark(EventKind::QuicStart, 0, 0);
         }
+        let result = self
+            .connect_early_inner(target_addr, server_name, recorder.clone())
+            .await;
+        if result.is_err()
+            && let Some(rec) = &recorder
+        {
+            rec.mark(EventKind::QuicEnd, 0, 0);
+        }
+        result
+    }
 
+    async fn connect_early_inner(
+        &self,
+        target_addr: SocketAddr,
+        server_name: &str,
+        recorder: Option<TraceCollector>,
+    ) -> Result<QuicConnection, QuicError> {
         // Confinement strictly precedes socket creation ([INV-EGRESS-01], [INV-QUIC-02]).
         self.confinement
             .check(target_addr.ip())
             .map_err(|refused| QuicError::Connect(refused.to_string()))?;
+        if self.profile.keep_alive == Some(Duration::ZERO) {
+            return Err(QuicError::Config(
+                "keep_alive must be greater than zero".to_string(),
+            ));
+        }
 
         let tls = self.build_tls_config()?;
         let transport = self.transport_parameters();
-        let endpoint = match &self.custom_socket {
-            Some(socket) => Endpoint::client_with_socket(Arc::clone(socket)).await?,
-            None => {
-                let udp = self.socket_config.create_tokio_socket(target_addr)?;
-                Endpoint::client_with_udp(udp).await?
-            }
-        };
-        let connection = match endpoint
+        let udp = self
+            .socket_factory
+            .create(target_addr, &self.socket_config)
+            .map_err(QuicError::Socket)?;
+        let endpoint = Endpoint::client_with_socket(udp).await?;
+        let connection = endpoint
             .connect_early(
                 target_addr,
                 server_name,
@@ -184,16 +210,7 @@ impl QuicConnector {
                     session_cache: Some(self.session_cache.clone().into()),
                 },
             )
-            .await
-        {
-            Ok(connection) => connection,
-            Err(error) => {
-                if let Some(rec) = &recorder {
-                    rec.mark(EventKind::QuicEnd, 0, 0);
-                }
-                return Err(error);
-            }
-        };
+            .await?;
 
         Ok(QuicConnection {
             _endpoint: endpoint,
@@ -301,5 +318,13 @@ impl QuicConnection {
     /// Current smoothed round-trip time, when at least one ACK sample exists.
     pub fn rtt(&self) -> Option<Duration> {
         self.connection.rtt()
+    }
+
+    /// The peer's certificate chain after rustls verification.
+    ///
+    /// netune does not implement pinning; a consumer that needs it checks this
+    /// chain before sending sensitive application data.
+    pub fn peer_certificates(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+        self.connection.peer_certificates()
     }
 }

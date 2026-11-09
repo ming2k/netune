@@ -13,6 +13,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use socket2::{Domain, Protocol, Socket, Type};
@@ -27,8 +28,11 @@ use tokio::net::UdpSocket;
 ///
 /// Implementations must be cheap to poll and must not block. `poll_recv_from`
 /// fills `buf` with one datagram and returns its length and peer address; a
-/// datagram larger than `buf` may be truncated (QUIC packets are at most
-/// 1200 bytes, so the endpoint's buffer is always larger).
+/// datagram larger than `buf` must be dropped, not truncated. `poll_send_to`
+/// must send the whole datagram or return an error: a short UDP write is never
+/// a valid QUIC packet. A port-hopping wrapper must report its logical peer
+/// address, not each physical hop, or QUIC will treat every hop as path
+/// migration.
 pub trait QuicUdpSocket: Send + Sync + 'static {
     /// Poll for one datagram from any peer.
     fn poll_recv_from(
@@ -47,6 +51,39 @@ pub trait QuicUdpSocket: Send + Sync + 'static {
 
     /// The local address the socket is bound to.
     fn local_addr(&self) -> io::Result<SocketAddr>;
+}
+
+/// Creates one [`QuicUdpSocket`] for a new connection.
+///
+/// The factory is called only after egress confinement has accepted `target`
+/// ([`INV-EGRESS-01`](crate::QuicConnector::with_confinement)), and before the
+/// first Initial packet. It receives the same [`QuicSocketConfig`] the default
+/// socket path would apply, so a custom stack can honour every pre-connect
+/// option or reject it. The returned socket is owned by exactly one endpoint
+/// for the lifetime of exactly one connection; a factory that returns the same
+/// socket to concurrent calls would make datagram demultiplexing ambiguous.
+pub trait QuicUdpSocketFactory: Send + Sync + 'static {
+    /// Create the socket stack for one new connection to `target`.
+    fn create(
+        &self,
+        target: SocketAddr,
+        config: &QuicSocketConfig,
+    ) -> io::Result<Arc<dyn QuicUdpSocket>>;
+}
+
+/// The default factory: a `tokio` UDP socket configured from
+/// [`QuicSocketConfig`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TokioUdpSocketFactory;
+
+impl QuicUdpSocketFactory for TokioUdpSocketFactory {
+    fn create(
+        &self,
+        target: SocketAddr,
+        config: &QuicSocketConfig,
+    ) -> io::Result<Arc<dyn QuicUdpSocket>> {
+        Ok(Arc::new(config.create_tokio_socket(target)?))
+    }
 }
 
 impl QuicUdpSocket for UdpSocket {
@@ -91,7 +128,14 @@ pub(crate) async fn send_to(
     buf: &[u8],
     target: SocketAddr,
 ) -> io::Result<usize> {
-    std::future::poll_fn(|cx| socket.poll_send_to(cx, buf, target)).await
+    let sent = std::future::poll_fn(|cx| socket.poll_send_to(cx, buf, target)).await?;
+    if sent != buf.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!("short UDP write: sent {sent} of {} bytes", buf.len()),
+        ));
+    }
+    Ok(sent)
 }
 
 /// L3/L4 pre-connect socket parameters for QUIC datagram endpoints.
@@ -128,10 +172,10 @@ impl QuicSocketConfig {
         socket.set_nonblocking(true)?;
 
         if let Some(size) = self.recv_buffer_size {
-            let _ = socket.set_recv_buffer_size(size);
+            socket.set_recv_buffer_size(size)?;
         }
         if let Some(size) = self.send_buffer_size {
-            let _ = socket.set_send_buffer_size(size);
+            socket.set_send_buffer_size(size)?;
         }
 
         // Apply SO_MARK on Linux before any packet leaves the host.

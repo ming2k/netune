@@ -26,4 +26,4 @@ pub use error::QuicError;
 pub use netune_egress::EgressConfinement;
 pub use owned::congestion::{CongestionController, CongestionControllerFactory};
 pub use profile::{CongestionAlgorithm, QuicProfile, QuicProfileRegistry, QuicTransportParameters};
-pub use socket::{QuicSocketConfig, QuicUdpSocket};
+pub use socket::{QuicSocketConfig, QuicUdpSocket, QuicUdpSocketFactory, TokioUdpSocketFactory};

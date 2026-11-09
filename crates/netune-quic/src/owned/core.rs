@@ -39,7 +39,17 @@ pub(crate) enum Level {
 const LEVELS: [Level; 3] = [Level::Initial, Level::Handshake, Level::OneRtt];
 const MAX_STREAM_BUFFER: usize = 16 * 1024 * 1024;
 const MAX_DATAGRAM: usize = 1200;
+/// Payload budget for one packet: the QUIC header and AEAD tag are reserved
+/// before any frame is admitted. A sender that ignores this budget fragments a
+/// datagram at the IP layer or gets `EMSGSIZE` from the UDP stack.
+const PACKET_BUDGET: usize = MAX_DATAGRAM - 64;
 const MAX_STREAM_FRAME: usize = 1000;
+
+fn frame_len(frame: &Frame) -> Result<usize, QuicError> {
+    frame
+        .encoded_len()
+        .map_err(|error| QuicError::Protocol(error.to_string()))
+}
 
 /// Result of a stream read.
 pub(crate) enum ReadResult {
@@ -159,6 +169,8 @@ pub(crate) struct Core {
     control_frames: Vec<Frame>,
     closed: Option<(u64, String)>,
     last_activity: Instant,
+    last_keep_alive: Instant,
+    ack_eliciting_since_receive: bool,
     sent: Vec<SentPacket>,
     retransmit: [Vec<Frame>; 3],
     srtt: Option<Duration>,
@@ -206,6 +218,11 @@ impl Core {
         local_tp: TransportParameters,
         options: ClientOptions,
     ) -> Result<Self, QuicError> {
+        if options.keep_alive == Some(Duration::ZERO) {
+            return Err(QuicError::Config(
+                "keep_alive must be greater than zero".to_string(),
+            ));
+        }
         let initial = initial_keys_for_version(&original_dcid, Side::Client, options.version)?;
         let local_max_data = local_tp.initial_max_data.unwrap_or(0);
         let client_tp = local_tp.clone();
@@ -267,6 +284,8 @@ impl Core {
             control_frames: Vec::new(),
             closed: None,
             last_activity: Instant::now(),
+            last_keep_alive: Instant::now(),
+            ack_eliciting_since_receive: false,
             sent: Vec::new(),
             retransmit: [Vec::new(), Vec::new(), Vec::new()],
             srtt: None,
@@ -362,6 +381,8 @@ impl Core {
             control_frames: Vec::new(),
             closed: None,
             last_activity: Instant::now(),
+            last_keep_alive: Instant::now(),
+            ack_eliciting_since_receive: false,
             sent: Vec::new(),
             retransmit: [Vec::new(), Vec::new(), Vec::new()],
             srtt: None,
@@ -415,10 +436,16 @@ impl Core {
         if self.closed.is_some() {
             return;
         }
+        // A CONNECTION_CLOSE frame must fit one packet. Keep a UTF-8 boundary
+        // so a caller-supplied reason cannot make the close frame unsendable.
+        let mut end = reason.len().min(512);
+        while end > 0 && !reason.is_char_boundary(end) {
+            end -= 1;
+        }
         self.closed = Some((code, reason.to_string()));
         self.control_frames.push(Frame::ConnectionCloseApplication {
             error_code: code,
-            reason: Bytes::copy_from_slice(reason.as_bytes()),
+            reason: Bytes::copy_from_slice(&reason.as_bytes()[..end]),
         });
     }
 
@@ -445,8 +472,11 @@ impl Core {
     }
 
     pub(crate) fn max_datagram_size(&self) -> Option<usize> {
-        self.peer_max_datagram
-            .map(|size| usize::try_from(size.saturating_sub(2)).unwrap_or(usize::MAX))
+        self.peer_max_datagram.map(|size| {
+            usize::try_from(size.saturating_sub(2))
+                .unwrap_or(usize::MAX)
+                .min(PACKET_BUDGET - 8)
+        })
     }
 
     pub(crate) fn send_datagram(&mut self, data: Bytes) -> Result<(), QuicError> {
@@ -467,15 +497,54 @@ impl Core {
         self.recv_datagrams.pop_front()
     }
 
+    /// The negotiated idle timeout, lifted to at least three times the current
+    /// PTO (RFC 9000 Section 10.1). `None` means neither endpoint advertised one.
+    fn effective_idle_timeout(&self) -> Option<Duration> {
+        let local = self.local_tp.max_idle_timeout.filter(|value| *value > 0);
+        let peer = self
+            .peer_tp
+            .as_ref()
+            .and_then(|parameters| parameters.max_idle_timeout)
+            .filter(|value| *value > 0);
+        let advertised = match (local, peer) {
+            (Some(local), Some(peer)) => Some(local.min(peer)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        }?;
+        Some(Duration::from_millis(advertised).max(self.pto.saturating_mul(3)))
+    }
+
     pub(crate) fn handle_timeout(&mut self) -> Result<(), QuicError> {
         let now = Instant::now();
-        if let Some(interval) = self.keep_alive
-            && now.saturating_duration_since(self.last_activity) >= interval
+        if let Some(idle) = self.effective_idle_timeout()
+            && now.saturating_duration_since(self.last_activity) >= idle
         {
-            // A PING keeps the NAT mapping and the peer's idle timer alive. It is a
-            // retransmittable control frame, so it takes the normal send path.
-            self.retransmit[Level::OneRtt as usize].push(Frame::Ping);
-            self.last_activity = now;
+            // RFC 9000 Section 10.1: silently discard the connection state; an
+            // idle close does not send CONNECTION_CLOSE, and nothing queued
+            // before the timeout may leak out afterwards.
+            self.closed = Some((0, "idle timeout".to_string()));
+            self.control_frames.clear();
+            self.send_datagrams.clear();
+            self.retransmit = [Vec::new(), Vec::new(), Vec::new()];
+            return Ok(());
+        }
+        if let Some(interval) = self.keep_alive
+            && self.established
+            && self.spaces[Level::OneRtt as usize].keys.is_some()
+        {
+            // A keep-alive must fire before the negotiated idle timer, or the
+            // connection would be torn down by the timeout it exists to avoid.
+            let interval = self
+                .effective_idle_timeout()
+                .map_or(interval, |idle| interval.min(idle / 2));
+            if now.saturating_duration_since(self.last_keep_alive) >= interval {
+                // A PING keeps the NAT mapping and the peer's idle timer alive. It
+                // is a retransmittable control frame, so it takes the normal send
+                // path; `last_keep_alive` is separate from the idle timer so a
+                // busy sender does not queue one PING per timer tick.
+                self.last_keep_alive = now;
+                self.retransmit[Level::OneRtt as usize].push(Frame::Ping);
+            }
         }
         let Some(earliest) = self.sent.iter().map(|packet| packet.time).min() else {
             return Ok(());
@@ -788,7 +857,6 @@ impl Core {
         if self.closed.is_some() {
             return Err(QuicError::Closed("connection is closed".to_string()));
         }
-        self.last_activity = Instant::now();
         let mut cursor = datagram;
         while !cursor.is_empty() {
             let first = cursor[0];
@@ -929,6 +997,11 @@ impl Core {
                 cursor = &cursor[packet_end..];
             }
         }
+        // RFC 9000 Section 10.1: the idle timer restarts only after a packet
+        // from the peer has been received and processed successfully.
+        self.last_activity = Instant::now();
+        self.last_keep_alive = self.last_activity;
+        self.ack_eliciting_since_receive = false;
         self.update_established()?;
         Ok(())
     }
@@ -943,9 +1016,15 @@ impl Core {
                 continue;
             }
             let mut frames = Vec::new();
+            let mut budget = PACKET_BUDGET;
             if self.spaces[level as usize].ack_pending {
-                frames.push(self.ack_frame(level));
-                self.spaces[level as usize].ack_pending = false;
+                let ack = self.ack_frame(level);
+                let len = frame_len(&ack)?;
+                if len <= budget {
+                    budget -= len;
+                    frames.push(ack);
+                    self.spaces[level as usize].ack_pending = false;
+                }
             }
             let crypto_pending = self.spaces[level as usize].crypto_sent
                 < self.spaces[level as usize].crypto_send.len();
@@ -954,34 +1033,69 @@ impl Core {
                 let start = space.crypto_sent;
                 let end = (start + 1000).min(space.crypto_send.len());
                 let data = Bytes::copy_from_slice(&space.crypto_send[start..end]);
-                space.crypto_sent = end;
-                frames.push(Frame::Crypto {
+                let frame = Frame::Crypto {
                     offset: start as u64,
                     data,
-                });
-            }
-            frames.append(&mut self.retransmit[level as usize]);
-            if level == Level::OneRtt && self.bytes_in_flight < self.congestion.window() {
-                self.append_stream_frames(&mut frames);
-                if let Some(data) = self.send_datagrams.pop_front() {
-                    frames.push(Frame::Datagram { data });
+                };
+                let len = frame_len(&frame)?;
+                if len <= budget {
+                    budget -= len;
+                    space.crypto_sent = end;
+                    frames.push(frame);
                 }
-                frames.append(&mut self.control_frames);
+            }
+            Self::take_fitting(
+                &mut self.retransmit[level as usize],
+                &mut frames,
+                &mut budget,
+            )?;
+            if level == Level::OneRtt {
+                let available = self
+                    .congestion
+                    .window()
+                    .saturating_sub(self.bytes_in_flight);
+                let mut data_budget = usize::try_from(available)
+                    .unwrap_or(usize::MAX)
+                    .min(MAX_DATAGRAM)
+                    .saturating_sub(64)
+                    .min(budget);
+                if data_budget > 0 {
+                    Self::take_fitting(&mut self.control_frames, &mut frames, &mut data_budget)?;
+                    self.append_stream_frames(&mut frames, &mut data_budget)?;
+                    if let Some(data) = self.send_datagrams.front() {
+                        let frame = Frame::Datagram { data: data.clone() };
+                        let len = frame_len(&frame)?;
+                        if len <= data_budget {
+                            self.send_datagrams.pop_front();
+                            frames.push(frame);
+                        }
+                    }
+                }
             }
             if frames.is_empty() {
                 continue;
             }
             self.queue_packet(level, frames)?;
         }
-        if self.early_data_available
-            && self.early_keys.is_some()
-            && !self.established
-            && self.bytes_in_flight < self.congestion.window()
-        {
+        if self.early_data_available && self.early_keys.is_some() && !self.established {
+            let available = self
+                .congestion
+                .window()
+                .saturating_sub(self.bytes_in_flight);
+            let mut budget = usize::try_from(available)
+                .unwrap_or(usize::MAX)
+                .min(MAX_DATAGRAM)
+                .saturating_sub(64)
+                .min(PACKET_BUDGET);
             let mut frames = Vec::new();
-            self.append_stream_frames(&mut frames);
-            if let Some(data) = self.send_datagrams.pop_front() {
-                frames.push(Frame::Datagram { data });
+            self.append_stream_frames(&mut frames, &mut budget)?;
+            if let Some(data) = self.send_datagrams.front() {
+                let frame = Frame::Datagram { data: data.clone() };
+                let len = frame_len(&frame)?;
+                if len <= budget {
+                    self.send_datagrams.pop_front();
+                    frames.push(frame);
+                }
             }
             if !frames.is_empty() {
                 self.queue_zero_rtt(frames)?;
@@ -1489,9 +1603,7 @@ impl Core {
                             None => break,
                         }
                     };
-                    self.tls
-                        .read_handshake(&data)
-                        .map_err(|error| QuicError::Protocol(error.to_string()))?;
+                    self.tls.read_handshake(&data)?;
                     self.spaces[level as usize].crypto_read += data.len() as u64;
                     self.drain_tls()?;
                     fed = true;
@@ -1576,6 +1688,13 @@ impl Core {
             payload: payload.freeze(),
         };
         let protected = protect_long(&packet, keys)?;
+        if protected.len() > MAX_DATAGRAM {
+            return Err(QuicError::Protocol(format!(
+                "0-RTT packet of {} bytes exceeds the {} byte datagram limit",
+                protected.len(),
+                MAX_DATAGRAM
+            )));
+        }
         self.spaces[Level::OneRtt as usize].next_pn += 1;
         self.early_frames.extend(frames);
         self.outgoing.push(protected.to_vec());
@@ -1593,17 +1712,56 @@ impl Core {
         }
 
         let mut protected = self.protect(level, packet_number, payload.freeze())?;
+        if protected.len() > MAX_DATAGRAM {
+            return Err(QuicError::Protocol(format!(
+                "packet of {} bytes exceeds the {} byte datagram limit",
+                protected.len(),
+                MAX_DATAGRAM
+            )));
+        }
         if level == Level::Initial && protected.len() < MAX_DATAGRAM {
-            frames.push(Frame::Padding {
-                len: MAX_DATAGRAM - protected.len(),
-            });
-            let mut payload = BytesMut::new();
-            for frame in &frames {
-                frame
-                    .encode(&mut payload)
-                    .map_err(|error| QuicError::Protocol(error.to_string()))?;
+            // PADDING changes the long-header length field, which is itself a
+            // varint: adding one byte of padding can grow the header by one
+            // byte. Iterate to land exactly on the 1200-byte Initial floor.
+            let mut padding = MAX_DATAGRAM - protected.len();
+            for _ in 0..8 {
+                if padding == 0 {
+                    break;
+                }
+                frames.push(Frame::Padding { len: padding });
+                let mut payload = BytesMut::new();
+                for frame in &frames {
+                    frame
+                        .encode(&mut payload)
+                        .map_err(|error| QuicError::Protocol(error.to_string()))?;
+                }
+                frames.pop();
+                protected = self.protect(level, packet_number, payload.freeze())?;
+                match protected.len().cmp(&MAX_DATAGRAM) {
+                    std::cmp::Ordering::Equal => break,
+                    std::cmp::Ordering::Less => {
+                        padding += MAX_DATAGRAM - protected.len();
+                    }
+                    std::cmp::Ordering::Greater => {
+                        let excess = protected.len() - MAX_DATAGRAM;
+                        padding = padding.saturating_sub(excess);
+                    }
+                }
             }
-            protected = self.protect(level, packet_number, payload.freeze())?;
+            if protected.len() != MAX_DATAGRAM {
+                return Err(QuicError::Protocol(format!(
+                    "Initial datagram is {} bytes, expected {}",
+                    protected.len(),
+                    MAX_DATAGRAM
+                )));
+            }
+        }
+        if protected.len() > MAX_DATAGRAM {
+            return Err(QuicError::Protocol(format!(
+                "packet of {} bytes exceeds the {} byte datagram limit",
+                protected.len(),
+                MAX_DATAGRAM
+            )));
         }
 
         self.spaces[level as usize].next_pn += 1;
@@ -1624,6 +1782,13 @@ impl Core {
             )
         });
         if ack_eliciting {
+            // RFC 9000 Section 10.1: sending an ack-eliciting packet restarts
+            // the idle timer only when none has been sent since the last
+            // successfully processed packet from the peer.
+            if !self.ack_eliciting_since_receive {
+                self.last_activity = Instant::now();
+                self.ack_eliciting_since_receive = true;
+            }
             self.bytes_in_flight = self.bytes_in_flight.saturating_add(protected.len() as u64);
             self.sent.push(SentPacket {
                 level,
@@ -1695,7 +1860,11 @@ impl Core {
         }
     }
 
-    fn append_stream_frames(&mut self, frames: &mut Vec<Frame>) {
+    fn append_stream_frames(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        budget: &mut usize,
+    ) -> Result<(), QuicError> {
         let send_max_data = self.send_max_data;
         let mut ids: Vec<u64> = self.streams.keys().copied().collect();
         ids.sort_unstable();
@@ -1717,30 +1886,62 @@ impl Core {
                         let end = start + window as usize;
                         let data = Bytes::copy_from_slice(&send.data[start..end]);
                         let fin = send.fin && end == send.data.len();
-                        send.fin_sent |= fin;
-                        send.sent += window;
-                        self.send_data += window;
-                        frame = Some(Frame::Stream {
+                        let candidate = Frame::Stream {
                             stream_id: id,
                             offset: start as u64,
                             fin,
                             data,
-                        });
+                        };
+                        let len = frame_len(&candidate)?;
+                        if len > *budget {
+                            break;
+                        }
+                        *budget -= len;
+                        send.fin_sent |= fin;
+                        send.sent += window;
+                        self.send_data += window;
+                        frame = Some(candidate);
                     }
                 } else if send.fin && !send.fin_sent {
-                    send.fin_sent = true;
-                    frame = Some(Frame::Stream {
+                    let candidate = Frame::Stream {
                         stream_id: id,
                         offset: send.sent,
                         fin: true,
                         data: Bytes::new(),
-                    });
+                    };
+                    let len = frame_len(&candidate)?;
+                    if len > *budget {
+                        break;
+                    }
+                    *budget -= len;
+                    send.fin_sent = true;
+                    frame = Some(candidate);
                 }
             }
             if let Some(frame) = frame {
                 frames.push(frame);
             }
         }
+        Ok(())
+    }
+
+    fn take_fitting(
+        queue: &mut Vec<Frame>,
+        frames: &mut Vec<Frame>,
+        budget: &mut usize,
+    ) -> Result<(), QuicError> {
+        let mut count = 0;
+        for frame in queue.iter() {
+            let len = frame_len(frame)?;
+            if len > *budget {
+                break;
+            }
+            *budget -= len;
+            frames.push(frame.clone());
+            count += 1;
+        }
+        queue.drain(..count);
+        Ok(())
     }
 
     fn ack_frame(&self, level: Level) -> Frame {
@@ -1929,6 +2130,81 @@ mod tests {
         let mut bytes = BytesMut::new();
         frame.encode(&mut bytes).expect("encode");
         bytes.freeze()
+    }
+
+    #[test]
+    fn a_close_reason_cannot_make_the_close_frame_unsendable() {
+        let mut core = core();
+        core.close(1, &"x".repeat(4096));
+        let frame = core
+            .control_frames
+            .iter()
+            .find(|frame| matches!(frame, Frame::ConnectionCloseApplication { .. }))
+            .expect("close frame");
+        assert!(frame_len(frame).expect("frame length") <= PACKET_BUDGET);
+    }
+
+    #[test]
+    fn idle_timeout_closes_the_connection_silently() {
+        let mut core = core();
+        core.local_tp.max_idle_timeout = Some(100);
+        core.peer_tp = Some(TransportParameters {
+            max_idle_timeout: Some(100),
+            ..TransportParameters::default()
+        });
+        core.pto = Duration::from_millis(10);
+        core.last_activity = Instant::now() - Duration::from_millis(200);
+        core.handle_timeout().expect("timeout");
+        assert!(core.is_closed());
+        assert!(core.control_frames.is_empty(), "idle close is silent");
+    }
+
+    #[test]
+    fn keep_alive_queues_a_ping_before_the_idle_timeout() {
+        let mut core = core();
+        core.spaces[Level::OneRtt as usize].keys = Some(
+            initial_keys_for_version(&[0; 8], Side::Client, crate::wire::packet::VERSION_1)
+                .expect("keys"),
+        );
+        core.established = true;
+        core.keep_alive = Some(Duration::from_millis(50));
+        core.pto = Duration::from_millis(10);
+        core.last_keep_alive = Instant::now() - Duration::from_millis(100);
+        core.handle_timeout().expect("timeout");
+        assert_eq!(
+            core.retransmit[Level::OneRtt as usize]
+                .iter()
+                .filter(|frame| matches!(frame, Frame::Ping))
+                .count(),
+            1
+        );
+        core.handle_timeout().expect("second timeout");
+        assert_eq!(
+            core.retransmit[Level::OneRtt as usize]
+                .iter()
+                .filter(|frame| matches!(frame, Frame::Ping))
+                .count(),
+            1,
+            "a keep-alive timer must not queue one PING per tick"
+        );
+    }
+
+    #[test]
+    fn keep_alive_does_not_fire_before_its_interval() {
+        let mut core = core();
+        core.spaces[Level::OneRtt as usize].keys = Some(
+            initial_keys_for_version(&[0; 8], Side::Client, crate::wire::packet::VERSION_1)
+                .expect("keys"),
+        );
+        core.established = true;
+        core.keep_alive = Some(Duration::from_secs(10));
+        core.last_keep_alive = Instant::now();
+        core.handle_timeout().expect("timeout");
+        assert!(
+            !core.retransmit[Level::OneRtt as usize]
+                .iter()
+                .any(|frame| matches!(frame, Frame::Ping))
+        );
     }
 
     #[test]

@@ -108,6 +108,13 @@ pub enum Frame {
 }
 
 impl Frame {
+    /// The number of bytes this frame encodes to.
+    pub(crate) fn encoded_len(&self) -> Result<usize, WireError> {
+        let mut buffer = BytesMut::new();
+        self.encode(&mut buffer)?;
+        Ok(buffer.len())
+    }
+
     /// Decode one frame from `buf`. STREAM and DATAGRAM frames without a length
     /// consume the rest of the packet.
     pub fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {

@@ -85,7 +85,7 @@ Without TLS the listener speaks HTTP directly; with it, the handshake happens in
 connection pipeline — same admission control, same drain, same trace. Turn the feature on to use it:
 
 ```toml
-netune-server = { git = "https://github.com/ming2k/netune", tag = "v0.0.12", features = ["tls"] }
+netune-server = { git = "https://github.com/ming2k/netune", tag = "v0.0.13", features = ["tls"] }
 ```
 
 ```rust

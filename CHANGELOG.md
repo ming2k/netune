@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13] - 2026-11-10
+
+### Changed
+
+- **QUIC consumer seams are per-connection factories.** The shared
+  `QuicConnector::with_custom_socket` API is removed. A caller installs
+  `QuicUdpSocketFactory` through `with_socket_factory`; the factory runs after
+  egress confinement and before the first Initial packet, receives the target
+  and `QuicSocketConfig`, and owns exactly one socket stack for one connection.
+  `Endpoint::server_with_socket` exposes the low-level ingress counterpart
+  (ADR-0034).
+- **QUIC handshake waits return the failure.** `Connection::wait_established`
+  and `H3Client::wait_handshake` now return `Result`, and
+  `QuicConnector::connect` propagates it. A rejected certificate or protocol
+  failure can no longer leave the caller waiting for an `established` watch that
+  will never fire. rustls handshake errors map to `QuicError::Tls`, while packet
+  protection errors remain protocol errors.
+- **QUIC keep-alive is bounded by the negotiated idle timeout.** A zero
+  `QuicProfile.keep_alive` is rejected. The engine now enforces RFC 9000
+  Section 10.1: the effective idle timeout is the minimum non-zero advertised
+  value, floored at three PTOs, and an idle close discards queued frames without
+  sending `CONNECTION_CLOSE`.
+
+### Fixed
+
+- **QUIC packets respect the 1200-byte datagram limit.** Frame admission now
+  runs against a per-packet budget; a custom congestion window can no longer
+  make `poll_transmit` assemble an oversized UDP datagram. Initial padding
+  iterates because adding PADDING can grow the long-header length varint, and a
+  final guard rejects any packet or 0-RTT datagram above the limit.
+- **The idle timer restarts on successful receive and on the first
+  ack-eliciting send since that receive**, not on every arriving datagram.
+
 ## [0.0.12] - 2026-11-09
 
 ### Added

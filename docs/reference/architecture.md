@@ -77,6 +77,7 @@ The architectural evolution is governed by the following decisions:
 | [ADR-0031](../adr/0031-quic-0rtt-and-session-resumption.md) | QUIC 0-RTT and Resumption | Authenticated transport-parameter cache, stateful single-use tickets, and safe early-frame replay. |
 | [ADR-0032](../adr/0032-h3-capsule-protocol.md) | Owned RFC 9297 Capsule Protocol | Capsules are framed inside HTTP/3 message bodies with bounded partial reads (`INV-H3-13..14`). |
 | [ADR-0033](../adr/0033-webtransport-over-http3.md) | WebTransport over HTTP/3 | Separate draft-17 product crate; generic H3/QUIC seams only (`INV-WT-01..04`). |
+| [ADR-0034](../adr/0034-quic-consumer-seams.md) | QUIC Consumer Seams | Per-connection socket and congestion factories, keep-alive/idle policy, verified peer certificates (`INV-QUIC-18..22`). |
 
 ---
 

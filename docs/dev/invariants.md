@@ -73,6 +73,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-QUIC-05..09]` | QUIC is owned by `netune-quic`: no quinn production path, delegated rustls/aws-lc-rs crypto, validate-before-mutate, timestamp-driven bounded recovery, and flow control before buffering. | ADR-0028 |
 | `[INV-QUIC-10..15]` | QUIC lifecycle hardening: Retry precedes server state, stateless reset tokens are keyed by CID, key update retains reordering keys, Version Negotiation never selects an unconfigured version, migration waits for path validation, and congestion policy is profile-selected. | ADR-0029 |
 | `[INV-QUIC-16..17]` | 0-RTT requires an authenticated cached transport-parameter set; server early-data tickets use stateful single-use storage. | ADR-0031 |
+| `[INV-QUIC-18..22]` | Consumer seams never widen the transport: confinement precedes a per-connection client socket factory (an ingress endpoint multiplexes many connections over its bound socket), a custom congestion controller is policy only, keep-alive is a post-handshake PING bounded by the idle timer, and peer certificates are exposed only after rustls verification. | ADR-0034 |
 
 The authoritative wording of each invariant lives in its ADR. This table is an index, not a second source of truth; if the two disagree, the ADR wins and this table is corrected.
 

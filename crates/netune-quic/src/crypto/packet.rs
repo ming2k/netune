@@ -11,13 +11,15 @@ use rustls::quic::{DirectionalKeys, HeaderProtectionKey, PacketKey};
 use crate::wire::WireError;
 use crate::wire::packet::{LongPacket, ShortPacket};
 
-/// A packet-protection failure.
+/// A TLS-handshake or packet-protection failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CryptoError {
     #[error("no QUIC-capable TLS 1.3 cipher suite is available")]
     NoQuicSuite,
-    #[error("TLS packet protection error: {0}")]
-    Rustls(String),
+    #[error("TLS handshake error: {0}")]
+    Handshake(String),
+    #[error("packet protection error: {0}")]
+    PacketProtection(String),
     #[error("packet is too short for header protection")]
     PacketTooShort,
     #[error("packet sample is too short")]
@@ -30,7 +32,7 @@ pub enum CryptoError {
 
 impl From<rustls::Error> for CryptoError {
     fn from(error: rustls::Error) -> Self {
-        Self::Rustls(error.to_string())
+        Self::Handshake(error.to_string())
     }
 }
 
@@ -216,7 +218,7 @@ fn protect(
     let mut ciphertext = plaintext;
     let tag = packet_key
         .encrypt_in_place(packet_number, &header, &mut ciphertext)
-        .map_err(|error| CryptoError::Rustls(error.to_string()))?;
+        .map_err(|error| CryptoError::PacketProtection(error.to_string()))?;
     ciphertext.extend_from_slice(tag.as_ref());
 
     let mut packet = header;
@@ -233,7 +235,7 @@ fn protect(
     let mut pn_bytes = packet[pn_offset..pn_offset + packet_number_len as usize].to_vec();
     header_key
         .encrypt_in_place(&sample, &mut first, &mut pn_bytes)
-        .map_err(|error| CryptoError::Rustls(error.to_string()))?;
+        .map_err(|error| CryptoError::PacketProtection(error.to_string()))?;
     packet[0] = first;
     packet[pn_offset..pn_offset + packet_number_len as usize].copy_from_slice(&pn_bytes);
     Ok(packet.into())
@@ -263,7 +265,7 @@ fn unprotect(
     pn_bytes[..available].copy_from_slice(&packet[pn_offset..pn_offset + available]);
     header_key
         .decrypt_in_place(&sample, &mut first, &mut pn_bytes[..available])
-        .map_err(|error| CryptoError::Rustls(error.to_string()))?;
+        .map_err(|error| CryptoError::PacketProtection(error.to_string()))?;
     let packet_number_len = (first & 0x03) + 1;
     if available < packet_number_len as usize {
         return Err(CryptoError::PacketTooShort);
@@ -283,7 +285,7 @@ fn unprotect(
     let key_phase = first & 0x04 != 0;
     let payload = packet_key
         .decrypt_in_place(packet_number, &header, &mut packet[header_len..packet_end])
-        .map_err(|error| CryptoError::Rustls(error.to_string()))?;
+        .map_err(|error| CryptoError::PacketProtection(error.to_string()))?;
     Ok((
         packet_number,
         packet_number_len,

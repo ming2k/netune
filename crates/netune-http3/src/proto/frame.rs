@@ -2,7 +2,7 @@
 
 //! HTTP/3 frame framing and asynchronous readers (RFC 9114 Section 7.2).
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 use super::code::frame_type;
 use super::settings::{Settings, SettingsError};
@@ -12,6 +12,12 @@ use super::varint;
 #[allow(async_fn_in_trait)]
 pub trait FrameRead {
     async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, FrameError>;
+}
+
+impl<T: FrameRead + Unpin + ?Sized> FrameRead for &mut T {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, FrameError> {
+        (**self).read(buf).await
+    }
 }
 
 /// Async byte sink used by the frame writer.
@@ -123,6 +129,29 @@ fn parse_single_varint(payload: &[u8]) -> Result<u64, FrameError> {
         return Err(FrameError::VarInt);
     }
     Ok(value)
+}
+
+pub(crate) async fn read_varint_raw<R: FrameRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<(u64, Bytes)>, FrameError> {
+    let mut first = [0u8; 1];
+    let Some(read) = reader.read(&mut first).await? else {
+        return Ok(None);
+    };
+    if read == 0 {
+        return Ok(None);
+    }
+    let length = 1usize << (first[0] >> 6);
+    let mut bytes = BytesMut::with_capacity(length);
+    bytes.put_u8(first[0]);
+    let rest = read_exact(reader, length - 1).await?;
+    bytes.extend_from_slice(&rest);
+    let mut cursor: &[u8] = &bytes;
+    let value = varint::decode(&mut cursor).map_err(|_| FrameError::VarInt)?;
+    if !cursor.is_empty() {
+        return Err(FrameError::VarInt);
+    }
+    Ok(Some((value, bytes.freeze())))
 }
 
 pub(crate) async fn read_varint<R: FrameRead + Unpin>(

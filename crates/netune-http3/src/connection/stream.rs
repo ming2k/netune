@@ -24,6 +24,7 @@ pub(crate) struct H3Stream {
     send: SendStream,
     recv: RecvStream,
     datagrams: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
+    prefix: Bytes,
     capsule_buffer: BytesMut,
     data_remaining: u64,
     trailers: Option<HeaderMap>,
@@ -46,6 +47,16 @@ impl std::fmt::Debug for H3Stream {
 
 impl H3Stream {
     pub fn new(shared: Arc<Shared>, id: u64, send: SendStream, recv: RecvStream) -> Self {
+        Self::new_with_prefix(shared, id, send, recv, Bytes::new())
+    }
+
+    pub fn new_with_prefix(
+        shared: Arc<Shared>,
+        id: u64,
+        send: SendStream,
+        recv: RecvStream,
+        prefix: Bytes,
+    ) -> Self {
         let datagrams = shared.register_datagrams(id);
         Self {
             shared,
@@ -53,6 +64,7 @@ impl H3Stream {
             send,
             recv,
             datagrams,
+            prefix,
             capsule_buffer: BytesMut::new(),
             data_remaining: 0,
             trailers: None,
@@ -65,6 +77,10 @@ impl H3Stream {
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    pub(crate) fn shared(&self) -> &Arc<Shared> {
+        &self.shared
     }
 
     pub async fn send_head(&mut self, fields: &[HeaderField]) -> Result<(), H3Error> {
@@ -198,7 +214,8 @@ impl H3Stream {
 
     async fn read_head_fields(&mut self) -> Result<Vec<HeaderField>, H3Error> {
         loop {
-            let frame = frame::read_frame(&mut self.recv, self.shared.max_header_block())
+            let max_header_block = self.shared.max_header_block();
+            let frame = frame::read_frame(&mut *self, max_header_block)
                 .await
                 .map_err(|error| self.frame_error(error))?;
             match frame {
@@ -248,7 +265,8 @@ impl H3Stream {
         }
 
         loop {
-            let frame = frame::read_frame(&mut self.recv, self.shared.max_header_block())
+            let max_header_block = self.shared.max_header_block();
+            let frame = frame::read_frame(&mut *self, max_header_block)
                 .await
                 .map_err(|error| self.frame_error(error))?;
             match frame {
@@ -364,6 +382,29 @@ impl Drop for H3Stream {
         if !self.reader_done {
             self.recv.stop(error_code::H3_REQUEST_CANCELLED);
             self.queue_cancellation();
+        }
+    }
+}
+
+impl crate::proto::frame::FrameRead for H3Stream {
+    async fn read(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, crate::proto::frame::FrameError> {
+        if !self.prefix.is_empty() {
+            let len = self.prefix.len().min(buf.len());
+            buf[..len].copy_from_slice(&self.prefix[..len]);
+            self.prefix = self.prefix.slice(len..);
+            return Ok(Some(len));
+        }
+        match netune_quic::owned::RecvStream::read(&mut self.recv, buf.len()).await {
+            Ok(Some(data)) => {
+                let len = data.len().min(buf.len());
+                buf[..len].copy_from_slice(&data[..len]);
+                Ok(Some(len))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => Err(crate::proto::frame::FrameError::Io(error.to_string())),
         }
     }
 }

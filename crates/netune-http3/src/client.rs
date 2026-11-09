@@ -211,6 +211,21 @@ impl H3ResponseStream {
         &self.head
     }
 
+    /// The wire CONNECT/request stream id.
+    pub fn id(&self) -> u64 {
+        self.stream.id()
+    }
+
+    /// The underlying owned QUIC connection.
+    pub fn quic_connection(&self) -> &netune_quic::owned::Connection {
+        &self.stream.shared().connection
+    }
+
+    /// Finish the send side of a duplex CONNECT session.
+    pub async fn finish(&mut self) -> Result<(), H3Error> {
+        self.stream.finish_send().await
+    }
+
     /// The exchange id carried in `Event::stream`.
     pub const fn exchange(&self) -> u32 {
         self.exchange
@@ -224,6 +239,11 @@ impl H3ResponseStream {
     /// Wait for the next HTTP/3 datagram associated with this request stream.
     pub async fn next_datagram(&mut self) -> Option<Bytes> {
         self.stream.next_datagram().await
+    }
+
+    /// Send one HTTP/3 datagram associated with this request stream.
+    pub async fn send_datagram(&mut self, data: &[u8]) -> Result<(), H3Error> {
+        self.stream.send_datagram(data).await
     }
 
     /// Send one RFC 9297 capsule on the retained request/response body.
@@ -614,6 +634,22 @@ impl H3Client {
             .insert(crate::ExtendedConnectProtocol(protocol.to_string()));
         let body = self.open_request(request).await?;
         body.into_duplex().await
+    }
+
+    /// Install a protocol-neutral stream extension router.
+    pub fn enable_stream_extension(
+        &self,
+        uni_types: Vec<u64>,
+        bidi_signal: u64,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::H3ExtensionStream> {
+        self.connection
+            .shared()
+            .enable_extension(uni_types, bidi_signal)
+    }
+
+    /// Wait until the peer SETTINGS frame has been observed.
+    pub async fn wait_settings(&self) {
+        self.connection.shared().wait_settings().await;
     }
 
     /// Look up a peer SETTINGS identifier, including extension settings.

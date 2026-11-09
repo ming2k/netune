@@ -12,6 +12,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 use netune_http3::{Capsule, CapsuleError};
 
 /// The pinned WebTransport over HTTP/3 draft version.
+pub mod session;
+pub use session::{WebTransportBidi, WebTransportClient, WebTransportServer, WebTransportSession};
+
 pub const DRAFT_VERSION: &str = "draft-ietf-webtrans-http3-17";
 
 pub const SETTINGS_WT_ENABLED: u64 = 0x20b8_933b;
@@ -360,6 +363,14 @@ pub enum WebTransportError {
     Wire(String),
     #[error("HTTP/3 capsule error: {0}")]
     HttpCapsule(#[from] CapsuleError),
+    #[error("HTTP/3 error: {0}")]
+    Http3(String),
+    #[error("QUIC error: {0}")]
+    Quic(String),
+    #[error("HTTP error: {0}")]
+    Http(String),
+    #[error("WebTransport session closed: {0}")]
+    SessionClosed(String),
 }
 
 #[cfg(test)]

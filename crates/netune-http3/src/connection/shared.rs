@@ -11,6 +11,8 @@ use bytes::{Bytes, BytesMut};
 use netune_quic::owned::Connection;
 use tokio::sync::{mpsc, watch};
 
+use netune_quic::owned::{RecvStream, SendStream};
+
 use crate::error::H3Error;
 use crate::profile::H3SettingsProfile;
 use crate::proto::code::error_code;
@@ -55,6 +57,27 @@ pub struct Shared {
     datagram_routes: Mutex<HashMap<u64, mpsc::UnboundedSender<Bytes>>>,
     pending_datagrams: Mutex<HashMap<u64, VecDeque<Bytes>>>,
     peer_extra_settings: Mutex<HashMap<u64, u64>>,
+    extension: Mutex<Option<ExtensionConfig>>,
+}
+
+struct ExtensionConfig {
+    uni_types: Vec<u64>,
+    bidi_signal: u64,
+    tx: mpsc::UnboundedSender<H3ExtensionStream>,
+}
+
+/// A stream routed to an HTTP/3 extension protocol.
+pub enum H3ExtensionStream {
+    Uni {
+        stream_type: u64,
+        session_id: u64,
+        recv: RecvStream,
+    },
+    Bidi {
+        session_id: u64,
+        send: SendStream,
+        recv: RecvStream,
+    },
 }
 
 impl Shared {
@@ -104,6 +127,7 @@ impl Shared {
             datagram_routes: Mutex::new(HashMap::new()),
             pending_datagrams: Mutex::new(HashMap::new()),
             peer_extra_settings: Mutex::new(HashMap::new()),
+            extension: Mutex::new(None),
         })
     }
 
@@ -356,6 +380,48 @@ impl Shared {
     }
 
     /// Apply the peer's SETTINGS frame to the encoder.
+    pub fn enable_extension(
+        &self,
+        uni_types: Vec<u64>,
+        bidi_signal: u64,
+    ) -> mpsc::UnboundedReceiver<H3ExtensionStream> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        *self.extension.lock().unwrap_or_else(|e| e.into_inner()) = Some(ExtensionConfig {
+            uni_types,
+            bidi_signal,
+            tx,
+        });
+        rx
+    }
+
+    pub(crate) fn extension_uni(
+        &self,
+        stream_type: u64,
+    ) -> Option<mpsc::UnboundedSender<H3ExtensionStream>> {
+        self.extension
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .filter(|extension| extension.uni_types.contains(&stream_type))
+            .map(|extension| extension.tx.clone())
+    }
+
+    pub(crate) fn extension_bidi_signal(&self) -> Option<u64> {
+        self.extension
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|extension| extension.bidi_signal)
+    }
+
+    pub(crate) fn extension_bidi_sender(&self) -> Option<mpsc::UnboundedSender<H3ExtensionStream>> {
+        self.extension
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|extension| extension.tx.clone())
+    }
+
     pub fn peer_extra_setting(&self, id: u64) -> Option<u64> {
         self.peer_extra_settings
             .lock()

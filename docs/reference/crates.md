@@ -167,11 +167,13 @@ This document provides a factual overview of all crates comprising the `netune` 
 - **Dependencies**: `netune-http3`, `netune-quic`, `bytes`, `thiserror`. Dev-only tokio for tests. No third-party WebTransport runtime.
 - **Draft pin**: `draft-ietf-webtrans-http3-17`; wire constants and API are draft-scoped, not RFC.
 - **Key Types**:
+  - `WebTransportClient` / `WebTransportServer`: H3-backed session acceptance.
+  - `WebTransportSession`: session ID, bidi/uni stream open/accept, datagrams, WT control/close capsules.
   - `SessionId`: a validated client-initiated bidirectional stream ID.
   - `WebTransportSettings`: `SETTINGS_WT_ENABLED` and initial WT stream/data limits.
   - `ControlCapsule`: `WT_CLOSE_SESSION`, `WT_DRAIN_SESSION`, `WT_MAX_STREAMS`, `WT_MAX_DATA`, `WT_STREAMS_BLOCKED`, `WT_DATA_BLOCKED`.
   - `error_code`: WebTransport application-error range mapping with reserved HTTP/3 codepoints skipped.
-- **Architecture**: separate product leaf; H3/QUIC expose generic seams and never depend on this crate (ADR-0033).
+- **Architecture**: separate product leaf; H3/QUIC expose generic seams and never depend on this crate (ADR-0033). H3 now exposes extra SETTINGS, peer SETTINGS and generic extension stream routing (`0x54`/`0x41` are installed by this crate).
 
 ### `netune-probe`
 - **Privilege Separation**:

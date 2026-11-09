@@ -17,6 +17,12 @@ superseded_by: null
 
 ---
 
+> Implementation status: phases 1-4 baseline is landed — WT wire model,
+> generic H3 extension SETTINGS/stream routing, session establishment,
+> bidi/uni streams, datagrams and close/drain capsules. Phase 3 reliable reset
+> (`RESET_STREAM_AT`) and full WT flow-control enforcement/browser interop are
+> still outstanding; this ADR does not claim complete draft-17 compliance yet.
+
 ## Context
 
 WebTransport over HTTP/3 provides browser-visible multiplexed reliable streams

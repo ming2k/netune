@@ -15,7 +15,7 @@ use crate::proto::frame::{self, Frame};
 use crate::qpack::instructions::{decode_decoder_instruction, decode_encoder_instruction};
 
 use super::IncomingBi;
-use super::shared::{ControlCommand, Shared};
+use super::shared::{ControlCommand, H3ExtensionStream, Shared};
 
 const CONTROL_FRAME_LIMIT: usize = 64 * 1024;
 
@@ -127,10 +127,37 @@ pub(crate) async fn drive(
             }
             accepted = connection.accept_bi() => {
                 match accepted {
-                    Ok((send, recv)) => {
+                    Ok((send, mut recv)) => {
                         let id = send.id();
+                        let mut prefix = bytes::Bytes::new();
+                        if let Some(signal) = shared.extension_bidi_signal() {
+                            match frame::read_varint_raw(&mut recv).await {
+                                Ok(Some((value, _raw))) if value == signal => {
+                                    let session_id = match frame::read_varint(&mut recv).await {
+                                        Ok(Some(session_id)) => session_id,
+                                        Ok(None) | Err(_) => break,
+                                    };
+                                    let Some(sender) = shared.extension_bidi_sender() else {
+                                        break;
+                                    };
+                                    let _ = sender.send(H3ExtensionStream::Bidi {
+                                        session_id,
+                                        send,
+                                        recv,
+                                    });
+                                    continue;
+                                }
+                                Ok(Some((_, raw))) => prefix = raw,
+                                Ok(None) | Err(_) => break,
+                            }
+                        }
                         if let Some(incoming) = &incoming_tx {
-                            let accepted = IncomingBi { send, recv, id };
+                            let accepted = IncomingBi {
+                                send,
+                                recv,
+                                id,
+                                prefix,
+                            };
                             match incoming.try_send(accepted) {
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(mut rejected)) => {
@@ -168,6 +195,25 @@ async fn handle_uni_stream(shared: Arc<Shared>, mut recv: RecvStream) {
             return;
         }
     };
+
+    if let Some(sender) = shared.extension_uni(stream_type) {
+        let session_id = match frame::read_varint(&mut recv).await {
+            Ok(Some(session_id)) => session_id,
+            Ok(None) | Err(_) => {
+                shared.set_error(
+                    error_code::H3_STREAM_CREATION_ERROR,
+                    "extension stream ended before its session ID",
+                );
+                return;
+            }
+        };
+        let _ = sender.send(H3ExtensionStream::Uni {
+            stream_type,
+            session_id,
+            recv,
+        });
+        return;
+    }
 
     match stream_type {
         stream_type::CONTROL => {

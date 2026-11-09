@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transport parameters alongside rustls tickets; the server enables early data
   only with stateful single-use sessions; rejected early frames are replayed in
   1-RTT; H3 can send early requests before the handshake completes (ADR-0031).
+- **WebTransport runtime baseline.** `netune-webtransport` now establishes
+  draft-17 sessions over extended CONNECT, routes `0x54`/`0x41` streams through
+  generic H3 extension seams, and supports bidirectional/unidirectional
+  streams, datagrams and close/drain capsules (ADR-0033). Reliable
+  `RESET_STREAM_AT`, full flow-control-capsule enforcement and browser interop
+  remain outstanding.
 - **WebTransport over HTTP/3 ownership.** ADR-0033 establishes a separate
   `netune-webtransport` product crate pinned to draft-17, with generic H3
   extension seams, QUIC `RESET_STREAM_AT`, session/stream/datagram and WT

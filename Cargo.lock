@@ -874,8 +874,11 @@ name = "netune-webtransport"
 version = "0.0.10"
 dependencies = [
  "bytes",
+ "http",
  "netune-http3",
  "netune-quic",
+ "rcgen",
+ "rustls",
  "thiserror 2.0.20",
  "tokio",
 ]

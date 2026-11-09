@@ -18,6 +18,7 @@ use crate::proto::code::stream_type;
 use crate::proto::frame;
 use crate::proto::varint;
 
+pub use shared::H3ExtensionStream;
 pub(crate) use shared::Shared;
 pub(crate) use stream::H3Stream;
 
@@ -33,6 +34,7 @@ pub(crate) struct IncomingBi {
     pub send: SendStream,
     pub recv: RecvStream,
     pub id: u64,
+    pub prefix: bytes::Bytes,
 }
 
 /// A started HTTP/3 connection: shared state plus the driver task.

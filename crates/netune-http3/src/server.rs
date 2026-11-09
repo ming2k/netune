@@ -65,11 +65,12 @@ impl H3ServerConnection {
             let Some(incoming) = self.connection.next_incoming().await? else {
                 return Ok(None);
             };
-            let mut stream = H3Stream::new(
+            let mut stream = H3Stream::new_with_prefix(
                 self.connection.shared().clone(),
                 incoming.id,
                 incoming.send,
                 incoming.recv,
+                incoming.prefix,
             );
             let resolved = tokio::time::timeout(head_timeout, stream.read_request_head()).await;
             match resolved {
@@ -117,6 +118,22 @@ impl H3ServerConnection {
         }
     }
 
+    /// Install a protocol-neutral stream extension router.
+    pub fn enable_stream_extension(
+        &self,
+        uni_types: Vec<u64>,
+        bidi_signal: u64,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::H3ExtensionStream> {
+        self.connection
+            .shared()
+            .enable_extension(uni_types, bidi_signal)
+    }
+
+    /// Wait until the peer SETTINGS frame has been observed.
+    pub async fn wait_settings(&self) {
+        self.connection.shared().wait_settings().await;
+    }
+
     /// Look up a peer SETTINGS identifier, including extension settings.
     pub fn peer_setting(&self, id: u64) -> Option<u64> {
         self.connection.shared().peer_extra_setting(id)
@@ -161,6 +178,11 @@ impl H3ServerStream {
     /// The wire stream id, for trace correlation.
     pub fn id(&self) -> u64 {
         self.stream.id()
+    }
+
+    /// The underlying owned QUIC connection.
+    pub fn quic_connection(&self) -> &netune_quic::owned::Connection {
+        &self.stream.shared().connection
     }
 
     /// Receive one already-queued HTTP/3 datagram associated with this request stream.

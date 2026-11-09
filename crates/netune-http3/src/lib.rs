@@ -20,6 +20,7 @@ pub mod server;
 pub use client::{
     H3Client, H3ClientConfig, H3RequestBody, H3Response, H3ResponseStream, H3TraceContext,
 };
+pub use connection::H3ExtensionStream;
 pub use error::H3Error;
 pub use profile::{H3RequestProfile, H3RequestRegistry, H3SettingsProfile, H3SettingsRegistry};
 pub use proto::{Capsule, CapsuleError, ExtendedConnectProtocol, MAX_CAPSULE_VALUE};

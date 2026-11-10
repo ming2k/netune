@@ -424,26 +424,43 @@ impl HpackDecoder {
     ///
     /// Returns an error for an index beyond both tables, a malformed literal, a size update
     /// exceeding the advertised cap, or a size update after the first field.
-    pub fn decode(&mut self, mut payload: &[u8]) -> Result<Vec<(String, String)>, H2Error> {
+    pub fn decode(&mut self, payload: &[u8]) -> Result<Vec<(String, String)>, H2Error> {
+        self.decode_with_limit(payload, usize::MAX)
+    }
+
+    /// Decode one header block and refuse a decoded list larger than `max_size`.
+    ///
+    /// `max_size` is the receiver's advertised `SETTINGS_MAX_HEADER_LIST_SIZE`, counted
+    /// with the RFC 7541 §4.1 accounting (`name + value + 32` per field). The raw block is
+    /// already bounded by the caller; this bound catches a block that is small on the wire
+    /// but expands through the Huffman decoder or the dynamic table.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode`], plus a header list whose accounted size exceeds `max_size`.
+    pub fn decode_with_limit(
+        &mut self,
+        mut payload: &[u8],
+        max_size: usize,
+    ) -> Result<Vec<(String, String)>, H2Error> {
         let mut headers = Vec::new();
         let mut saw_field = false;
+        let mut list_size = 0usize;
         self.size_updates = 0;
 
         while !payload.is_empty() {
             let first = payload[0];
-            if first & 0x80 != 0 {
+            let (name, value) = if first & 0x80 != 0 {
                 // Indexed Header Field.
                 let index = decode_integer(7, &mut payload)?;
-                headers.push(self.lookup(index)?);
-                saw_field = true;
+                self.lookup(index)?
             } else if first & 0x40 != 0 {
                 // Literal with incremental indexing: the entry enters the dynamic table.
                 let index = decode_integer(6, &mut payload)?;
                 let name = self.resolve_name(index, &mut payload)?;
                 let value = decode_string(&mut payload)?;
                 self.table.insert(name.clone(), value.clone());
-                headers.push((name, value));
-                saw_field = true;
+                (name, value)
             } else if first & 0x20 != 0 {
                 // Dynamic Table Size Update.
                 if saw_field {
@@ -459,15 +476,26 @@ impl HpackDecoder {
                 self.size_updates += 1;
                 let max_size = decode_integer(5, &mut payload)?;
                 self.table.set_max_size(max_size)?;
+                continue;
             } else {
                 // Literal without indexing (`0000`) or never indexed (`0001`): neither
                 // changes the table.
                 let index = decode_integer(4, &mut payload)?;
                 let name = self.resolve_name(index, &mut payload)?;
                 let value = decode_string(&mut payload)?;
-                headers.push((name, value));
-                saw_field = true;
+                (name, value)
+            };
+            saw_field = true;
+            list_size = list_size
+                .saturating_add(name.len())
+                .saturating_add(value.len())
+                .saturating_add(32);
+            if list_size > max_size {
+                return Err(H2Error::Hpack(format!(
+                    "decoded header list exceeds the {max_size} byte limit"
+                )));
             }
+            headers.push((name, value));
         }
         Ok(headers)
     }
@@ -550,6 +578,25 @@ mod tests {
             assert_eq!(*expected_name, name.as_str());
             assert_eq!(*expected_value, value.as_str());
         }
+    }
+
+    #[test]
+    fn a_decoded_header_list_over_the_advertised_limit_is_refused() {
+        let mut encoder = HpackEncoder::new();
+        let mut decoder = HpackDecoder::new();
+        let block = encoder.encode([("x-custom", "0123456789")]);
+
+        // `x-custom` (8) + value (10) + the 32-byte per-field overhead = 50.
+        let error = decoder
+            .decode_with_limit(&block, 49)
+            .expect_err("must refuse an oversized header list");
+        assert!(error.to_string().contains("49 byte limit"), "{error}");
+
+        let mut decoder = HpackDecoder::new();
+        assert_eq!(
+            decoder.decode_with_limit(&block, 50).expect("exactly fits"),
+            vec![("x-custom".to_owned(), "0123456789".to_owned())]
+        );
     }
 
     #[test]

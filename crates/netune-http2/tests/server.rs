@@ -134,6 +134,64 @@ async fn connect(address: std::net::SocketAddr) -> H2ClientConnection<TcpStream>
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_peer_that_never_sends_settings_is_cut_off_at_the_handshake_bound() {
+    let config = ServerSessionConfig {
+        handshake_timeout: Duration::from_millis(100),
+        ..ServerSessionConfig::for_tests()
+    };
+    let address = spawn_server(Arc::new(Echo), config).await;
+    let mut socket = TcpStream::connect(address).await.expect("connect");
+
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut buffer = [0u8; 1024];
+        loop {
+            if socket.read(&mut buffer).await.expect("read") == 0 {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "a stalled handshake must not hold the connection open"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_h2_connection_is_closed_at_the_idle_bound() {
+    let config = ServerSessionConfig {
+        idle_timeout: Duration::from_millis(100),
+        ..ServerSessionConfig::for_tests()
+    };
+    let address = spawn_server(Arc::new(Echo), config).await;
+    let mut socket = TcpStream::connect(address).await.expect("connect");
+    socket
+        .write_all(netune_http2::CLIENT_PREFACE)
+        .await
+        .expect("preface");
+    let settings = netune_http2::Frame::Settings {
+        ack: false,
+        settings: Vec::new(),
+    }
+    .encode();
+    socket.write_all(&settings).await.expect("settings");
+
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut buffer = [0u8; 1024];
+        loop {
+            if socket.read(&mut buffer).await.expect("read") == 0 {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "an idle connection must not hold an admission permit indefinitely"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_get_round_trips_and_the_handler_sees_the_path() {
     let address = spawn_server(Arc::new(Echo), ServerSessionConfig::for_tests()).await;
     let mut client = connect(address).await;

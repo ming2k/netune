@@ -78,6 +78,17 @@ pub struct ServerSessionConfig {
     /// a stream slot for the length of a handler timeout. Each frame write gets this long, which bounds
     /// a stalled peer without punishing a slow link.
     pub write_timeout: std::time::Duration,
+    /// Bound on the connection preface and the peer's initial `SETTINGS`.
+    ///
+    /// A peer that opens a connection and stops must not hold an admission permit for
+    /// the life of the process. This is the HTTP/2 counterpart of the HTTP/1.1 head
+    /// bound.
+    pub handshake_timeout: std::time::Duration,
+    /// Bound on a connection with no open streams waiting for the next `HEADERS`.
+    ///
+    /// Keep-alive is not a promise of indefinite occupancy. A stream that is running
+    /// (including a long streaming response) is not idle and is not cut by this bound.
+    pub idle_timeout: std::time::Duration,
 }
 
 impl Default for ServerSessionConfig {
@@ -96,6 +107,8 @@ impl ServerSessionConfig {
             connection_window: 4 * 1024 * 1024,
             body_channel_capacity: 4,
             write_timeout: std::time::Duration::from_secs(30),
+            handshake_timeout: std::time::Duration::from_secs(10),
+            idle_timeout: std::time::Duration::from_secs(30),
         }
     }
 
@@ -113,6 +126,8 @@ impl ServerSessionConfig {
             connection_window: 65_535,
             body_channel_capacity: 2,
             write_timeout: std::time::Duration::from_secs(2),
+            handshake_timeout: std::time::Duration::from_secs(2),
+            idle_timeout: std::time::Duration::from_secs(2),
         }
     }
 }
@@ -316,6 +331,8 @@ pub enum SessionEnd {
     PeerGoAway(u32),
     /// A protocol violation ended the connection; `GOAWAY(code)` was sent.
     Protocol(H2Error, u32),
+    /// The handshake or an idle connection exceeded its configured bound.
+    Timeout,
     /// The caller's shutdown future resolved; open streams finished, then `GOAWAY` was sent.
     Drained,
 }
@@ -425,20 +442,37 @@ impl<H: H2Handler> ServerSession<H> {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let mut connection = match H2Connection::server_handshake(
-            stream,
-            self.config.local.clone(),
-            self.config.settings.clone(),
-            self.config.connection_window,
+        let mut connection = match tokio::time::timeout(
+            self.config.handshake_timeout,
+            H2Connection::server_handshake(
+                stream,
+                self.config.local.clone(),
+                self.config.settings.clone(),
+                self.config.connection_window,
+            ),
         )
         .await
         {
-            Ok(connection) => connection,
-            Err(error) => return SessionEnd::Protocol(error, error_code::INTERNAL_ERROR),
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                return SessionEnd::Protocol(error, error_code::INTERNAL_ERROR);
+            }
+            Err(_) => return SessionEnd::Timeout,
         };
 
-        if !preface_already_read && let Err(error) = read_client_preface(&mut connection).await {
-            return SessionEnd::Protocol(error, error_code::PROTOCOL_ERROR);
+        if !preface_already_read {
+            match tokio::time::timeout(
+                self.config.handshake_timeout,
+                read_client_preface(&mut connection),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    return SessionEnd::Protocol(error, error_code::PROTOCOL_ERROR);
+                }
+                Err(_) => return SessionEnd::Timeout,
+            }
         }
 
         connection.set_write_deadline(Some(self.config.write_timeout));
@@ -556,19 +590,40 @@ impl SessionState {
         // socket alone. Otherwise the handler side must be able to wake us, or a finished response
         // would wait for the peer's next frame — which is exactly the deadlock a client sees as a
         // hang.
-        let frame = tokio::select! {
-            biased;
-            Some(wake) = self.wake_rx.recv() => {
-                self.on_wake(wake);
-                return None;
-            }
-            frame = connection.read_frame() => match frame {
-                Ok(frame) => frame,
-                Err(H2Error::UnexpectedEof) => return Some(SessionEnd::PeerClosed),
-                Err(error) => {
-                    return Some(SessionEnd::Protocol(error, error_code::PROTOCOL_ERROR));
+        //
+        // An idle connection is bounded. The bound is applied only when no stream is
+        // open: a live request, including a long streaming response, may legitimately
+        // send nothing for as long as the handler takes.
+        let idle = self.streams.is_empty();
+        let wait = async {
+            tokio::select! {
+                biased;
+                Some(wake) = self.wake_rx.recv() => {
+                    self.on_wake(wake);
+                    None
                 }
-            },
+                frame = connection.read_frame() => Some(match frame {
+                    Ok(frame) => Ok(frame),
+                    Err(H2Error::UnexpectedEof) => Err(SessionEnd::PeerClosed),
+                    Err(error) => Err(SessionEnd::Protocol(
+                        error,
+                        error_code::PROTOCOL_ERROR,
+                    )),
+                }),
+            }
+        };
+        let outcome = if idle {
+            match tokio::time::timeout(session.config.idle_timeout, wait).await {
+                Ok(outcome) => outcome,
+                Err(_) => return Some(SessionEnd::Timeout),
+            }
+        } else {
+            wait.await
+        };
+        let frame = match outcome {
+            None => return None,
+            Some(Ok(frame)) => frame,
+            Some(Err(end)) => return Some(end),
         };
 
         match frame {
@@ -810,15 +865,19 @@ impl SessionState {
             return None;
         }
 
-        let block = if end_headers {
-            header_block
-        } else {
-            match connection.read_header_block(header_block).await {
-                Ok(block) => block,
-                Err(error) => {
-                    return Some(SessionEnd::Protocol(error, error_code::COMPRESSION_ERROR));
-                }
+        let block = match tokio::time::timeout(
+            session.config.idle_timeout,
+            connection.read_header_block(header_block, end_headers),
+        )
+        .await
+        {
+            Ok(Ok(block)) => block,
+            Ok(Err(error)) => {
+                return Some(SessionEnd::Protocol(error, error_code::COMPRESSION_ERROR));
             }
+            // A peer that starts a header block and stops is idle in every way that
+            // matters; the size bound alone does not bound time.
+            Err(_) => return Some(SessionEnd::Timeout),
         };
 
         let request = match decode_request(connection, stream_id, &block) {
@@ -1219,7 +1278,8 @@ fn decode_request<T>(
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let fields = connection.decoder().decode(block)?;
+    let limit = connection.local.max_header_list_size as usize;
+    let fields = connection.decoder().decode_with_limit(block, limit)?;
     let mut method: Option<String> = None;
     let mut scheme = String::new();
     let mut authority = String::new();

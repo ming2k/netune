@@ -922,13 +922,30 @@ impl<T: AsyncRead + AsyncWrite + Unpin> H2Connection<T> {
 
     /// Read a header block, reassembling `CONTINUATION` frames.
     ///
+    /// The reassembled block is bounded by our advertised `SETTINGS_MAX_HEADER_LIST_SIZE`.
+    /// Without that bound a peer can send a `HEADERS` frame followed by an endless stream of
+    /// `CONTINUATION` frames and grow this buffer without limit — the "CONTINUATION flood".
+    /// The bound is checked after every frame so a single chunk cannot overshoot it.
+    ///
     /// # Errors
     ///
     /// [`H2Error::Protocol`] when a foreign frame interleaves: RFC 9113 §6.10 requires the
     /// continuation sequence to be contiguous, and a decoder that tolerated a gap would accept a
-    /// header block assembled from two different streams' fragments.
-    pub(crate) async fn read_header_block(&mut self, first: Bytes) -> Result<Bytes, H2Error> {
+    /// header block assembled from two different streams' fragments. Also when the reassembled
+    /// block exceeds the advertised bound.
+    pub(crate) async fn read_header_block(
+        &mut self,
+        first: Bytes,
+        end_headers: bool,
+    ) -> Result<Bytes, H2Error> {
+        let limit = self.local.max_header_list_size as usize;
         let mut block = BytesMut::from(&first[..]);
+        if block.len() > limit {
+            return Err(Self::header_block_too_large(block.len(), limit));
+        }
+        if end_headers {
+            return Ok(block.freeze());
+        }
         loop {
             let frame = self.read_frame().await?;
             match frame {
@@ -938,16 +955,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> H2Connection<T> {
                     ..
                 } => {
                     block.extend_from_slice(&header_block);
+                    if block.len() > limit {
+                        return Err(Self::header_block_too_large(block.len(), limit));
+                    }
                     if end_headers {
                         return Ok(block.freeze());
                     }
-                }
-                Frame::Ping { .. }
-                | Frame::WindowUpdate { .. }
-                | Frame::Settings { .. }
-                | Frame::GoAway { .. }
-                | Frame::Priority { .. } => {
-                    self.handle_housekeeping(frame).await?;
                 }
                 other => {
                     return Err(H2Error::Protocol(format!(
@@ -956,6 +969,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> H2Connection<T> {
                 }
             }
         }
+    }
+
+    fn header_block_too_large(len: usize, limit: usize) -> H2Error {
+        H2Error::Protocol(format!(
+            "a header block of at least {len} bytes exceeds the advertised {limit} byte limit"
+        ))
     }
 
     /// Account `bytes` of inbound `DATA` against the receive windows, refusing an overflow.
@@ -1122,5 +1141,58 @@ mod tests {
         assert_eq!(ack[3], FRAME_SETTINGS);
         assert_eq!(ack[4], FLAG_ACK);
         assert_eq!(&ack[5..9], &[0, 0, 0, 0], "an ACK is always on stream 0");
+    }
+
+    #[tokio::test]
+    async fn a_continuation_flood_is_bounded_by_the_advertised_header_limit() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let mut connection = H2Connection::new(reader, Role::Server, LocalSettings::for_ingress());
+        connection.local.max_header_list_size = 96;
+
+        let continuation = Frame::Continuation {
+            stream_id: 1,
+            end_headers: false,
+            header_block: Bytes::from_static(&[0u8; 48]),
+        }
+        .encode();
+        writer
+            .write_all(&continuation)
+            .await
+            .expect("first continuation");
+        writer
+            .write_all(&continuation)
+            .await
+            .expect("second continuation");
+
+        let error = connection
+            .read_header_block(Bytes::from_static(&[0u8; 48]), false)
+            .await
+            .expect_err("an endless continuation stream must not grow without bound");
+        assert!(
+            error.to_string().contains("96 byte limit"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_continuation_sequence_rejects_an_interleaved_frame() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let mut connection = H2Connection::new(reader, Role::Server, LocalSettings::for_ingress());
+
+        let ping = Frame::Ping {
+            ack: false,
+            opaque_data: [0u8; 8],
+        }
+        .encode();
+        writer.write_all(&ping).await.expect("ping");
+
+        let error = connection
+            .read_header_block(Bytes::from_static(b"\x00"), false)
+            .await
+            .expect_err("RFC 9113 §6.10 forbids interleaving a PING inside a header block");
+        assert!(
+            error.to_string().contains("expected CONTINUATION"),
+            "unexpected error: {error}"
+        );
     }
 }

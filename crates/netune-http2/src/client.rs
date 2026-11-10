@@ -327,12 +327,12 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2ClientConnection
                     end_headers,
                     header_block,
                 } if id == stream_id => {
-                    let block = if end_headers {
-                        header_block
-                    } else {
-                        self.connection.read_header_block(header_block).await?
-                    };
-                    let fields = self.connection.decoder().decode(&block)?;
+                    let block = self
+                        .connection
+                        .read_header_block(header_block, end_headers)
+                        .await?;
+                    let limit = self.connection.local.max_header_list_size as usize;
+                    let fields = self.connection.decoder().decode_with_limit(&block, limit)?;
                     let (status, headers) = split_response(fields);
                     return Ok(H2ResponseHead {
                         status,
@@ -514,12 +514,12 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2ClientConnection
                     end_headers,
                     header_block,
                 } if id == stream_id => {
-                    let block = if end_headers {
-                        header_block
-                    } else {
-                        self.connection.read_header_block(header_block).await?
-                    };
-                    let fields = self.connection.decoder().decode(&block)?;
+                    let block = self
+                        .connection
+                        .read_header_block(header_block, end_headers)
+                        .await?;
+                    let limit = self.connection.local.max_header_list_size as usize;
+                    let fields = self.connection.decoder().decode_with_limit(&block, limit)?;
                     if !end_stream {
                         return Err(H2Error::Protocol(
                             "a response trailer block must end the stream".into(),

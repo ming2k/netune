@@ -57,6 +57,11 @@ where
         // The listener's slow-read bound, so the two protocols defend against a stalled reader the
         // same way. A constant here would have quietly made `write_timeout` mean "HTTP/1.1 only".
         write_timeout: config.write_timeout,
+        // HTTP/1.1 bounds the wait for every request head with `head_timeout`, including
+        // the idle keep-alive gap. HTTP/2 has no request line, so the same number bounds
+        // the connection preface and a connection with no open streams.
+        handshake_timeout: config.head_timeout,
+        idle_timeout: config.head_timeout,
     };
     let observer = Arc::new(TraceObserver {
         recorder: recorder.clone(),

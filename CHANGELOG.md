@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.18] - 2026-11-10
+
+### Added
+
+- **WebTransport GOAWAY teardown.** `WebTransportServer::shutdown` sends an H3
+  GOAWAY; existing sessions may finish, while a new `WebTransportSession` is
+  refused by the peer's H3 stack. ADR-0037 gates 1-3 are now complete.
+
 ## [0.0.17] - 2026-11-10
 
 ### Added

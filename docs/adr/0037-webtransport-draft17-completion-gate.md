@@ -17,12 +17,12 @@ superseded_by: null
 
 ---
 
-> Implementation status: Gates 1 and 3 have landed — `RESET_STREAM_AT` wire and
+> Implementation status: Gates 1-3 have landed — `RESET_STREAM_AT` wire and
 > transport parameter, reliable-prefix delivery, reliable partial reset on the
-> send side, session close/drain/peer-close and flow-control rejection. Gate 2
-> still needs GOAWAY-specific teardown; Gate 4 (browser/non-Rust interop) and the
-> adversarial replay portion of Gate 5 remain outstanding. This ADR does not
-> claim draft-17 completeness.
+> send side, session close/drain/peer-close, GOAWAY session refusal and
+> flow-control rejection. Gate 4 (browser/non-Rust interop) and the adversarial
+> replay portion of Gate 5 remain outstanding. This ADR does not claim draft-17
+> completeness.
 
 ## Context and Problem Statement
 

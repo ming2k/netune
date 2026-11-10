@@ -649,3 +649,43 @@ async fn capsule_protocol_round_trips_on_extended_connect() {
     assert_eq!(capsule.kind, 0x1234);
     assert_eq!(capsule.value.as_ref(), b"pong");
 }
+
+#[tokio::test]
+async fn goaway_refuses_new_requests_on_the_h3_client() {
+    let (server, addr) = make_server_endpoint().await;
+    let server_task = tokio::spawn(async move {
+        let conn = server.accept().await.expect("accept");
+        let mut h3 = netune_http3::H3ServerConnection::new(
+            conn,
+            &netune_http3::H3SettingsProfile::default(),
+        )
+        .await
+        .expect("h3 server");
+        h3.shutdown().await.expect("goaway");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    });
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let client_crypto = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("safe protocols")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    let connector = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto);
+    let mut client = H3Client::connect(&connector, addr, "localhost", None)
+        .await
+        .expect("h3 client");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let request = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/after-goaway")
+        .body(Bytes::new())
+        .expect("request");
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), client.execute(request))
+        .await
+        .expect("the GOAWAY must refuse the request")
+        .expect_err("request after GOAWAY");
+    assert!(error.to_string().contains("GOAWAY"), "{error}");
+    server_task.await.expect("server task");
+}

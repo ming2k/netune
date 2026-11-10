@@ -305,6 +305,12 @@ impl WebTransportServer {
         })
     }
 
+    /// Send an H3 GOAWAY. Existing sessions may finish; new sessions are
+    /// refused by the client's H3 stack.
+    pub async fn shutdown(&mut self) -> Result<(), WebTransportError> {
+        self.h3.shutdown().await.map_err(http3_error)
+    }
+
     pub async fn accept(&mut self) -> Result<Option<WebTransportSession>, WebTransportError> {
         loop {
             let Some(request) = self.h3.accept().await.map_err(http3_error)? else {

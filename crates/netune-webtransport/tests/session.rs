@@ -357,3 +357,65 @@ async fn a_peer_initiated_session_close_terminates_the_session() {
     );
     server_task.await.expect("server task");
 }
+
+#[tokio::test]
+async fn a_goaway_refuses_new_webtransport_sessions() {
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport(),
+            retry: false,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel::<()>();
+    let server_task = tokio::spawn(async move {
+        let connection = server.accept().await.expect("accept");
+        let mut wt = WebTransportServer::new(connection, WebTransportSettings::default())
+            .await
+            .expect("wt server");
+        let session = wt.accept().await.expect("accept wt").expect("session");
+        wt.shutdown().await.expect("goaway");
+        let _ = accepted_tx.send(());
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        drop(session);
+    });
+
+    let connector =
+        QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config((*client_tls()).clone());
+    let mut client = WebTransportClient::connect(
+        &connector,
+        addr,
+        "localhost",
+        WebTransportSettings::default(),
+    )
+    .await
+    .expect("wt client");
+    let first = client
+        .connect_session("https://localhost/first")
+        .await
+        .expect("first session");
+    tokio::time::timeout(std::time::Duration::from_secs(2), accepted_rx)
+        .await
+        .expect("server accepted")
+        .expect("accepted signal");
+    drop(first);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.connect_session("https://localhost/second"),
+    )
+    .await
+    .expect("GOAWAY must not wait for the request timeout");
+    let error = match result {
+        Ok(_) => panic!("a new session after GOAWAY must fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("GOAWAY"), "{error}");
+    server_task.await.expect("server task");
+}

@@ -1,7 +1,7 @@
 ---
 id: ADR-0036
 title: "DPLPMTUD Is a Bounded Probe State Machine, Not a Fixed MTU"
-status: draft
+status: accepted
 date: 2026-11-10
 scope: [transport/quic, protocol/rfc9000, recovery/path-mtu, observability]
 superseded_by: null
@@ -9,7 +9,7 @@ superseded_by: null
 
 # 0036. DPLPMTUD Is a Bounded Probe State Machine, Not a Fixed MTU
 
-- Status: Draft
+- Status: Accepted
 - Date: 2026-11-10
 - Deciders: Ming Li
 - Related: [ADR-0028](0028-owned-quic.md),
@@ -59,6 +59,16 @@ Implement a bounded DPLPMTUD subset in `Core`:
 
 The exact search constants belong in one named module and are tested before the
 feature is enabled by default.
+
+### Invariants & Behavioral Boundaries
+
+- **`[INV-QUIC-24]` Probe-Only Path MTU Growth**: the validated path MTU is
+  raised only when an ACK acknowledges a probe packet; a probe carries no
+  application frame, never exceeds the local/peer ceiling, and a lost or
+  black-holed probe leaves the validated MTU unchanged. *Enforced by*:
+  `dplpmtud_validates_a_larger_loopback_path`,
+  `dplpmtud_never_exceeds_the_advertised_ceiling` and
+  `dplpmtud_does_not_validate_a_black_holed_size`.
 
 ## Acceptance Criteria
 

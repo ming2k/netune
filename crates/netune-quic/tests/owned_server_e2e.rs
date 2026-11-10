@@ -1139,3 +1139,208 @@ async fn soak_echoes_many_streams_under_keepalive() {
     connection.close(0, "soak complete");
     let _ = tokio::time::timeout(Duration::from_secs(5), server_task).await;
 }
+
+fn transport_with_mtu(mtu: u16) -> TransportParameters {
+    let mut transport = transport();
+    transport.max_udp_payload_size = Some(u64::from(mtu));
+    transport
+}
+
+async fn wait_for_path_mtu(connection: &netune_quic::owned::Connection, minimum: usize) -> usize {
+    for _ in 0..100 {
+        let mtu = connection.path_mtu();
+        if mtu >= minimum {
+            return mtu;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    connection.path_mtu()
+}
+
+#[tokio::test]
+async fn dplpmtud_validates_a_larger_loopback_path() {
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport_with_mtu(1500),
+            retry: false,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+    let server_task = tokio::spawn(async move {
+        let connection = server.accept().await.expect("accept");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        drop(connection);
+    });
+
+    let client = Endpoint::client().await.expect("client endpoint");
+    let connection = client
+        .connect(
+            addr,
+            "localhost",
+            ClientConfigOwned {
+                tls: client_tls(),
+                transport: transport_with_mtu(1500),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
+                congestion_factory: None,
+                keep_alive: None,
+                enable_early_data: false,
+                session_cache: None,
+            },
+        )
+        .await
+        .expect("connect");
+    assert_eq!(
+        connection.path_mtu(),
+        1200,
+        "the minimum is the starting point"
+    );
+    let mtu = wait_for_path_mtu(&connection, 1500).await;
+    assert_eq!(
+        mtu, 1500,
+        "loopback must validate the full configured path MTU"
+    );
+    drop(connection);
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_task).await;
+}
+
+#[tokio::test]
+async fn dplpmtud_never_exceeds_the_advertised_ceiling() {
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport_with_mtu(1280),
+            retry: false,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+    let server_task = tokio::spawn(async move {
+        let connection = server.accept().await.expect("accept");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        drop(connection);
+    });
+
+    let client = Endpoint::client().await.expect("client endpoint");
+    let connection = client
+        .connect(
+            addr,
+            "localhost",
+            ClientConfigOwned {
+                tls: client_tls(),
+                transport: transport_with_mtu(1280),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
+                congestion_factory: None,
+                keep_alive: None,
+                enable_early_data: false,
+                session_cache: None,
+            },
+        )
+        .await
+        .expect("connect");
+    let mtu = wait_for_path_mtu(&connection, 1280).await;
+    assert_eq!(mtu, 1280);
+    assert!(mtu <= 1280);
+    drop(connection);
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_task).await;
+}
+
+struct BlackholeSocket {
+    inner: UdpSocket,
+    max_datagram: usize,
+}
+
+impl QuicUdpSocket for BlackholeSocket {
+    fn poll_recv_from(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        QuicUdpSocket::poll_recv_from(&self.inner, cx, buf)
+    }
+
+    fn poll_send_to(
+        &self,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+        target: SocketAddr,
+    ) -> Poll<io::Result<usize>> {
+        if buf.len() > self.max_datagram {
+            // Pretend the datagram was sent: the path drops it, so no ACK can
+            // validate this size.
+            return Poll::Ready(Ok(buf.len()));
+        }
+        QuicUdpSocket::poll_send_to(&self.inner, cx, buf, target)
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+}
+
+#[tokio::test]
+async fn dplpmtud_does_not_validate_a_black_holed_size() {
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport_with_mtu(1500),
+            retry: false,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+    let server_task = tokio::spawn(async move {
+        let connection = server.accept().await.expect("accept");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        drop(connection);
+    });
+
+    let udp = UdpSocket::bind("127.0.0.1:0").await.expect("client udp");
+    let socket = Arc::new(BlackholeSocket {
+        inner: udp,
+        max_datagram: 1200,
+    });
+    let client = Endpoint::client_with_socket(socket)
+        .await
+        .expect("client endpoint");
+    let connection = client
+        .connect(
+            addr,
+            "localhost",
+            ClientConfigOwned {
+                tls: client_tls(),
+                transport: transport_with_mtu(1500),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
+                congestion_factory: None,
+                keep_alive: None,
+                enable_early_data: false,
+                session_cache: None,
+            },
+        )
+        .await
+        .expect("connect");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        connection.path_mtu(),
+        1200,
+        "a probe that never gets an ACK must not raise the MTU"
+    );
+    drop(connection);
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_task).await;
+}

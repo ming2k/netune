@@ -604,6 +604,15 @@ impl Connection {
             .rtt()
     }
 
+    /// The path MTU validated by DPLPMTUD, in bytes.
+    pub fn path_mtu(&self) -> usize {
+        self.inner
+            .core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .path_mtu()
+    }
+
     /// The peer's certificate chain, when the handshake presented one.
     pub fn peer_certificates(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
         self.inner

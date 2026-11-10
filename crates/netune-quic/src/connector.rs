@@ -320,6 +320,11 @@ impl QuicConnection {
         self.connection.rtt()
     }
 
+    /// The path MTU validated by DPLPMTUD, in bytes.
+    pub fn path_mtu(&self) -> usize {
+        self.connection.path_mtu()
+    }
+
     /// The peer's certificate chain after rustls verification.
     ///
     /// netune does not implement pinning; a consumer that needs it checks this

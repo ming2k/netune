@@ -76,6 +76,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-QUIC-16..17]` | 0-RTT requires an authenticated cached transport-parameter set; server early-data tickets use stateful single-use storage. | ADR-0031 |
 | `[INV-QUIC-18..22]` | Consumer seams never widen the transport: confinement precedes a per-connection client socket factory (an ingress endpoint multiplexes many connections over its bound socket), a custom congestion controller is policy only, keep-alive is a post-handshake PING bounded by the idle timer, and peer certificates are exposed only after rustls verification. | ADR-0034 |
 | `[INV-QUIC-23]` | A failed incoming handshake is reported exactly once as `AcceptError::Handshake`, never as a connection and never as endpoint shutdown. | ADR-0035 |
+| `[INV-QUIC-24]` | A path MTU is raised only by an ACKed probe packet; probes never carry application frames, never exceed the local/peer ceiling, and a lost/black-holed probe leaves the validated MTU unchanged. | ADR-0036 |
 
 The authoritative wording of each invariant lives in its ADR. This table is an index, not a second source of truth; if the two disagree, the ADR wins and this table is corrected.
 

@@ -100,6 +100,7 @@ This document codifies the workspace topology, dependency direction, and non-neg
 - **0-RTT**: the client caches authenticated QUIC transport parameters; the server enables early data only with stateful single-use tickets; rejected early frames are replayed in 1-RTT (ADR-0031).
 - **Consumer seams**: a per-connection `QuicUdpSocketFactory` (invoked after confinement and before the first Initial), a per-connection `CongestionControllerFactory`, `QuicProfile.keep_alive`, RFC 9000 idle timeout and verified `peer_certificates` are the only product extension points. They never grant flow-control credit, change packet sizing or bypass TLS verification (ADR-0034).
 - **Handshake failures are values**: `Endpoint::accept` separates `EndpointClosed` from `Handshake`; a failed peer is observable and non-fatal, and `H3Server` publishes it to a bounded observer channel instead of stopping the listener (ADR-0035, `[INV-QUIC-23]`, `[INV-SERVER-25]`).
+- **Path MTU is measured, not assumed**: packets start at the 1200-byte floor; only an ACKed probe may raise `validated_mtu`, and probes never carry application frames (ADR-0036, `[INV-QUIC-24]`).
 - **Enforcement**: `crates/netune-quic/src/{wire,crypto,owned}/`, `ARCH-005` with an empty `ALLOWED_RUNTIME_DEPS`, the quinn differential tests, and the consumer-seam tests in `crates/netune-quic/tests/owned_server_e2e.rs`.
 
 ### 2.5 Codecs Never Open Sockets

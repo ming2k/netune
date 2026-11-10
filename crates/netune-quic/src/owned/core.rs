@@ -39,10 +39,14 @@ pub(crate) enum Level {
 const LEVELS: [Level; 3] = [Level::Initial, Level::Handshake, Level::OneRtt];
 const MAX_STREAM_BUFFER: usize = 16 * 1024 * 1024;
 const MAX_DATAGRAM: usize = 1200;
-/// Payload budget for one packet: the QUIC header and AEAD tag are reserved
-/// before any frame is admitted. A sender that ignores this budget fragments a
-/// datagram at the IP layer or gets `EMSGSIZE` from the UDP stack.
-const PACKET_BUDGET: usize = MAX_DATAGRAM - 64;
+/// Header and AEAD-tag reserve for one datagram. A sender that ignores this
+/// budget fragments at the IP layer or gets `EMSGSIZE` from the UDP stack.
+const PACKET_OVERHEAD: usize = 64;
+/// Datagram size validated by DPLPMTUD before any larger packet is sent.
+const MIN_VALIDATED_MTU: usize = MAX_DATAGRAM;
+const MAX_PROBE_MTU: usize = 1500;
+const PROBE_STEP: usize = 100;
+const PROBE_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_STREAM_FRAME: usize = 1000;
 
 fn frame_len(frame: &Frame) -> Result<usize, QuicError> {
@@ -122,6 +126,7 @@ struct SentPacket {
     time: Instant,
     size: u64,
     frames: Vec<Frame>,
+    probe: bool,
 }
 
 /// Client-side knobs that are not part of the QUIC wire parameters.
@@ -203,6 +208,12 @@ pub(crate) struct Core {
     early_data_accepted: bool,
     early_data_available: bool,
     keep_alive: Option<Duration>,
+    validated_mtu: usize,
+    probe_ceiling: usize,
+    probe_target: Option<usize>,
+    probe_packet: Option<u64>,
+    probe_pending: bool,
+    probe_next_at: Instant,
     session_cache: Option<std::sync::Arc<SessionCache>>,
     session_key: String,
 }
@@ -322,6 +333,12 @@ impl Core {
             early_data_accepted: false,
             early_data_available,
             keep_alive: options.keep_alive,
+            validated_mtu: MIN_VALIDATED_MTU,
+            probe_ceiling: MIN_VALIDATED_MTU,
+            probe_target: None,
+            probe_packet: None,
+            probe_pending: false,
+            probe_next_at: Instant::now() + PROBE_INTERVAL,
             session_cache: options.session_cache,
             session_key: options.session_key,
         };
@@ -422,6 +439,12 @@ impl Core {
             early_data_accepted: false,
             early_data_available: false,
             keep_alive,
+            validated_mtu: MIN_VALIDATED_MTU,
+            probe_ceiling: MIN_VALIDATED_MTU,
+            probe_target: None,
+            probe_packet: None,
+            probe_pending: false,
+            probe_next_at: Instant::now() + PROBE_INTERVAL,
             session_cache: None,
             session_key: String::new(),
         })
@@ -485,7 +508,7 @@ impl Core {
             // length varint. Solve p + 1 + varint_len(p) <= frame_max.
             let frame_max = usize::try_from(frame_max)
                 .unwrap_or(usize::MAX)
-                .min(PACKET_BUDGET);
+                .min(self.validated_mtu.saturating_sub(PACKET_OVERHEAD));
             let mut payload = frame_max.saturating_sub(2);
             for _ in 0..3 {
                 let overhead = 1 + crate::wire::varint::encoded_len(payload as u64);
@@ -548,6 +571,19 @@ impl Core {
             self.retransmit = [Vec::new(), Vec::new(), Vec::new()];
             return Ok(());
         }
+        if self.established
+            && self.probe_packet.is_none()
+            && !self.probe_pending
+            && now >= self.probe_next_at
+            && self.validated_mtu < self.probe_ceiling
+        {
+            let target = (self.validated_mtu + PROBE_STEP).min(self.probe_ceiling);
+            if target > self.validated_mtu {
+                self.probe_target = Some(target);
+                self.probe_pending = true;
+            }
+            self.probe_next_at = now + PROBE_INTERVAL;
+        }
         if let Some(interval) = self.keep_alive
             && self.established
             && self.spaces[Level::OneRtt as usize].keys.is_some()
@@ -574,6 +610,18 @@ impl Core {
         }
         self.congestion.on_pto(now);
         self.bytes_in_flight = 0;
+        if let Some(probe) = self.probe_packet
+            && self
+                .sent
+                .iter()
+                .any(|packet| packet.level == Level::OneRtt && packet.packet_number == probe)
+        {
+            self.probe_packet = None;
+            let failed = self.probe_target.unwrap_or(self.validated_mtu);
+            self.probe_ceiling = failed.saturating_sub(1).max(self.validated_mtu);
+            self.probe_target = None;
+            self.probe_next_at = now + PROBE_INTERVAL;
+        }
         let packets = std::mem::take(&mut self.sent);
         for packet in packets {
             for frame in packet.frames {
@@ -835,6 +883,8 @@ impl Core {
         }
         let mut acked_bytes = 0u64;
         let mut lost = Vec::new();
+        let mut probe_acked = None;
+        let mut probe_lost = false;
         let loss_delay = self
             .srtt
             .unwrap_or(Duration::from_millis(100))
@@ -846,17 +896,35 @@ impl Core {
             }
             if acked.contains(&packet.packet_number) {
                 acked_bytes = acked_bytes.saturating_add(packet.size);
+                if packet.probe {
+                    probe_acked = Some(packet.size as usize);
+                }
                 return false;
             }
             if packet.packet_number < ack.largest_acknowledged
                 && now.saturating_duration_since(packet.time) > loss_delay
             {
+                if packet.probe {
+                    probe_lost = true;
+                }
                 lost.push((packet.size, packet.frames.clone()));
                 return false;
             }
             true
         });
         self.bytes_in_flight = self.bytes_in_flight.saturating_sub(acked_bytes);
+        if let Some(size) = probe_acked {
+            self.validated_mtu = self.validated_mtu.max(size);
+            self.probe_packet = None;
+            self.probe_target = None;
+            self.probe_next_at = now + PROBE_INTERVAL;
+        } else if probe_lost {
+            self.probe_packet = None;
+            let failed = self.probe_target.unwrap_or(self.validated_mtu);
+            self.probe_ceiling = failed.saturating_sub(1).max(self.validated_mtu);
+            self.probe_target = None;
+            self.probe_next_at = now + PROBE_INTERVAL;
+        }
         if !lost.is_empty() {
             let lost_bytes = lost.iter().map(|(size, _)| *size).sum();
             self.congestion.on_loss(now, lost_bytes);
@@ -1035,8 +1103,22 @@ impl Core {
             if self.spaces[level as usize].keys.is_none() {
                 continue;
             }
+            if level == Level::OneRtt && self.probe_pending {
+                let target = self.probe_target.unwrap_or(self.validated_mtu);
+                let mut frames = Vec::new();
+                if self.spaces[level as usize].ack_pending {
+                    frames.push(self.ack_frame(level));
+                    self.spaces[level as usize].ack_pending = false;
+                }
+                frames.push(Frame::Ping);
+                let packet_number = self.spaces[level as usize].next_pn;
+                self.queue_packet(level, frames, Some(target), true)?;
+                self.probe_packet = Some(packet_number);
+                self.probe_pending = false;
+                continue;
+            }
             let mut frames = Vec::new();
-            let mut budget = PACKET_BUDGET;
+            let mut budget = self.packet_budget(level);
             if self.spaces[level as usize].ack_pending {
                 let ack = self.ack_frame(level);
                 let len = frame_len(&ack)?;
@@ -1076,8 +1158,8 @@ impl Core {
                     .saturating_sub(self.bytes_in_flight);
                 let mut data_budget = usize::try_from(available)
                     .unwrap_or(usize::MAX)
-                    .min(MAX_DATAGRAM)
-                    .saturating_sub(64)
+                    .min(self.validated_mtu)
+                    .saturating_sub(PACKET_OVERHEAD)
                     .min(budget);
                 if data_budget > 0 {
                     Self::take_fitting(&mut self.control_frames, &mut frames, &mut data_budget)?;
@@ -1095,7 +1177,8 @@ impl Core {
             if frames.is_empty() {
                 continue;
             }
-            self.queue_packet(level, frames)?;
+            let pad_to = (level == Level::Initial).then_some(MAX_DATAGRAM);
+            self.queue_packet(level, frames, pad_to, false)?;
         }
         if self.early_data_available && self.early_keys.is_some() && !self.established {
             let available = self
@@ -1105,8 +1188,7 @@ impl Core {
             let mut budget = usize::try_from(available)
                 .unwrap_or(usize::MAX)
                 .min(MAX_DATAGRAM)
-                .saturating_sub(64)
-                .min(PACKET_BUDGET);
+                .saturating_sub(PACKET_OVERHEAD);
             let mut frames = Vec::new();
             self.append_stream_frames(&mut frames, &mut budget)?;
             if let Some(data) = self.send_datagrams.front() {
@@ -1307,6 +1389,32 @@ impl Core {
         self.peer_max_datagram = parameters.max_datagram_frame_size;
         self.peer_reset_token = parameters.stateless_reset_token;
         self.peer_tp = Some(parameters);
+        let local = self
+            .local_tp
+            .max_udp_payload_size
+            .unwrap_or(MAX_PROBE_MTU as u64);
+        let peer = self
+            .peer_tp
+            .as_ref()
+            .and_then(|parameters| parameters.max_udp_payload_size)
+            .unwrap_or(u64::MAX);
+        let ceiling = local.min(peer).min(MAX_PROBE_MTU as u64);
+        self.probe_ceiling = usize::try_from(ceiling)
+            .unwrap_or(MAX_PROBE_MTU)
+            .max(MIN_VALIDATED_MTU);
+        self.probe_next_at = Instant::now() + PROBE_INTERVAL;
+    }
+
+    pub(crate) fn path_mtu(&self) -> usize {
+        self.validated_mtu
+    }
+
+    fn packet_budget(&self, level: Level) -> usize {
+        let mtu = match level {
+            Level::Initial | Level::Handshake => MAX_DATAGRAM,
+            Level::OneRtt => self.validated_mtu,
+        };
+        mtu.saturating_sub(PACKET_OVERHEAD)
     }
 
     fn drain_tls(&mut self) -> Result<(), QuicError> {
@@ -1721,7 +1829,13 @@ impl Core {
         Ok(())
     }
 
-    fn queue_packet(&mut self, level: Level, frames: Vec<Frame>) -> Result<(), QuicError> {
+    fn queue_packet(
+        &mut self,
+        level: Level,
+        frames: Vec<Frame>,
+        pad_to: Option<usize>,
+        probe: bool,
+    ) -> Result<(), QuicError> {
         let packet_number = self.spaces[level as usize].next_pn;
         let mut frames = frames;
         let mut payload = BytesMut::new();
@@ -1731,19 +1845,24 @@ impl Core {
                 .map_err(|error| QuicError::Protocol(error.to_string()))?;
         }
 
+        let limit = pad_to.unwrap_or(match level {
+            Level::OneRtt => self.validated_mtu,
+            Level::Initial | Level::Handshake => MAX_DATAGRAM,
+        });
         let mut protected = self.protect(level, packet_number, payload.freeze())?;
-        if protected.len() > MAX_DATAGRAM {
+        if protected.len() > limit {
             return Err(QuicError::Protocol(format!(
-                "packet of {} bytes exceeds the {} byte datagram limit",
-                protected.len(),
-                MAX_DATAGRAM
+                "packet of {} bytes exceeds the {limit} byte datagram limit",
+                protected.len()
             )));
         }
-        if level == Level::Initial && protected.len() < MAX_DATAGRAM {
+        if let Some(target) = pad_to
+            && protected.len() < target
+        {
             // PADDING changes the long-header length field, which is itself a
             // varint: adding one byte of padding can grow the header by one
-            // byte. Iterate to land exactly on the 1200-byte Initial floor.
-            let mut padding = MAX_DATAGRAM - protected.len();
+            // byte. Iterate to land exactly on the target.
+            let mut padding = target - protected.len();
             for _ in 0..8 {
                 if padding == 0 {
                     break;
@@ -1757,30 +1876,28 @@ impl Core {
                 }
                 frames.pop();
                 protected = self.protect(level, packet_number, payload.freeze())?;
-                match protected.len().cmp(&MAX_DATAGRAM) {
+                match protected.len().cmp(&target) {
                     std::cmp::Ordering::Equal => break,
                     std::cmp::Ordering::Less => {
-                        padding += MAX_DATAGRAM - protected.len();
+                        padding += target - protected.len();
                     }
                     std::cmp::Ordering::Greater => {
-                        let excess = protected.len() - MAX_DATAGRAM;
+                        let excess = protected.len() - target;
                         padding = padding.saturating_sub(excess);
                     }
                 }
             }
-            if protected.len() != MAX_DATAGRAM {
+            if protected.len() != target {
                 return Err(QuicError::Protocol(format!(
-                    "Initial datagram is {} bytes, expected {}",
-                    protected.len(),
-                    MAX_DATAGRAM
+                    "padded datagram is {} bytes, expected {target}",
+                    protected.len()
                 )));
             }
         }
-        if protected.len() > MAX_DATAGRAM {
+        if protected.len() > limit {
             return Err(QuicError::Protocol(format!(
-                "packet of {} bytes exceeds the {} byte datagram limit",
-                protected.len(),
-                MAX_DATAGRAM
+                "packet of {} bytes exceeds the {limit} byte datagram limit",
+                protected.len()
             )));
         }
 
@@ -1816,6 +1933,7 @@ impl Core {
                 time: Instant::now(),
                 size: protected.len() as u64,
                 frames,
+                probe,
             });
         }
         self.outgoing.push(protected.to_vec());
@@ -2174,7 +2292,7 @@ mod tests {
             .iter()
             .find(|frame| matches!(frame, Frame::ConnectionCloseApplication { .. }))
             .expect("close frame");
-        assert!(frame_len(frame).expect("frame length") <= PACKET_BUDGET);
+        assert!(frame_len(frame).expect("frame length") <= MAX_DATAGRAM - PACKET_OVERHEAD);
     }
 
     #[test]

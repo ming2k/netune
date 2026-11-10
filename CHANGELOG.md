@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.16] - 2026-11-10
+
+### Added
+
+- **DPLPMTUD.** QUIC starts at the 1200-byte floor and raises the validated
+  path MTU only after a PING+PADDING probe is acknowledged. Probes are bounded
+  by the local/peer `max_udp_payload_size` and a 1500-byte ceiling, carry no
+  application frames, and a lost or black-holed probe leaves the MTU unchanged
+  (`Connection::path_mtu`, ADR-0036, `[INV-QUIC-24]`).
+
 ## [0.0.15] - 2026-11-10
 
 ### Added

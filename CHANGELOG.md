@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.24] - 2026-11-10
+
+### Added
+
+- **`QuicProfile.path_mtu_discovery`.** A consumer that needs fixed-size
+  datagrams can disable DPLPMTUD instead of relying on an engine-internal
+  constant. Disabling it advertises the 1200-byte QUIC minimum as the local
+  `max_udp_payload_size`, so the probe ceiling cannot exceed the floor and the
+  peer is told the same receive bound. It defaults to `true`; the existing
+  `dplpmtud_*` suite remains the falsifier for the enabled path, and
+  `dplpmtud_can_be_disabled_by_the_consumer` fails if the policy is ignored.
+
 ## [0.0.23] - 2026-11-10
 
 ### Added

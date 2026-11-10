@@ -60,6 +60,14 @@ Implement a bounded DPLPMTUD subset in `Core`:
 The exact search constants belong in one named module and are tested before the
 feature is enabled by default.
 
+`QuicProfile.path_mtu_discovery` is the one policy switch, and it disables
+probing rather than setting a size: the connector advertises the 1200-byte QUIC
+minimum as the local `max_udp_payload_size`, so the engine's ceiling is the
+floor and the peer is told the same receive bound. The default is `true`; a
+consumer that needs a fixed datagram profile (Hysteria 2's
+`disable-path-mtu-discovery`) opts out explicitly instead of depending on an
+engine-internal constant.
+
 ### Invariants & Behavioral Boundaries
 
 - **`[INV-QUIC-24]` Probe-Only Path MTU Growth**: the validated path MTU is

@@ -44,14 +44,14 @@ bytes = { workspace = true }
 flate2 = { workspace = true }
 http = { workspace = true }
 libc = { workspace = true }
-netune-egress = { path = "../netune-egress", version = "0.0.23" }
-netune-http1 = { path = "../netune-http1", version = "0.0.23" }
-netune-http2 = { path = "../netune-http2", version = "0.0.23", optional = true }
-netune-http3 = { path = "../netune-http3", version = "0.0.23", optional = true }
-netune-io = { path = "../netune-io", version = "0.0.23" }
-netune-quic = { path = "../netune-quic", version = "0.0.23", optional = true }
-netune-trace = { path = "../netune-trace", version = "0.0.23" }
-netune-ws = { path = "../netune-ws", version = "0.0.23", optional = true }
+netune-egress = { path = "../netune-egress", version = "0.0.24" }
+netune-http1 = { path = "../netune-http1", version = "0.0.24" }
+netune-http2 = { path = "../netune-http2", version = "0.0.24", optional = true }
+netune-http3 = { path = "../netune-http3", version = "0.0.24", optional = true }
+netune-io = { path = "../netune-io", version = "0.0.24" }
+netune-quic = { path = "../netune-quic", version = "0.0.24", optional = true }
+netune-trace = { path = "../netune-trace", version = "0.0.24" }
+netune-ws = { path = "../netune-ws", version = "0.0.24", optional = true }
 rustls = { workspace = true }
 rustls-platform-verifier = { workspace = true }
 socket2 = { workspace = true }
@@ -63,11 +63,11 @@ base64 = { workspace = true }
 # The documentation examples are compiled and run by `tests/doc_examples.rs`,
 # so a guide that drifts from the API fails CI. `netune-ws` is named here
 # because one guide imports `CloseCode` directly.
-netune-ws = { path = "../netune-ws", version = "0.0.23" }
+netune-ws = { path = "../netune-ws", version = "0.0.24" }
 brotli = { workspace = true }
 flate2 = { workspace = true }
 http = { workspace = true }
-netune-trace = { path = "../netune-trace", version = "0.0.23" }
+netune-trace = { path = "../netune-trace", version = "0.0.24" }
 rcgen = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
 # Keep in lockstep with the gungraun-runner version installed in CI; the

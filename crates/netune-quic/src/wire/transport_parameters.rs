@@ -27,6 +27,9 @@ pub const RETRY_SOURCE_CONNECTION_ID: u64 = 0x10;
 pub const MAX_DATAGRAM_FRAME_SIZE: u64 = 0x20;
 pub const RESET_STREAM_AT: u64 = 0x1d;
 
+/// The smallest legal `max_udp_payload_size` (RFC 9000 §18.2).
+pub const MIN_MAX_UDP_PAYLOAD_SIZE: u64 = 1200;
+
 /// The preferred-address transport parameter payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreferredAddress {
@@ -192,7 +195,7 @@ impl TransportParameters {
                 }
                 MAX_UDP_PAYLOAD_SIZE => {
                     let size = read_varint(id, value)?;
-                    if size < 1200 {
+                    if size < MIN_MAX_UDP_PAYLOAD_SIZE {
                         return Err(invalid(id, "maximum UDP payload is below 1200"));
                     }
                     parameters.max_udp_payload_size = Some(size);

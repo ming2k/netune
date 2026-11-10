@@ -249,11 +249,21 @@ impl QuicConnector {
 
     fn transport_parameters(&self) -> TransportParameters {
         let parameters = &self.profile.transport_parameters;
+        // The engine derives its DPLPMTUD ceiling from the local
+        // `max_udp_payload_size`, so advertising the 1200-byte floor is the
+        // protocol-correct way to keep a disabled path at that floor. It also
+        // tells the peer not to send larger datagrams, which is the same bound
+        // this endpoint is prepared to receive.
+        let max_udp_payload_size = if self.profile.path_mtu_discovery {
+            parameters.max_udp_payload_size.map(u64::from)
+        } else {
+            Some(crate::wire::transport_parameters::MIN_MAX_UDP_PAYLOAD_SIZE)
+        };
         TransportParameters {
             max_idle_timeout: parameters
                 .max_idle_timeout
                 .map(|duration| duration.as_millis() as u64),
-            max_udp_payload_size: parameters.max_udp_payload_size.map(u64::from),
+            max_udp_payload_size,
             initial_max_data: Some(parameters.initial_max_data),
             initial_max_stream_data_bidi_local: Some(parameters.initial_max_stream_data_bidi_local),
             initial_max_stream_data_bidi_remote: Some(

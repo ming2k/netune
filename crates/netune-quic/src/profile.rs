@@ -119,6 +119,15 @@ pub struct QuicProfile {
     pub congestion: CongestionAlgorithm,
     /// Whether a resumed session may use 0-RTT early data.
     pub enable_0rtt: bool,
+    /// Whether to run DPLPMTUD probes on this connection.
+    ///
+    /// Disabling it advertises the 1200-byte QUIC minimum as this endpoint's
+    /// `max_udp_payload_size`, so the validated path MTU stays at the floor and
+    /// the peer is told not to send larger datagrams. Use this only when the
+    /// consumer needs fixed-size packets (for example, a protocol whose wire
+    /// profile depends on a 1200-byte datagram); RFC 8899 probing is the
+    /// default because a fixed cap leaves throughput on larger paths.
+    pub path_mtu_discovery: bool,
     /// Send a QUIC PING after this much receive inactivity.
     pub keep_alive: Option<Duration>,
     /// ALPN strings in wire preference order.
@@ -139,6 +148,7 @@ impl QuicProfile {
             transport_parameters: QuicTransportParameters::default(),
             congestion: CongestionAlgorithm::NewReno,
             enable_0rtt: false,
+            path_mtu_discovery: true,
             keep_alive: None,
             alpn: vec![b"h3".to_vec()],
         }
@@ -163,6 +173,7 @@ impl QuicProfile {
             },
             congestion: CongestionAlgorithm::Bbr,
             enable_0rtt: true,
+            path_mtu_discovery: true,
             keep_alive: None,
             alpn: vec![b"h3".to_vec()],
         }
@@ -187,6 +198,7 @@ impl QuicProfile {
             },
             congestion: CongestionAlgorithm::Bbr,
             enable_0rtt: true,
+            path_mtu_discovery: true,
             keep_alive: None,
             alpn: vec![b"h3".to_vec()],
         }

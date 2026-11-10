@@ -1256,6 +1256,55 @@ async fn dplpmtud_never_exceeds_the_advertised_ceiling() {
     let _ = tokio::time::timeout(Duration::from_secs(5), server_task).await;
 }
 
+#[tokio::test]
+async fn dplpmtud_can_be_disabled_by_the_consumer() {
+    // Falsifier: without the profile policy, the loopback path validates
+    // 1500 bytes within a few probe intervals (see
+    // `dplpmtud_validates_a_larger_loopback_path`). Advertising the 1200-byte
+    // floor must leave it there.
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport_with_mtu(1500),
+            retry: false,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+    let server_task = tokio::spawn(async move {
+        let connection = server.accept().await.expect("accept");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        drop(connection);
+    });
+
+    let connector = netune_quic::QuicConnector::new(netune_quic::QuicProfile {
+        path_mtu_discovery: false,
+        ..netune_quic::QuicProfile::default_profile()
+    })
+    .with_tls_config((*client_tls()).clone());
+    let connection = connector
+        .connect(addr, "localhost", None)
+        .await
+        .expect("connect");
+    assert_eq!(
+        connection.path_mtu(),
+        1200,
+        "the path starts at the QUIC minimum"
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        connection.path_mtu(),
+        1200,
+        "disabled DPLPMTUD must not raise the path MTU even when the path allows it"
+    );
+    drop(connection);
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_task).await;
+}
+
 struct BlackholeSocket {
     inner: UdpSocket,
     max_datagram: usize,

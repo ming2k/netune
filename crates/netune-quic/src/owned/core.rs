@@ -38,6 +38,23 @@ pub(crate) enum Level {
 
 const LEVELS: [Level; 3] = [Level::Initial, Level::Handshake, Level::OneRtt];
 const MAX_STREAM_BUFFER: usize = 16 * 1024 * 1024;
+/// Bound on out-of-order CRYPTO data retained for one packet space.
+///
+/// CRYPTO frames are not flow-controlled, so a peer that sends ever-higher
+/// offsets with a gap at `crypto_read` would otherwise grow reassembly memory
+/// without limit (RFC 9000 §7.5 allows discarding or refusing such a stream).
+const MAX_CRYPTO_BUFFER: usize = 256 * 1024;
+/// Bound on the number of out-of-order CRYPTO chunks per space, so many tiny
+/// frames cannot exhaust memory through bookkeeping alone.
+const MAX_CRYPTO_CHUNKS: usize = 64;
+/// How many recent received packet numbers are retained for ACK generation.
+///
+/// Without a bound this set grows by one entry per datagram for the lifetime
+/// of a connection. Older numbers are already acknowledged; dropping them only
+/// widens the range a peer may retransmit.
+const MAX_RECEIVED_PACKETS: usize = 4096;
+/// How many disjoint ranges one ACK frame may carry.
+const MAX_ACK_RANGES: usize = 32;
 const MAX_DATAGRAM: usize = 1200;
 /// Header and AEAD-tag reserve for one datagram. A sender that ignores this
 /// budget fragments at the IP layer or gets `EMSGSIZE` from the UDP stack.
@@ -864,7 +881,6 @@ impl Core {
     }
 
     fn handle_ack(&mut self, level: Level, ack: AckFrame) {
-        let acked = acknowledged_packets(&ack);
         let now = Instant::now();
         if let Some(packet) = self.sent.iter().find(|packet| {
             packet.level == level && packet.packet_number == ack.largest_acknowledged
@@ -900,7 +916,7 @@ impl Core {
             if packet.level != level {
                 return true;
             }
-            if acked.contains(&packet.packet_number) {
+            if ack_covers(&ack, packet.packet_number) {
                 acked_bytes = acked_bytes.saturating_add(packet.size);
                 if packet.probe {
                     probe_acked = Some(packet.size as usize);
@@ -1817,6 +1833,9 @@ impl Core {
     }
 
     fn insert_crypto(&mut self, level: Level, offset: u64, data: &[u8]) -> Result<(), QuicError> {
+        if data.is_empty() {
+            return Ok(());
+        }
         let space = &mut self.spaces[level as usize];
         if offset < space.crypto_read {
             let skip = (space.crypto_read - offset) as usize;
@@ -1828,6 +1847,13 @@ impl Core {
                 .insert(space.crypto_read, data[skip..].to_vec());
         } else {
             space.crypto_recv.insert(offset, data.to_vec());
+        }
+        let buffered: usize = space.crypto_recv.values().map(Vec::len).sum();
+        if buffered > MAX_CRYPTO_BUFFER || space.crypto_recv.len() > MAX_CRYPTO_CHUNKS {
+            return Err(QuicError::Protocol(format!(
+                "CRYPTO reassembly exceeded its bound ({buffered} bytes in {} chunks)",
+                space.crypto_recv.len()
+            )));
         }
         Ok(())
     }
@@ -2226,13 +2252,46 @@ impl Core {
 
     fn ack_frame(&self, level: Level) -> Frame {
         let space = &self.spaces[level as usize];
-        let largest = *space.received.last().unwrap_or(&0);
-        let contiguous = space.received.iter().copied().eq(0..=largest);
+        let Some(&largest) = space.received.last() else {
+            return Frame::Ack(AckFrame {
+                largest_acknowledged: 0,
+                ack_delay: 0,
+                first_ack_range: 0,
+                ranges: Vec::new(),
+                ecn: None,
+            });
+        };
+
+        // Build contiguous descending runs, newest first, bounded by the number
+        // of ranges one frame may carry. Run i is `(low, high)`.
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        for packet in space.received.iter().rev().copied() {
+            match runs.last_mut() {
+                Some((low, _)) if *low == packet.saturating_add(1) => *low = packet,
+                _ => {
+                    if runs.len() == MAX_ACK_RANGES {
+                        break;
+                    }
+                    runs.push((packet, packet));
+                }
+            }
+        }
+
+        let (first_low, first_high) = runs[0];
+        let mut ranges = Vec::with_capacity(runs.len().saturating_sub(1));
+        for pair in runs.windows(2) {
+            let (previous_low, _) = pair[0];
+            let (low, high) = pair[1];
+            ranges.push(AckRange {
+                gap: previous_low.saturating_sub(high).saturating_sub(2),
+                range: high - low,
+            });
+        }
         Frame::Ack(AckFrame {
             largest_acknowledged: largest,
             ack_delay: 0,
-            first_ack_range: if contiguous { largest } else { 0 },
-            ranges: Vec::<AckRange>::new(),
+            first_ack_range: first_high - first_low,
+            ranges,
             ecn: None,
         })
     }
@@ -2240,6 +2299,9 @@ impl Core {
     fn record(&mut self, level: Level, pn: u64, ack_eliciting: bool) {
         let space = &mut self.spaces[level as usize];
         space.received.insert(pn);
+        while space.received.len() > MAX_RECEIVED_PACKETS {
+            space.received.pop_first();
+        }
         if ack_eliciting {
             space.ack_pending = true;
         }
@@ -2292,22 +2354,34 @@ fn try_short(
     unprotect_short_with(&mut packet, dcid_len, largest, header, key).ok()
 }
 
-fn acknowledged_packets(ack: &AckFrame) -> BTreeSet<u64> {
-    let mut acked = BTreeSet::new();
+/// Whether an ACK frame covers `packet`, without expanding its ranges.
+///
+/// A peer controls `largest_acknowledged`, `first_ack_range` and every range
+/// width. Expanding those into a set would let one ACK frame request billions
+/// of iterations; this walk is bounded by the frame's range count.
+fn ack_covers(ack: &AckFrame, packet: u64) -> bool {
+    if packet > ack.largest_acknowledged {
+        return false;
+    }
     let mut lowest = ack.largest_acknowledged.saturating_sub(ack.first_ack_range);
-    for packet in lowest..=ack.largest_acknowledged {
-        acked.insert(packet);
+    if packet >= lowest && packet <= ack.largest_acknowledged {
+        return true;
     }
     for range in &ack.ranges {
-        let Some(largest) = lowest.checked_sub(range.gap + 2) else {
-            break;
+        let Some(next_largest) = lowest.checked_sub(range.gap.saturating_add(2)) else {
+            return false;
         };
-        lowest = largest.saturating_sub(range.range);
-        for packet in lowest..=largest {
-            acked.insert(packet);
+        let next_lowest = next_largest.saturating_sub(range.range);
+        if packet >= next_lowest && packet <= next_largest {
+            return true;
         }
+        if packet > next_largest {
+            // Ranges only descend, so the packet is in the gap above this one.
+            return false;
+        }
+        lowest = next_lowest;
     }
-    acked
+    false
 }
 
 fn parse_scid(datagram: &[u8], packet_end: usize) -> Option<Vec<u8>> {
@@ -2410,6 +2484,100 @@ mod tests {
         let mut bytes = BytesMut::new();
         frame.encode(&mut bytes).expect("encode");
         bytes.freeze()
+    }
+
+    #[test]
+    fn ack_ranges_describe_exactly_the_received_packets() {
+        let mut core = core();
+        for pn in [0, 1, 3, 4, 7] {
+            core.record(Level::OneRtt, pn, true);
+        }
+        let Frame::Ack(ack) = core.ack_frame(Level::OneRtt) else {
+            panic!("ack_frame must produce an ACK");
+        };
+        assert_eq!(ack.largest_acknowledged, 7);
+        assert_eq!(ack.first_ack_range, 0);
+        assert_eq!(
+            ack.ranges,
+            vec![AckRange { gap: 1, range: 1 }, AckRange { gap: 0, range: 1 },]
+        );
+        for (packet, expected) in [
+            (0, true),
+            (1, true),
+            (2, false),
+            (3, true),
+            (4, true),
+            (5, false),
+            (6, false),
+            (7, true),
+            (8, false),
+        ] {
+            assert_eq!(
+                ack_covers(&ack, packet),
+                expected,
+                "packet {packet} coverage"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malicious_ack_range_is_walked_without_expansion() {
+        let ack = AckFrame {
+            largest_acknowledged: u64::MAX,
+            ack_delay: 0,
+            first_ack_range: u64::MAX,
+            ranges: vec![AckRange {
+                gap: u64::MAX,
+                range: u64::MAX,
+            }],
+            ecn: None,
+        };
+        // The frame claims every packet number. The point is that this returns
+        // promptly instead of expanding the range into a set.
+        assert!(ack_covers(&ack, 0));
+        assert!(ack_covers(&ack, u64::MAX));
+    }
+
+    #[test]
+    fn received_packet_numbers_are_bounded() {
+        let mut core = core();
+        for pn in 0..(MAX_RECEIVED_PACKETS as u64 + 10) {
+            core.record(Level::OneRtt, pn, true);
+        }
+        assert_eq!(
+            core.spaces[Level::OneRtt as usize].received.len(),
+            MAX_RECEIVED_PACKETS
+        );
+        assert_eq!(core.largest(Level::OneRtt), MAX_RECEIVED_PACKETS as u64 + 9);
+    }
+
+    #[test]
+    fn out_of_order_crypto_is_bounded() {
+        let mut chunks = core();
+        // Leave a gap at offset zero so nothing is fed to TLS and every chunk
+        // stays in the reassembly map.
+        for chunk in 0..=MAX_CRYPTO_CHUNKS {
+            let offset = 1 + (chunk * 8) as u64;
+            let result = chunks.insert_crypto(Level::Initial, offset, &[0; 8]);
+            if chunk == MAX_CRYPTO_CHUNKS {
+                assert!(
+                    matches!(result, Err(QuicError::Protocol(_))),
+                    "the chunk bound must refuse the next distinct offset"
+                );
+            } else {
+                result.expect("within the chunk bound");
+            }
+        }
+
+        let mut bytes = core();
+        let chunk = vec![0u8; MAX_CRYPTO_BUFFER / 2 + 1];
+        bytes
+            .insert_crypto(Level::Initial, 1, &chunk)
+            .expect("first chunk is within the byte bound");
+        assert!(matches!(
+            bytes.insert_crypto(Level::Initial, 1 + chunk.len() as u64, &chunk),
+            Err(QuicError::Protocol(_))
+        ));
     }
 
     #[test]

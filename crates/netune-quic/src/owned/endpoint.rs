@@ -50,6 +50,12 @@ pub struct ServerConfigOwned {
     pub tls: Arc<ServerConfig>,
     pub transport: TransportParameters,
     /// Require a Retry token before allocating connection state.
+    ///
+    /// This is the endpoint's address-validation mechanism: the token proves the
+    /// client owns the source address before any handshake state is allocated,
+    /// which is also what bounds a server's response amplification. Setting it to
+    /// `false` on an internet-facing listener removes that bound; such a caller
+    /// must supply its own address validation or upstream amplification limit.
     pub retry: bool,
     pub congestion: crate::profile::CongestionAlgorithm,
     /// Accept 0-RTT tickets using a stateful, single-use resumption cache.

@@ -77,6 +77,9 @@ cargo test --workspace
 # H3/QPACK differential interop against the dev-only h3 oracle
 cargo test -p netune-http3 --test h3_interop
 
+# WebTransport admission, Origin, session-ID and control adversarial suite
+cargo test -p netune-webtransport --test security
+
 # Owned QUIC engine (ADR-0028): wire, packet protection, handshake and streams
 cargo test -p netune-quic
 

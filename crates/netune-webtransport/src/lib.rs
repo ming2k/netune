@@ -13,7 +13,10 @@ use netune_http3::{Capsule, CapsuleError};
 
 /// The pinned WebTransport over HTTP/3 draft version.
 pub mod session;
-pub use session::{WebTransportBidi, WebTransportClient, WebTransportServer, WebTransportSession};
+pub use session::{
+    OriginPolicy, WebTransportBidi, WebTransportClient, WebTransportOrigin, WebTransportServer,
+    WebTransportSession,
+};
 
 pub const DRAFT_VERSION: &str = "draft-ietf-webtrans-http3-17";
 
@@ -362,6 +365,10 @@ pub enum WebTransportError {
     InvalidSessionId(u64),
     #[error("invalid WebTransport stream header {0:#x}")]
     InvalidStreamHeader(u64),
+    #[error("invalid WebTransport request: {0}")]
+    InvalidRequest(String),
+    #[error("WebTransport origin rejected: {0}")]
+    OriginRejected(String),
     #[error("bad WebTransport SETTINGS: {0}")]
     Settings(String),
     #[error("WebTransport capsule error: {0}")]

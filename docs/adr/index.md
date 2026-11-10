@@ -42,6 +42,7 @@ Binding decisions for this repository. `Scope` tags identify the subsystems a re
 | [0036](0036-dplpmtud-probe-state-machine.md) | DPLPMTUD Is a Bounded Probe State Machine | accepted | transport/quic, protocol/rfc9000, recovery/path-mtu, observability | Probe state machine with validated path MTU, ACK/loss feedback and black-hole response; no application frames in probes | 2026-11-10 |
 | [0037](0037-webtransport-draft17-completion-gate.md) | WebTransport Draft-17 Completion Gate | accepted | protocol/webtransport, protocol/quic, api/webtransport, product/web | Explicit gates for reliable reset, teardown, flow control, browser interop and security before production claim | 2026-11-10 |
 | [0038](0038-webtransport-external-interoperability.md) | WebTransport External Interoperability and Role-Correct Framing | accepted | protocol/webtransport, protocol/quic, protocol/http3, api/webtransport, product/web | Independent Go peer completes bidi, uni and datagram exchange; role-correct server CID and extended CONNECT framing; dual draft-16/draft-17 SETTINGS negotiation (`INV-QUIC-25`, `INV-H3-15`, `INV-WT-07`) | 2026-11-10 |
+| [0039](0039-webtransport-request-admission.md) | WebTransport Request Admission and Adversarial Control | accepted | protocol/webtransport, protocol/http3, protocol/quic, api/webtransport, security/ingress | Server-side CONNECT/Origin admission with same-origin default, client URI/status validation, validated H3 extension session IDs, terminal close/drain/flow-control state (`INV-WT-08..10`) | 2026-11-10 |
 
 
 

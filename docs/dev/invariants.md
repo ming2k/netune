@@ -56,6 +56,9 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-WT-01..04]` | WebTransport session IDs are client-initiated bidi stream IDs; the draft is isolated in `netune-webtransport`; CONNECT never uses 0-RTT; WT stream/data limits are cumulative and enforced. | ADR-0033 |
 | `[INV-WT-05..06]` | Reliable reset delivers exactly its prefix and requires `reset_stream_at`; a closed session refuses new streams. | ADR-0037 |
 | `[INV-WT-07]` | A draft-17 endpoint advertises both WebTransport SETTINGS codepoints and selects the peer's highest common draft; the server ignores the client's server-only enable setting. | ADR-0038 |
+| `[INV-WT-08]` | WebTransport admission requires CONNECT, `https`, an authority, an absolute path and an Origin accepted by the configured policy; rejection creates no session. | ADR-0039 |
+| `[INV-WT-09]` | Every WT extension-stream session ID is validated as a client bidi stream ID before routing; an invalid ID closes H3 with `H3_ID_ERROR`. | ADR-0039 |
+| `[INV-WT-10]` | Close, drain and flow-control violations are terminal: no new streams, datagrams or control after close; drain refuses new local streams; regressed credit closes the session. | ADR-0039 |
 | `[INV-SOCKET-01]` | A `SocketConfig` option is either applied or reported; no pre-connect option may be silently skipped by the fast path (`needs_manual_socket`). | ADR-0006, ADR-0010 |
 | `[INV-TRANSPORT-00..04]` | Replay safety: a pooled socket that drops before any response-head byte is replaced; after that point it is never retried. Idle bound, distinct `Incomplete`. | ADR-0001 (`00`), ADR-0005 (`01..04`) |
 | `[INV-EGRESS-01..03]` | Confinement is checked before connect; private, loopback, link-local and metadata ranges are refused. | ADR-0002 |

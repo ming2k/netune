@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.20] - 2026-11-10
+
+### Security
+
+- **WebTransport request admission (ADR-0039).** `WebTransportServer::accept`
+  now requires CONNECT, `:scheme = https`, an authority and an absolute path,
+  and validates the optional `Origin` against a new `OriginPolicy`. The safe
+  default is same-origin; `Any` and normalized allowlists are explicit choices.
+  Malformed requests receive 400 and disallowed origins 403.
+- **Client admission checks.** `WebTransportClient::connect_session` validates
+  the URI before sending and refuses a non-2xx extended CONNECT response instead
+  of constructing a session from a rejected request.
+- **Session-ID validation.** Incoming WebTransport unidirectional and
+  bidirectional extension streams are validated as client-initiated bidi
+  stream IDs before routing; an invalid ID closes H3 with `H3_ID_ERROR`.
+- **Terminal control state.** A peer close refuses further control and new
+  streams; drain refuses new local streams; a regressed `WT_MAX_DATA` or
+  `WT_MAX_STREAMS` capsule marks the session closed instead of being replayed.
+
+### Added
+
+- `tests/security.rs`: spoofed scheme/missing authority/Origin, allowlisted
+  cross-origin, duplicate Origin, invalid session IDs, flow-control replay,
+  close and drain adversarial tests.
+- `H3Client`/`H3ServerConnection::enable_stream_extension_with_validator` is
+  the protocol-neutral H3 seam that validates extension stream IDs before
+  delivery.
+
 ## [0.0.19] - 2026-11-10
 
 ### Added

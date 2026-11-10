@@ -6,6 +6,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use http::header::ORIGIN;
+use http::uri::{Authority, Scheme};
 use netune_http3::{
     Capsule, ExtendedConnectProtocol, H3Client, H3ExtensionStream, H3ResponseStream,
     H3ServerConnection, H3ServerStream, H3SettingsProfile,
@@ -39,6 +41,7 @@ struct FlowState {
     recv_max_bidi: u64,
     accepted_uni: u64,
     accepted_bidi: u64,
+    draining: bool,
     closed: bool,
 }
 
@@ -122,6 +125,7 @@ impl WebTransportRecvStream {
         if let Some(data) = &data {
             let mut flow = self.flow.lock().unwrap_or_else(|e| e.into_inner());
             if flow.recv_data + data.len() as u64 > flow.recv_max_data {
+                flow.closed = true;
                 return Err(WebTransportError::FlowControl(
                     "WT_MAX_DATA exceeded".into(),
                 ));
@@ -133,6 +137,92 @@ impl WebTransportRecvStream {
     pub fn stop(&mut self, code: u64) {
         self.inner.stop(code);
     }
+}
+
+/// A normalized `https` origin used by [`OriginPolicy`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebTransportOrigin {
+    host: String,
+    port: Option<u16>,
+}
+
+impl WebTransportOrigin {
+    /// Parse a serialized origin such as `https://app.example:8443`.
+    ///
+    /// The value must be an `https` origin with no path, query or fragment.
+    /// A userinfo component is rejected.
+    pub fn parse(value: &str) -> Result<Self, WebTransportError> {
+        if value.contains('#') {
+            return Err(WebTransportError::InvalidRequest(
+                "Origin must not contain a fragment".to_string(),
+            ));
+        }
+        let uri: http::Uri = value
+            .parse()
+            .map_err(|_| WebTransportError::InvalidRequest("invalid Origin value".to_string()))?;
+        if uri.scheme() != Some(&Scheme::HTTPS) {
+            return Err(WebTransportError::InvalidRequest(
+                "Origin must use https".to_string(),
+            ));
+        }
+        if let Some(path) = uri.path_and_query()
+            && (path.path() != "/" || path.query().is_some())
+        {
+            return Err(WebTransportError::InvalidRequest(
+                "Origin must not contain a path, query or fragment".to_string(),
+            ));
+        }
+        let authority = uri
+            .authority()
+            .ok_or_else(|| WebTransportError::InvalidRequest("Origin has no host".to_string()))?;
+        Self::from_authority(authority)
+    }
+
+    fn from_authority(authority: &Authority) -> Result<Self, WebTransportError> {
+        if authority.as_str().contains('@') {
+            return Err(WebTransportError::InvalidRequest(
+                "Origin authority must not contain userinfo".to_string(),
+            ));
+        }
+        let host = authority.host().to_ascii_lowercase();
+        if host.is_empty() {
+            return Err(WebTransportError::InvalidRequest(
+                "Origin has no host".to_string(),
+            ));
+        }
+        Ok(Self {
+            host,
+            port: authority.port_u16().filter(|port| *port != 443),
+        })
+    }
+
+    fn matches_authority(&self, authority: &Authority) -> bool {
+        let Ok(origin) = Self::from_authority(authority) else {
+            return false;
+        };
+        self == &origin
+    }
+}
+
+impl std::fmt::Display for WebTransportOrigin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.port {
+            Some(port) => write!(formatter, "https://{}:{port}", self.host),
+            None => write!(formatter, "https://{}", self.host),
+        }
+    }
+}
+
+/// Policy for the optional `Origin` request header.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OriginPolicy {
+    /// Accept only an absent Origin or the origin formed by `:scheme`/`:authority`.
+    #[default]
+    SameOrigin,
+    /// Accept any syntactically valid `https` origin.
+    Any,
+    /// Accept only the listed origins; an absent Origin is still accepted.
+    Allowlist(Vec<WebTransportOrigin>),
 }
 
 /// A WebTransport client endpoint over one H3 connection.
@@ -193,7 +283,11 @@ impl WebTransportClient {
             ));
         }
         let peer = peer_settings(&h3)?;
-        let events = h3.enable_stream_extension(vec![WT_UNI_STREAM_TYPE], WT_STREAM_SIGNAL);
+        let events = h3.enable_stream_extension_with_validator(
+            vec![WT_UNI_STREAM_TYPE],
+            WT_STREAM_SIGNAL,
+            |session_id| SessionId::new(session_id).is_ok(),
+        );
         let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let router = spawn_router(events, routes.clone(), pending.clone());
@@ -211,11 +305,18 @@ impl WebTransportClient {
         &mut self,
         uri: &str,
     ) -> Result<WebTransportSession, WebTransportError> {
+        validate_client_session_uri(uri)?;
         let response = self
             .h3
             .connect_extended("webtransport-h3", uri)
             .await
             .map_err(http3_error)?;
+        if !response.head().status().is_success() {
+            return Err(WebTransportError::Http(format!(
+                "server rejected WebTransport session with {}",
+                response.head().status()
+            )));
+        }
         let id = SessionId::new(response.id())?;
         let events = self.register_session(id)?;
         Ok(WebTransportSession {
@@ -263,6 +364,7 @@ pub struct WebTransportServer {
     h3: H3ServerConnection,
     settings: WebTransportSettings,
     peer: WebTransportSettings,
+    origin_policy: OriginPolicy,
     routes: Routes,
     pending: Pending,
     router: tokio::task::JoinHandle<()>,
@@ -291,7 +393,11 @@ impl WebTransportServer {
         // draft-ietf-webtrans-http3-17 Section 3.1: SETTINGS_WT_ENABLED has no
         // meaning when sent by a client; a server MUST ignore it.
         let peer = peer_settings(&h3)?;
-        let events = h3.enable_stream_extension(vec![WT_UNI_STREAM_TYPE], WT_STREAM_SIGNAL);
+        let events = h3.enable_stream_extension_with_validator(
+            vec![WT_UNI_STREAM_TYPE],
+            WT_STREAM_SIGNAL,
+            |session_id| SessionId::new(session_id).is_ok(),
+        );
         let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let router = spawn_router(events, routes.clone(), pending.clone());
@@ -299,10 +405,18 @@ impl WebTransportServer {
             h3,
             settings,
             peer,
+            origin_policy: OriginPolicy::default(),
             routes,
             pending,
             router,
         })
+    }
+
+    /// Set the policy used to validate the optional `Origin` header.
+    #[must_use]
+    pub fn with_origin_policy(mut self, policy: OriginPolicy) -> Self {
+        self.origin_policy = policy;
+        self
     }
 
     /// Send an H3 GOAWAY. Existing sessions may finish; new sessions are
@@ -323,10 +437,24 @@ impl WebTransportServer {
                 .map(|p| p.0.as_str());
             if protocol != Some("webtransport-h3") {
                 let response = http::Response::builder()
-                    .status(405)
+                    .status(http::StatusCode::METHOD_NOT_ALLOWED)
                     .body(())
                     .map_err(|error| WebTransportError::Http(error.to_string()))?;
                 let _ = stream.send_response(response).await;
+                let _ = stream.finish().await;
+                continue;
+            }
+            if let Err(error) = validate_session_request(&request, &self.origin_policy) {
+                let status = match error {
+                    WebTransportError::OriginRejected(_) => http::StatusCode::FORBIDDEN,
+                    _ => http::StatusCode::BAD_REQUEST,
+                };
+                let response = http::Response::builder()
+                    .status(status)
+                    .body(())
+                    .map_err(|error| WebTransportError::Http(error.to_string()))?;
+                let _ = stream.send_response(response).await;
+                let _ = stream.finish().await;
                 continue;
             }
             let response = http::Response::builder()
@@ -369,6 +497,8 @@ impl Drop for WebTransportServer {
     }
 }
 
+const MAX_PENDING_EXTENSION_STREAMS: usize = 64;
+
 fn spawn_router(
     mut events: tokio::sync::mpsc::UnboundedReceiver<H3ExtensionStream>,
     routes: Routes,
@@ -389,9 +519,12 @@ fn spawn_router(
                 let _ = sender.send(event);
             } else {
                 let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
-                let queue = pending.entry(session_id).or_default();
-                if queue.len() < 32 {
-                    queue.push_back(event);
+                let total = pending.values().map(VecDeque::len).sum::<usize>();
+                if total < MAX_PENDING_EXTENSION_STREAMS {
+                    let queue = pending.entry(session_id).or_default();
+                    if queue.len() < 32 {
+                        queue.push_back(event);
+                    }
                 }
             }
         }
@@ -440,6 +573,11 @@ impl WebTransportSession {
             if flow.closed {
                 return Err(WebTransportError::SessionClosed("session closed".into()));
             }
+            if flow.draining {
+                return Err(WebTransportError::SessionClosed(
+                    "session is draining".into(),
+                ));
+            }
             if flow.opened_bidi >= flow.send_max_bidi {
                 return Err(WebTransportError::FlowControl(
                     "WT_MAX_STREAMS(bidi) exceeded".into(),
@@ -471,6 +609,11 @@ impl WebTransportSession {
             if flow.closed {
                 return Err(WebTransportError::SessionClosed("session closed".into()));
             }
+            if flow.draining {
+                return Err(WebTransportError::SessionClosed(
+                    "session is draining".into(),
+                ));
+            }
             if flow.opened_uni >= flow.send_max_uni {
                 return Err(WebTransportError::FlowControl(
                     "WT_MAX_STREAMS(uni) exceeded".into(),
@@ -491,6 +634,9 @@ impl WebTransportSession {
     }
 
     pub async fn accept_bidi(&mut self) -> Result<WebTransportBidi, WebTransportError> {
+        if self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed {
+            return Err(WebTransportError::SessionClosed("session closed".into()));
+        }
         loop {
             match self.next_event().await? {
                 H3ExtensionStream::Bidi {
@@ -501,6 +647,7 @@ impl WebTransportSession {
                     {
                         let mut flow = self.flow.lock().unwrap_or_else(|e| e.into_inner());
                         if flow.accepted_bidi >= flow.recv_max_bidi {
+                            flow.closed = true;
                             return Err(WebTransportError::FlowControl(
                                 "incoming WT_MAX_STREAMS(bidi) exceeded".into(),
                             ));
@@ -526,6 +673,9 @@ impl WebTransportSession {
     }
 
     pub async fn accept_uni(&mut self) -> Result<WebTransportRecvStream, WebTransportError> {
+        if self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed {
+            return Err(WebTransportError::SessionClosed("session closed".into()));
+        }
         loop {
             match self.next_event().await? {
                 H3ExtensionStream::Uni {
@@ -536,6 +686,7 @@ impl WebTransportSession {
                     {
                         let mut flow = self.flow.lock().unwrap_or_else(|e| e.into_inner());
                         if flow.accepted_uni >= flow.recv_max_uni {
+                            flow.closed = true;
                             return Err(WebTransportError::FlowControl(
                                 "incoming WT_MAX_STREAMS(uni) exceeded".into(),
                             ));
@@ -563,6 +714,9 @@ impl WebTransportSession {
     }
 
     pub async fn send_datagram(&mut self, data: &[u8]) -> Result<(), WebTransportError> {
+        if self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed {
+            return Err(WebTransportError::SessionClosed("session closed".into()));
+        }
         match &mut self.transport {
             SessionTransport::Client(stream) => {
                 stream.send_datagram(data).await.map_err(http3_error)
@@ -593,6 +747,9 @@ impl WebTransportSession {
     }
 
     pub async fn send_capsule(&mut self, capsule: &Capsule) -> Result<(), WebTransportError> {
+        if self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed {
+            return Err(WebTransportError::SessionClosed("session closed".into()));
+        }
         match &mut self.transport {
             SessionTransport::Client(stream) => {
                 stream.send_capsule(capsule).await.map_err(http3_error)
@@ -604,6 +761,9 @@ impl WebTransportSession {
     }
 
     pub async fn next_control(&mut self) -> Result<Option<ControlCapsule>, WebTransportError> {
+        if self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed {
+            return Err(WebTransportError::SessionClosed("session closed".into()));
+        }
         let capsule = match &mut self.transport {
             SessionTransport::Client(stream) => stream.next_capsule().await.map_err(http3_error)?,
             SessionTransport::Server(stream) => stream.next_capsule().await.map_err(http3_error)?,
@@ -611,12 +771,19 @@ impl WebTransportSession {
         let Some(capsule) = capsule else {
             return Ok(None);
         };
-        let parsed = ControlCapsule::from_capsule(&capsule)?;
+        let parsed = match ControlCapsule::from_capsule(&capsule) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+                return Err(error);
+            }
+        };
         if let Some(control) = &parsed {
             let mut flow = self.flow.lock().unwrap_or_else(|e| e.into_inner());
             match control {
                 ControlCapsule::MaxData(maximum) => {
                     if *maximum <= flow.send_max_data {
+                        flow.closed = true;
                         return Err(WebTransportError::FlowControl(
                             "WT_MAX_DATA did not increase".into(),
                         ));
@@ -628,6 +795,7 @@ impl WebTransportSession {
                     maximum,
                 } => {
                     if *maximum <= flow.send_max_bidi {
+                        flow.closed = true;
                         return Err(WebTransportError::FlowControl(
                             "WT_MAX_STREAMS(bidi) did not increase".into(),
                         ));
@@ -639,13 +807,18 @@ impl WebTransportSession {
                     maximum,
                 } => {
                     if *maximum <= flow.send_max_uni {
+                        flow.closed = true;
                         return Err(WebTransportError::FlowControl(
                             "WT_MAX_STREAMS(uni) did not increase".into(),
                         ));
                     }
                     flow.send_max_uni = *maximum;
                 }
-                ControlCapsule::Close { .. } => flow.closed = true,
+                ControlCapsule::Drain => flow.draining = true,
+                ControlCapsule::Close { .. } => {
+                    flow.closed = true;
+                    flow.draining = false;
+                }
                 _ => {}
             }
         }
@@ -653,21 +826,97 @@ impl WebTransportSession {
     }
 
     pub async fn close(&mut self, code: u32, message: &str) -> Result<(), WebTransportError> {
-        self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
         self.send_control(&ControlCapsule::Close {
             code,
             message: message.to_string(),
         })
         .await?;
         match &mut self.transport {
-            SessionTransport::Client(stream) => stream.finish().await.map_err(http3_error),
-            SessionTransport::Server(stream) => stream.finish().await.map_err(http3_error),
+            SessionTransport::Client(stream) => stream.finish().await.map_err(http3_error)?,
+            SessionTransport::Server(stream) => stream.finish().await.map_err(http3_error)?,
         }
+        let mut flow = self.flow.lock().unwrap_or_else(|e| e.into_inner());
+        flow.closed = true;
+        flow.draining = false;
+        Ok(())
     }
 
     pub async fn drain(&mut self) -> Result<(), WebTransportError> {
-        self.send_control(&ControlCapsule::Drain).await
+        self.send_control(&ControlCapsule::Drain).await?;
+        self.flow.lock().unwrap_or_else(|e| e.into_inner()).draining = true;
+        Ok(())
     }
+}
+
+fn validate_session_request(
+    request: &http::Request<()>,
+    policy: &OriginPolicy,
+) -> Result<(), WebTransportError> {
+    if request.method() != http::Method::CONNECT {
+        return Err(WebTransportError::InvalidRequest(
+            "WebTransport requires CONNECT".to_string(),
+        ));
+    }
+    let uri = request.uri();
+    if uri.scheme() != Some(&Scheme::HTTPS) {
+        return Err(WebTransportError::InvalidRequest(
+            "WebTransport requires :scheme = https".to_string(),
+        ));
+    }
+    let authority = uri.authority().ok_or_else(|| {
+        WebTransportError::InvalidRequest("WebTransport requires :authority".to_string())
+    })?;
+    let path = uri.path_and_query().map(|path| path.path()).unwrap_or("");
+    if path.is_empty() || !path.starts_with('/') {
+        return Err(WebTransportError::InvalidRequest(
+            "WebTransport requires an absolute :path".to_string(),
+        ));
+    }
+
+    let mut origins = request.headers().get_all(ORIGIN).iter();
+    let Some(value) = origins.next() else {
+        return Ok(());
+    };
+    if origins.next().is_some() {
+        return Err(WebTransportError::InvalidRequest(
+            "multiple Origin headers".to_string(),
+        ));
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| WebTransportError::InvalidRequest("Origin is not ASCII".to_string()))?;
+    let origin = WebTransportOrigin::parse(value)?;
+    let allowed = match policy {
+        OriginPolicy::SameOrigin => origin.matches_authority(authority),
+        OriginPolicy::Any => true,
+        OriginPolicy::Allowlist(origins) => origins.contains(&origin),
+    };
+    if !allowed {
+        return Err(WebTransportError::OriginRejected(origin.to_string()));
+    }
+    Ok(())
+}
+
+fn validate_client_session_uri(uri: &str) -> Result<(), WebTransportError> {
+    let uri: http::Uri = uri
+        .parse()
+        .map_err(|_| WebTransportError::InvalidRequest("invalid WebTransport URI".to_string()))?;
+    if uri.scheme() != Some(&Scheme::HTTPS) {
+        return Err(WebTransportError::InvalidRequest(
+            "WebTransport requires https".to_string(),
+        ));
+    }
+    let authority = uri.authority().ok_or_else(|| {
+        WebTransportError::InvalidRequest("WebTransport URI requires an authority".to_string())
+    })?;
+    WebTransportOrigin::from_authority(authority)?;
+    let path = uri.path_and_query().map(|path| path.path()).unwrap_or("");
+    if path.is_empty() || !path.starts_with('/') {
+        return Err(WebTransportError::InvalidRequest(
+            "WebTransport URI requires an absolute path".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 trait PeerSettingsSource {
@@ -716,6 +965,7 @@ fn initial_flow(local: WebTransportSettings, peer: WebTransportSettings) -> Arc<
         recv_max_bidi: local.initial_max_streams_bidi,
         accepted_uni: 0,
         accepted_bidi: 0,
+        draining: false,
         closed: false,
     }))
 }
@@ -734,4 +984,32 @@ fn http3_error(error: netune_http3::H3Error) -> WebTransportError {
 
 fn quic_error(error: netune_quic::QuicError) -> WebTransportError {
     WebTransportError::Quic(error.to_string())
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn request_validation_rejects_requests_without_https_authority() {
+        let no_authority = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("/session")
+            .body(())
+            .expect("request");
+        assert!(
+            validate_session_request(&no_authority, &OriginPolicy::SameOrigin).is_err(),
+            "a WebTransport CONNECT without :authority must fail"
+        );
+    }
+
+    #[test]
+    fn origin_parsing_normalizes_default_https_port_and_rejects_paths() {
+        let origin = WebTransportOrigin::parse("https://APP.example:443").expect("origin");
+        assert_eq!(origin.to_string(), "https://app.example");
+        assert!(WebTransportOrigin::parse("https://app.example/path").is_err());
+        assert!(WebTransportOrigin::parse("https://app.example/#fragment").is_err());
+        assert!(WebTransportOrigin::parse("http://app.example").is_err());
+        assert!(WebTransportOrigin::parse("null").is_err());
+    }
 }

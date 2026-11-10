@@ -63,6 +63,7 @@ pub struct Shared {
 struct ExtensionConfig {
     uni_types: Vec<u64>,
     bidi_signal: u64,
+    validator: Arc<dyn Fn(u64) -> bool + Send + Sync>,
     tx: mpsc::UnboundedSender<H3ExtensionStream>,
 }
 
@@ -391,13 +392,35 @@ impl Shared {
         uni_types: Vec<u64>,
         bidi_signal: u64,
     ) -> mpsc::UnboundedReceiver<H3ExtensionStream> {
+        self.enable_extension_with_validator(uni_types, bidi_signal, |_| true)
+    }
+
+    /// Install an extension router whose stream identifier is validated before
+    /// the stream is delivered. An invalid identifier is an H3_ID_ERROR and
+    /// closes the connection; the protocol-specific meaning stays with the
+    /// caller.
+    pub fn enable_extension_with_validator(
+        &self,
+        uni_types: Vec<u64>,
+        bidi_signal: u64,
+        validator: impl Fn(u64) -> bool + Send + Sync + 'static,
+    ) -> mpsc::UnboundedReceiver<H3ExtensionStream> {
         let (tx, rx) = mpsc::unbounded_channel();
         *self.extension.lock().unwrap_or_else(|e| e.into_inner()) = Some(ExtensionConfig {
             uni_types,
             bidi_signal,
+            validator: Arc::new(validator),
             tx,
         });
         rx
+    }
+
+    pub(crate) fn extension_accepts(&self, identifier: u64) -> bool {
+        self.extension
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|extension| (extension.validator)(identifier))
     }
 
     pub(crate) fn extension_uni(

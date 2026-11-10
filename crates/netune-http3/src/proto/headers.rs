@@ -582,6 +582,20 @@ mod tests {
     }
 
     #[test]
+    fn extended_connect_without_a_path_is_rejected() {
+        let fields = vec![
+            HeaderField::new(b":method".as_slice(), b"CONNECT".as_slice()),
+            HeaderField::new(b":scheme".as_slice(), b"https".as_slice()),
+            HeaderField::new(b":authority".as_slice(), b"localhost".as_slice()),
+            HeaderField::new(b":protocol".as_slice(), b"webtransport-h3".as_slice()),
+        ];
+        assert!(matches!(
+            decode_request(&fields),
+            Err(HeaderError::MissingPseudo(":path"))
+        ));
+    }
+
+    #[test]
     fn trailers_reject_pseudo_headers() {
         let fields = vec![HeaderField::new(b":status".as_slice(), b"200".as_slice())];
         assert!(matches!(

@@ -137,6 +137,13 @@ pub(crate) async fn drive(
                                         Ok(Some(session_id)) => session_id,
                                         Ok(None) | Err(_) => break,
                                     };
+                                    if !shared.extension_accepts(session_id) {
+                                        shared.set_error(
+                                            error_code::H3_ID_ERROR,
+                                            "invalid extension stream identifier",
+                                        );
+                                        break;
+                                    }
                                     let Some(sender) = shared.extension_bidi_sender() else {
                                         break;
                                     };
@@ -207,6 +214,13 @@ async fn handle_uni_stream(shared: Arc<Shared>, mut recv: RecvStream) {
                 return;
             }
         };
+        if !shared.extension_accepts(session_id) {
+            shared.set_error(
+                error_code::H3_ID_ERROR,
+                "invalid extension stream identifier",
+            );
+            return;
+        }
         let _ = sender.send(H3ExtensionStream::Uni {
             stream_type,
             session_id,

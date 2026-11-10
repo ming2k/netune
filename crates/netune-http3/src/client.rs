@@ -655,6 +655,20 @@ impl H3Client {
             .enable_extension(uni_types, bidi_signal)
     }
 
+    /// Install an extension router with a protocol-supplied identifier
+    /// validator. Invalid identifiers close the H3 connection with
+    /// `H3_ID_ERROR` instead of being queued for an application session.
+    pub fn enable_stream_extension_with_validator(
+        &self,
+        uni_types: Vec<u64>,
+        bidi_signal: u64,
+        validator: impl Fn(u64) -> bool + Send + Sync + 'static,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::H3ExtensionStream> {
+        self.connection
+            .shared()
+            .enable_extension_with_validator(uni_types, bidi_signal, validator)
+    }
+
     /// Wait until the peer SETTINGS frame has been observed.
     pub async fn wait_settings(&self) {
         self.connection.shared().wait_settings().await;

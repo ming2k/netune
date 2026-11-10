@@ -10,6 +10,10 @@
 //! Both handshakes are bounded and typed: a proxy that answers garbage, refuses
 //! the tunnel, or demands credentials we do not have produces a [`NetError`],
 //! never a silently truncated stream.
+//!
+//! The proxy hop itself is plaintext. `https://` proxy URLs are therefore
+//! refused rather than silently downgraded: terminate TLS to the proxy outside
+//! this connector if the hop must be encrypted.
 
 use base64::Engine as _;
 use netune_http1::{Http1Reader, Limits};
@@ -22,7 +26,9 @@ use crate::error::NetError;
 /// Which proxy to use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Proxy {
-    /// HTTP `CONNECT` tunnel (`http://user:pass@host:port`).
+    /// HTTP `CONNECT` tunnel over a plaintext hop
+    /// (`http://user:pass@host:port`). An `https://` URL is refused, not
+    /// downgraded.
     Http {
         authority: String,
         credentials: Option<(String, String)>,
@@ -54,10 +60,19 @@ impl Proxy {
             None => (userinfo.to_string(), String::new()),
         });
         match scheme {
-            "http" | "https" => Ok(Self::Http {
+            "http" => Ok(Self::Http {
                 authority,
                 credentials,
             }),
+            // Accepting `https://` here would silently dial the proxy in
+            // plaintext and put `Proxy-Authorization` on the wire unencrypted;
+            // TLS to the proxy is not implemented, so refuse rather than
+            // downgrade.
+            "https" => Err(NetError::Connect(
+                "https proxy URLs are not supported: the proxy hop is plaintext HTTP CONNECT; \
+                 use http:// or terminate TLS outside this connector"
+                    .into(),
+            )),
             "socks5" | "socks5h" => Ok(Self::Socks5 {
                 authority,
                 credentials,
@@ -139,6 +154,11 @@ async fn http_connect(
     authority: &str,
     credentials: Option<&(String, String)>,
 ) -> Result<(), NetError> {
+    // Direct connector callers bypass `Client::plan`, so validate here too: the
+    // authority is interpolated into a request line and a `Host` header.
+    netune_http1::validate_host_field(authority.as_bytes()).map_err(|error| {
+        NetError::Connect(format!("proxy CONNECT authority is invalid: {error}"))
+    })?;
     let mut request = format!(
         "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: keep-alive\r\n"
     );
@@ -339,6 +359,29 @@ mod tests {
     fn an_unknown_scheme_is_refused() {
         let error = Proxy::parse("ftp://proxy.example:21").expect_err("unsupported");
         assert_eq!(error.class(), "connect");
+    }
+
+    #[tokio::test]
+    async fn a_connect_authority_with_control_bytes_is_refused_before_writing() {
+        let (client, _proxy) = tokio::io::duplex(64);
+        let mut stream: Box<dyn Transport> = Box::new(client);
+        let error = http_connect(&mut stream, "evil.example\r\nX-Injected: 1", None)
+            .await
+            .expect_err("a control byte must not reach the proxy request line");
+        assert!(
+            error.to_string().contains("authority is invalid"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_https_proxy_is_refused_instead_of_downgraded_to_plaintext() {
+        let error = Proxy::parse("https://proxy.example:8443").expect_err("unsupported");
+        assert_eq!(error.class(), "connect");
+        assert!(
+            error.to_string().contains("plaintext"),
+            "the refusal must explain why: {error}"
+        );
     }
 
     #[test]

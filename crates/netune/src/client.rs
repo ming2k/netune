@@ -361,6 +361,18 @@ impl<C: Connector> Client<C> {
     /// per-request wire profiles (H1 header order, H2 pseudo-header order).
     /// Unknown profile names fail here, not after a handshake.
     pub fn plan(&self, target: &Target) -> Result<ConnectionPlan, NetError> {
+        // The authority is written into a `Host` header (HTTP/1.1) and a
+        // `:authority` field (HTTP/2), and a proxy CONNECT writes it into a
+        // request line. Validate it here, at the one choke point every request
+        // and every redirect hop passes through, so no target-construction path
+        // can smuggle a control byte onto the wire.
+        netune_http1::validate_host_field(target.authority.as_bytes()).map_err(|error| {
+            NetError::Connect(format!(
+                "invalid target authority {:?}: {error}",
+                target.authority
+            ))
+        })?;
+
         let h1_id = target
             .h1_profile
             .as_ref()
@@ -1771,6 +1783,19 @@ mod identity_tests {
                 .h2_profile
                 .as_deref(),
             Some("safari-18")
+        );
+    }
+
+    #[test]
+    fn a_target_authority_with_control_bytes_is_refused_while_planning() {
+        let client = keyed_client();
+        let target = Target::plain("evil.example\r\nX-Injected: 1:80");
+        let error = client
+            .plan(&target)
+            .expect_err("control bytes must not reach a request line or Host header");
+        assert!(
+            error.to_string().contains("invalid target authority"),
+            "{error}"
         );
     }
 

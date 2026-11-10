@@ -10,6 +10,10 @@ This guide demonstrates how to tunnel requests through HTTP `CONNECT` or SOCKS5 
 1. **HTTP CONNECT**: `http://host:port` or `http://user:password@host:port`
 2. **SOCKS5**: `socks5://host:port` or `socks5://user:password@host:port` (with remote hostname resolution)
 
+The hop to the proxy is plaintext in both cases. An `https://` proxy URL is
+refused rather than silently downgraded; if the proxy hop must be encrypted,
+terminate TLS outside this connector.
+
 ---
 
 ## Tunneling through an HTTP CONNECT Proxy
@@ -72,3 +76,12 @@ happen.
 
 Tunnels are established before TLS runs with the target, preserving the
 target's Server Name Indication (SNI) and certificate validation end-to-end.
+
+## Confinement and proxies
+
+`EgressConfinement` checks the address of the socket netune opens. With a proxy
+that address is the **proxy**, not the tunnel destination: an HTTP `CONNECT`
+proxy and SOCKS5 both resolve or connect to the target on their side. If the
+proxy can reach internal services, `StrictPublic` on the netune process does not
+prevent that pivot. Use a trusted proxy, or enforce the destination policy at
+the proxy and not only in the client.

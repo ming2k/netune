@@ -42,6 +42,10 @@ pub enum EgressConfinement {
     Unrestricted,
     /// Strict public egress: rejects loopback, RFC 1918 private, link-local,
     /// carrier-grade NAT, cloud metadata, and multicast addresses.
+    ///
+    /// The predicate covers the socket this process opens. A proxy that
+    /// resolves and connects to the destination on our behalf is outside it:
+    /// check the proxy's own reachability separately when that matters.
     StrictPublic,
 }
 

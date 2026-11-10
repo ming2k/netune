@@ -69,11 +69,13 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-SERVER-17]` | A protocol a build cannot speak is refused, not absorbed: the default `Protocols` is what the feature set can serve, an explicit request for an absent protocol fails at bind time, and neither protocol is served by a listener that does not offer it. | ADR-0012 |
 | `[INV-SERVER-14..16]` | A request is grammatical before it is routed (target form, `Host` grammar, CRLF strictness), a body bound is cumulative and a declared length is checked before the body, and every refusal is a status line rather than a reset socket. | ADR-0014 |
 | `[INV-SERVER-22..24]` | H3 ingress is a separate QUIC listener; its exchanges use non-zero trace ids; body, handler, write and drain bounds come from the same `ServerConfig`. | ADR-0025 |
+| `[INV-SERVER-25]` | A failed peer handshake does not stop the H3 listener; it is published to current handshake-error observers. | ADR-0035 |
 | `[INV-QUIC-01..04]` | Crypto unification on `aws-lc-rs` (`ring` forbidden); pre-connect socket options and confinement precede QUIC initial packet; pure trace derivation; predictable datagram sizing failure. | ADR-0016 |
 | `[INV-QUIC-05..09]` | QUIC is owned by `netune-quic`: no quinn production path, delegated rustls/aws-lc-rs crypto, validate-before-mutate, timestamp-driven bounded recovery, and flow control before buffering. | ADR-0028 |
 | `[INV-QUIC-10..15]` | QUIC lifecycle hardening: Retry precedes server state, stateless reset tokens are keyed by CID, key update retains reordering keys, Version Negotiation never selects an unconfigured version, migration waits for path validation, and congestion policy is profile-selected. | ADR-0029 |
 | `[INV-QUIC-16..17]` | 0-RTT requires an authenticated cached transport-parameter set; server early-data tickets use stateful single-use storage. | ADR-0031 |
 | `[INV-QUIC-18..22]` | Consumer seams never widen the transport: confinement precedes a per-connection client socket factory (an ingress endpoint multiplexes many connections over its bound socket), a custom congestion controller is policy only, keep-alive is a post-handshake PING bounded by the idle timer, and peer certificates are exposed only after rustls verification. | ADR-0034 |
+| `[INV-QUIC-23]` | A failed incoming handshake is reported exactly once as `AcceptError::Handshake`, never as a connection and never as endpoint shutdown. | ADR-0035 |
 
 The authoritative wording of each invariant lives in its ADR. This table is an index, not a second source of truth; if the two disagree, the ADR wins and this table is corrected.
 

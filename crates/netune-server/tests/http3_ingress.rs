@@ -6,6 +6,7 @@
 //! HTTP/3 ingress over a real QUIC handshake, with a netune HTTP/3 client.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use netune_http3::{H3Client, H3SettingsProfile};
@@ -214,4 +215,95 @@ async fn h3_ingress_serves_streaming_request_and_records_trace() {
         log: traces[0].log.clone(),
     });
     assert_eq!(derived.len(), 3, "each request is its own exchange");
+}
+
+#[tokio::test]
+async fn a_failed_handshake_is_published_and_the_listener_keeps_serving() {
+    let server = H3Server::bind(
+        "127.0.0.1:0",
+        ServerConfig::for_tests(),
+        server_tls(),
+        H3SettingsProfile::default(),
+        Arc::new(Echo),
+    )
+    .await
+    .expect("bind h3 server");
+    let addr = server.local_addr();
+    let mut handshake_errors = server.subscribe_handshake_errors();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let serving = tokio::spawn(server.serve(async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let mut bad_profile = QuicProfile::chrome_quic();
+    bad_profile.alpn = vec![b"not-h3".to_vec()];
+    let bad = tokio::spawn(async move {
+        let connector = QuicConnector::new(bad_profile).with_tls_config(client_crypto());
+        let _ = connector.connect(addr, "localhost", None).await;
+    });
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), handshake_errors.recv())
+        .await
+        .expect("the failed handshake must be published")
+        .expect("handshake error channel");
+    assert!(!error.to_string().is_empty());
+    bad.abort();
+    let _ = bad.await;
+
+    let connector = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto());
+    let mut client = H3Client::connect(&connector, addr, "localhost", None)
+        .await
+        .expect("the listener still accepts");
+    let request = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/health")
+        .body(Bytes::new())
+        .expect("request");
+    let response = client.execute(request).await.expect("health request");
+    assert_eq!(response.body(), &Bytes::from_static(b"GET HTTP/3.0"));
+
+    drop(client);
+    let _ = shutdown_tx.send(());
+    serving.await.expect("serve task");
+}
+
+#[tokio::test]
+async fn h3_ingress_serves_over_a_custom_socket_stack() {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind udp");
+    let socket: Arc<dyn netune_quic::QuicUdpSocket> = Arc::new(socket);
+    let server = H3Server::bind_with_socket_and_options(
+        socket,
+        ServerConfig::for_tests(),
+        server_tls(),
+        H3SettingsProfile::default(),
+        Arc::new(Echo),
+        netune_quic::owned::ServerOptions {
+            keep_alive: Some(Duration::from_millis(100)),
+            congestion_factory: None,
+        },
+    )
+    .await
+    .expect("bind h3 server over custom socket");
+    let addr = server.local_addr();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let serving = tokio::spawn(server.serve(async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let connector = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto());
+    let mut client = H3Client::connect(&connector, addr, "localhost", None)
+        .await
+        .expect("h3 client over custom socket");
+    let request = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/health")
+        .body(Bytes::new())
+        .expect("request");
+    let response = client.execute(request).await.expect("health request");
+    assert_eq!(response.body(), &Bytes::from_static(b"GET HTTP/3.0"));
+
+    drop(client);
+    let _ = shutdown_tx.send(());
+    serving.await.expect("serve task");
 }

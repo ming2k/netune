@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.15] - 2026-11-10
+
+### Added
+
+- **Ingress socket and server-policy seams.** `H3Server::bind_with_socket`
+  accepts a caller-owned `QuicUdpSocket` stack, so inbound obfuscation/port-hop
+  layers use the same listener lifecycle, admission and drain path.
+  `ServerOptions` / `H3Server::bind_with_quic_options` expose server keep-alive
+  and congestion policy without putting callbacks into a wire profile.
+- **Scheduled fuzzing and soak.** `fuzz/` contains owned-parser targets for
+  QUIC frames/packets, H3/QPACK, HTTP/2 frames and HTTP/1 targets; the weekly
+  `Fuzz and soak` workflow also runs the ignored QUIC echo/keep-alive soak.
+
+### Changed
+
+- **Incoming handshake failures are observable.** `Endpoint::accept` now returns
+  `Result<Connection, AcceptError>`; `AcceptError::Handshake` is a peer failure
+  and `AcceptError::EndpointClosed` is listener shutdown. `H3Server` continues
+  after a failed peer and exposes errors through
+  `subscribe_handshake_errors()` (ADR-0035, `[INV-QUIC-23]`,
+  `[INV-SERVER-25]`).
+
 ## [0.0.14] - 2026-11-10
 
 ### Fixed

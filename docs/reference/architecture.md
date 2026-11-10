@@ -78,6 +78,7 @@ The architectural evolution is governed by the following decisions:
 | [ADR-0032](../adr/0032-h3-capsule-protocol.md) | Owned RFC 9297 Capsule Protocol | Capsules are framed inside HTTP/3 message bodies with bounded partial reads (`INV-H3-13..14`). |
 | [ADR-0033](../adr/0033-webtransport-over-http3.md) | WebTransport over HTTP/3 | Separate draft-17 product crate; generic H3/QUIC seams only (`INV-WT-01..04`). |
 | [ADR-0034](../adr/0034-quic-consumer-seams.md) | QUIC Consumer Seams | Per-connection socket and congestion factories, keep-alive/idle policy, verified peer certificates (`INV-QUIC-18..22`). |
+| [ADR-0035](../adr/0035-quic-ingress-handshake-observability.md) | QUIC Ingress Handshake Observability | `AcceptError` separates shutdown from failed handshakes; H3 ingress continues and publishes errors (`INV-QUIC-23`, `INV-SERVER-25`). |
 
 ---
 

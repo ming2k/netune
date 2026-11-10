@@ -56,6 +56,26 @@ pub struct ServerConfigOwned {
     pub enable_early_data: bool,
 }
 
+/// Server-side connection policy that is not part of the wire profile.
+#[derive(Clone, Default)]
+pub struct ServerOptions {
+    /// Send a PING after this much receive inactivity on every accepted
+    /// connection. `None` disables server-initiated keep-alive.
+    pub keep_alive: Option<std::time::Duration>,
+    /// Overrides the server profile's built-in congestion controller.
+    pub congestion_factory: Option<Arc<dyn CongestionControllerFactory>>,
+}
+
+impl std::fmt::Debug for ServerOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerOptions")
+            .field("keep_alive", &self.keep_alive)
+            .field("congestion_factory", &self.congestion_factory.is_some())
+            .finish()
+    }
+}
+
 fn prepare_server_config(mut config: ServerConfigOwned) -> ServerConfigOwned {
     if config.enable_early_data {
         let mut tls = (*config.tls).clone();
@@ -77,13 +97,46 @@ pub struct Endpoint {
     driver: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
+enum AcceptEvent {
+    Connection(Connection),
+    Failure(QuicError),
+}
+
+/// A failed accept that is not an endpoint shutdown.
+#[derive(Debug)]
+pub enum AcceptError {
+    /// The endpoint was closed.
+    EndpointClosed,
+    /// A peer reached the endpoint but its QUIC/TLS handshake failed.
+    Handshake(QuicError),
+}
+
+impl std::fmt::Display for AcceptError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EndpointClosed => formatter.write_str("endpoint closed"),
+            Self::Handshake(error) => write!(formatter, "incoming handshake failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for AcceptError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::EndpointClosed => None,
+            Self::Handshake(error) => Some(error),
+        }
+    }
+}
+
 struct EndpointInner {
     udp: Arc<dyn QuicUdpSocket>,
     local: SocketAddr,
     routes: StdMutex<HashMap<Vec<u8>, mpsc::Sender<IncomingDatagram>>>,
-    accept_tx: mpsc::Sender<Connection>,
-    accept_rx: Mutex<mpsc::Receiver<Connection>>,
+    accept_tx: mpsc::Sender<AcceptEvent>,
+    accept_rx: Mutex<mpsc::Receiver<AcceptEvent>>,
     server: Option<ServerConfigOwned>,
+    server_options: ServerOptions,
     reset_key: [u8; 32],
     retry_key: [u8; 32],
     cid_len: usize,
@@ -97,12 +150,21 @@ struct EndpointInner {
 impl Endpoint {
     /// Bind a client endpoint on an ephemeral local port.
     pub async fn client() -> Result<Self, QuicError> {
-        Self::bind("0.0.0.0:0", None).await
+        Self::bind("0.0.0.0:0", None, ServerOptions::default()).await
     }
 
     /// Bind a server endpoint.
     pub async fn server(address: &str, config: ServerConfigOwned) -> Result<Self, QuicError> {
-        Self::bind(address, Some(prepare_server_config(config))).await
+        Self::server_with_options(address, config, ServerOptions::default()).await
+    }
+
+    /// Bind a server endpoint with explicit connection policy.
+    pub async fn server_with_options(
+        address: &str,
+        config: ServerConfigOwned,
+        options: ServerOptions,
+    ) -> Result<Self, QuicError> {
+        Self::bind(address, Some(prepare_server_config(config)), options).await
     }
 
     /// Bind a server endpoint over an abstract socket stack.
@@ -115,7 +177,17 @@ impl Endpoint {
         udp: Arc<dyn QuicUdpSocket>,
         config: ServerConfigOwned,
     ) -> Result<Self, QuicError> {
-        Self::from_socket(udp, Some(prepare_server_config(config))).await
+        Self::server_with_socket_and_options(udp, config, ServerOptions::default()).await
+    }
+
+    /// Bind a server endpoint over an abstract socket stack with explicit
+    /// connection policy.
+    pub async fn server_with_socket_and_options(
+        udp: Arc<dyn QuicUdpSocket>,
+        config: ServerConfigOwned,
+        options: ServerOptions,
+    ) -> Result<Self, QuicError> {
+        Self::from_socket(udp, Some(prepare_server_config(config)), options).await
     }
 
     /// Bind a client endpoint over an already-configured tokio UDP socket.
@@ -130,17 +202,22 @@ impl Endpoint {
     /// after the same checks [`crate::QuicConnector`] performs before it
     /// creates a socket.
     pub async fn client_with_socket(udp: Arc<dyn QuicUdpSocket>) -> Result<Self, QuicError> {
-        Self::from_socket(udp, None).await
+        Self::from_socket(udp, None, ServerOptions::default()).await
     }
 
-    async fn bind(address: &str, server: Option<ServerConfigOwned>) -> Result<Self, QuicError> {
+    async fn bind(
+        address: &str,
+        server: Option<ServerConfigOwned>,
+        options: ServerOptions,
+    ) -> Result<Self, QuicError> {
         let udp = UdpSocket::bind(address).await.map_err(QuicError::Socket)?;
-        Self::from_socket(Arc::new(udp), server).await
+        Self::from_socket(Arc::new(udp), server, options).await
     }
 
     async fn from_socket(
         udp: Arc<dyn QuicUdpSocket>,
         server: Option<ServerConfigOwned>,
+        server_options: ServerOptions,
     ) -> Result<Self, QuicError> {
         let local = udp.local_addr().map_err(QuicError::Socket)?;
         let (accept_tx, accept_rx) = mpsc::channel(64);
@@ -154,6 +231,7 @@ impl Endpoint {
             accept_tx,
             accept_rx: Mutex::new(accept_rx),
             server,
+            server_options,
             reset_key,
             retry_key,
             cid_len: 8,
@@ -249,19 +327,25 @@ impl Endpoint {
     }
 
     /// Accept the next established server connection.
-    pub async fn accept(&self) -> Result<Connection, QuicError> {
+    ///
+    /// A failed incoming handshake is reported as [`AcceptError::Handshake`] and
+    /// does not stop the listener; the caller decides whether to observe and
+    /// continue or shut down.
+    pub async fn accept(&self) -> Result<Connection, AcceptError> {
         let mut rx = self.inner.accept_rx.lock().await;
         let mut close_rx = self.inner.close_tx.subscribe();
         if self.inner.closed.load(Ordering::SeqCst) {
-            return Err(QuicError::Closed("endpoint closed".to_string()));
+            return Err(AcceptError::EndpointClosed);
         }
         tokio::select! {
-            connection = rx.recv() => {
-                connection.ok_or_else(|| QuicError::Closed("endpoint closed".to_string()))
-            }
-            _ = close_rx.recv() => {
-                Err(QuicError::Closed("endpoint closed".to_string()))
-            }
+            event = rx.recv() => match event {
+                Some(AcceptEvent::Connection(connection)) => Ok(connection),
+                Some(AcceptEvent::Failure(error)) => {
+                    Err(AcceptError::Handshake(error))
+                }
+                None => Err(AcceptError::EndpointClosed),
+            },
+            _ = close_rx.recv() => Err(AcceptError::EndpointClosed),
         }
     }
 
@@ -400,6 +484,8 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
                 local_tp,
                 version,
                 server.congestion,
+                inner.server_options.congestion_factory.clone(),
+                inner.server_options.keep_alive,
             ) {
                 Ok(core) => core,
                 Err(_) => continue,
@@ -414,7 +500,10 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
             .await
             {
                 Ok(value) => value,
-                Err(_) => continue,
+                Err(error) => {
+                    let _ = inner.accept_tx.send(AcceptEvent::Failure(error)).await;
+                    continue;
+                }
             };
             {
                 let mut routes = inner.routes.lock().unwrap_or_else(|e| e.into_inner());
@@ -434,8 +523,16 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
                         _ = closed.changed() => {}
                     }
                 }
-                if *established.borrow() && closed.borrow().is_none() {
-                    let _ = accept.send(connection).await;
+                let event = if *established.borrow() {
+                    Some(AcceptEvent::Connection(connection))
+                } else {
+                    closed
+                        .borrow()
+                        .as_ref()
+                        .map(|error| AcceptEvent::Failure(clone_error(error)))
+                };
+                if let Some(event) = event {
+                    let _ = accept.send(event).await;
                 }
             });
         }

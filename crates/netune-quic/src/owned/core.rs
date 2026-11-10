@@ -333,6 +333,7 @@ impl Core {
     }
 
     /// Create a server core for an accepted Initial packet.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn server(
         tls: TlsSession,
         original_dcid: Vec<u8>,
@@ -340,6 +341,8 @@ impl Core {
         local_tp: TransportParameters,
         version: u32,
         congestion: CongestionAlgorithm,
+        congestion_factory: Option<std::sync::Arc<dyn CongestionControllerFactory>>,
+        keep_alive: Option<Duration>,
     ) -> Result<Self, QuicError> {
         let initial = initial_keys_for_version(&original_dcid, Side::Server, version)?;
         let local_max_data = local_tp.initial_max_data.unwrap_or(0);
@@ -391,7 +394,11 @@ impl Core {
             peer_max_datagram: None,
             send_datagrams: VecDeque::new(),
             recv_datagrams: VecDeque::new(),
-            congestion: Congestion::new(congestion, Instant::now()),
+            congestion: Congestion::new_with_factory(
+                congestion,
+                congestion_factory.as_ref(),
+                Instant::now(),
+            ),
             bytes_in_flight: 0,
             peer_opened_bidi: 0,
             peer_opened_uni: 0,
@@ -414,7 +421,7 @@ impl Core {
             early_frames: Vec::new(),
             early_data_accepted: false,
             early_data_available: false,
-            keep_alive: None,
+            keep_alive,
             session_cache: None,
             session_key: String::new(),
         })

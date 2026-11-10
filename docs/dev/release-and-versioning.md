@@ -48,7 +48,7 @@ Version policy: the project currently publishes from the `0.0.x` line, where Car
 Consumers depend on a tag:
 
 ```toml
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.14" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.15" }
 ```
 
 - `tag` is the readable form, `rev = "<sha>"` the most reproducible. Never recommend `branch`.

@@ -19,8 +19,9 @@ use bytes::Bytes;
 use http::header;
 use netune_http1::{BodyKind, HttpError, IncomingRequest, TargetForm};
 use netune_http3::{H3ServerConnection, H3ServerStream, H3SettingsProfile};
+use netune_quic::owned::{AcceptError, ServerOptions};
 use netune_trace::{EventKind, TraceCollector};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
 use tokio::task::JoinSet;
 
 use crate::body::{BodySource, RequestBody};
@@ -37,6 +38,7 @@ pub struct H3Server {
     handler: Arc<dyn Handler>,
     permits: Arc<Semaphore>,
     local: SocketAddr,
+    handshake_errors: broadcast::Sender<Arc<netune_quic::QuicError>>,
 }
 
 impl std::fmt::Debug for H3Server {
@@ -73,6 +75,61 @@ impl H3Server {
             .next()
             .ok_or(BindError::Invalid("HTTP/3 address did not resolve"))?;
 
+        let server_config = Self::server_config(tls);
+        let endpoint =
+            netune_quic::owned::Endpoint::server(address.to_string().as_str(), server_config)
+                .await
+                .map_err(|error| BindError::Transport(error.to_string()))?;
+        Self::from_endpoint(endpoint, config, settings, handler)
+    }
+
+    /// Bind a QUIC listener over a caller-supplied socket stack.
+    ///
+    /// This is the ingress counterpart of the egress socket seam: the caller
+    /// owns binding, socket configuration and any obfuscation/port-hop layer.
+    /// The endpoint owns the socket for one listener lifetime and routes all
+    /// accepted connections by connection ID.
+    pub async fn bind_with_socket(
+        socket: Arc<dyn netune_quic::QuicUdpSocket>,
+        config: ServerConfig,
+        tls: Arc<rustls::ServerConfig>,
+        settings: H3SettingsProfile,
+        handler: Arc<dyn Handler>,
+    ) -> Result<Self, BindError> {
+        Self::bind_with_socket_and_options(
+            socket,
+            config,
+            tls,
+            settings,
+            handler,
+            ServerOptions::default(),
+        )
+        .await
+    }
+
+    /// Bind over a caller-owned socket stack with explicit server-side policy.
+    pub async fn bind_with_socket_and_options(
+        socket: Arc<dyn netune_quic::QuicUdpSocket>,
+        config: ServerConfig,
+        tls: Arc<rustls::ServerConfig>,
+        settings: H3SettingsProfile,
+        handler: Arc<dyn Handler>,
+        options: ServerOptions,
+    ) -> Result<Self, BindError> {
+        config.validate()?;
+        settings.validate().map_err(BindError::Invalid)?;
+        let server_config = Self::server_config(tls);
+        let endpoint = netune_quic::owned::Endpoint::server_with_socket_and_options(
+            socket,
+            server_config,
+            options,
+        )
+        .await
+        .map_err(|error| BindError::Transport(error.to_string()))?;
+        Self::from_endpoint(endpoint, config, settings, handler)
+    }
+
+    fn server_config(tls: Arc<rustls::ServerConfig>) -> netune_quic::owned::ServerConfigOwned {
         let mut tls = (*tls).clone();
         tls.alpn_protocols = vec![b"h3".to_vec()];
         let transport = netune_quic::wire::transport_parameters::TransportParameters {
@@ -87,19 +144,24 @@ impl H3Server {
             max_datagram_frame_size: Some(65_535),
             ..Default::default()
         };
-        let server_config = netune_quic::owned::ServerConfigOwned {
+        netune_quic::owned::ServerConfigOwned {
             tls: Arc::new(tls),
             transport,
             retry: true,
             congestion: netune_quic::CongestionAlgorithm::NewReno,
             enable_early_data: true,
-        };
-        let endpoint =
-            netune_quic::owned::Endpoint::server(address.to_string().as_str(), server_config)
-                .await
-                .map_err(|error| BindError::Transport(error.to_string()))?;
+        }
+    }
+
+    fn from_endpoint(
+        endpoint: netune_quic::owned::Endpoint,
+        config: ServerConfig,
+        settings: H3SettingsProfile,
+        handler: Arc<dyn Handler>,
+    ) -> Result<Self, BindError> {
         let local = endpoint.local_addr();
         let permits = Arc::new(Semaphore::new(config.max_connections));
+        let (handshake_errors, _) = broadcast::channel(16);
         Ok(Self {
             endpoint,
             config,
@@ -107,6 +169,7 @@ impl H3Server {
             handler,
             permits,
             local,
+            handshake_errors,
         })
     }
 
@@ -125,6 +188,14 @@ impl H3Server {
         &self.settings
     }
 
+    /// Observe incoming QUIC/TLS handshake failures.
+    ///
+    /// A listener keeps serving after a failed handshake; this receiver is how
+    /// an operator sees those failures instead of only seeing "no connection".
+    pub fn subscribe_handshake_errors(&self) -> broadcast::Receiver<Arc<netune_quic::QuicError>> {
+        self.handshake_errors.subscribe()
+    }
+
     /// Accept until `shutdown` resolves, then stop accepting and drain.
     pub async fn serve(self, shutdown: impl Future<Output = ()>) {
         let Self {
@@ -134,6 +205,7 @@ impl H3Server {
             handler,
             permits,
             local,
+            handshake_errors,
         } = self;
         let config = Arc::new(config);
         let settings = Arc::new(settings);
@@ -146,7 +218,14 @@ impl H3Server {
                 biased;
                 () = &mut shutdown => break,
                 accepted = endpoint.accept() => {
-                    let Ok(connection) = accepted else { break };
+                    let connection = match accepted {
+                        Ok(connection) => connection,
+                        Err(AcceptError::EndpointClosed) => break,
+                        Err(AcceptError::Handshake(error)) => {
+                            let _ = handshake_errors.send(Arc::new(error));
+                            continue;
+                        }
+                    };
                     let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
                         // Admission is explicit: a peer learns now and may retry,
                         // rather than occupying an unbounded queue.

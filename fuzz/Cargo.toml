@@ -1,0 +1,49 @@
+[package]
+name = "netune-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bytes = "1"
+http = "1.4"
+libfuzzer-sys = "0.4"
+netune-http1 = { path = "../crates/netune-http1" }
+netune-http2 = { path = "../crates/netune-http2" }
+netune-http3 = { path = "../crates/netune-http3" }
+netune-quic = { path = "../crates/netune-quic" }
+
+[workspace]
+
+[[bin]]
+name = "quic_frames"
+path = "fuzz_targets/quic_frames.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "quic_packets"
+path = "fuzz_targets/quic_packets.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h3_qpack"
+path = "fuzz_targets/h3_qpack.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "http2_frames"
+path = "fuzz_targets/http2_frames.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "http1_target"
+path = "fuzz_targets/http1_target.rs"
+test = false
+doc = false

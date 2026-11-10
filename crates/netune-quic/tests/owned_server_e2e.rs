@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use netune_quic::owned::{ClientConfigOwned, Endpoint, ServerConfigOwned};
+use netune_quic::owned::{AcceptError, ClientConfigOwned, Endpoint, ServerConfigOwned};
 use netune_quic::wire::transport_parameters::TransportParameters;
 
 #[derive(Debug)]
@@ -102,6 +102,12 @@ fn client_tls() -> Arc<rustls::ClientConfig> {
         .with_no_client_auth();
     config.alpn_protocols = vec![b"h3".to_vec()];
     config.enable_early_data = true;
+    Arc::new(config)
+}
+
+fn client_tls_with_alpn(alpn: &[u8]) -> Arc<rustls::ClientConfig> {
+    let mut config = (*client_tls()).clone();
+    config.alpn_protocols = vec![alpn.to_vec()];
     Arc::new(config)
 }
 
@@ -934,7 +940,7 @@ async fn closing_an_endpoint_wakes_accept() {
         .await
         .expect("the endpoint close must wake accept")
         .expect("accept task");
-    assert!(matches!(error, Err(QuicError::Closed(_))));
+    assert!(matches!(error, Err(AcceptError::EndpointClosed)));
 }
 
 #[tokio::test]
@@ -990,4 +996,146 @@ async fn dropping_the_listener_keeps_an_accepted_connection_alive() {
         .expect("data");
     assert_eq!(response.as_ref(), b"survives");
     server_task.await.expect("server task");
+}
+
+#[tokio::test]
+async fn a_failed_handshake_is_observed_and_accept_continues() {
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport(),
+            retry: false,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+
+    let bad = Endpoint::client().await.expect("bad client endpoint");
+    let bad_task = tokio::spawn(async move {
+        let _ = bad
+            .connect(
+                addr,
+                "localhost",
+                ClientConfigOwned {
+                    tls: client_tls_with_alpn(b"not-h3"),
+                    transport: transport(),
+                    versions: vec![netune_quic::wire::packet::VERSION_1],
+                    congestion: netune_quic::CongestionAlgorithm::NewReno,
+                    congestion_factory: None,
+                    keep_alive: None,
+                    enable_early_data: false,
+                    session_cache: None,
+                },
+            )
+            .await;
+    });
+    let accepted = tokio::time::timeout(Duration::from_secs(5), server.accept())
+        .await
+        .expect("accept must report the failed handshake");
+    let error = match accepted {
+        Ok(_) => panic!("the handshake failure is not a connection"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, AcceptError::Handshake(_)));
+    bad_task.abort();
+    let _ = bad_task.await;
+
+    let good = Endpoint::client().await.expect("good client endpoint");
+    let connection = good
+        .connect(
+            addr,
+            "localhost",
+            ClientConfigOwned {
+                tls: client_tls(),
+                transport: transport(),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
+                congestion_factory: None,
+                keep_alive: None,
+                enable_early_data: false,
+                session_cache: None,
+            },
+        )
+        .await
+        .expect("the listener still accepts");
+    let accepted = tokio::time::timeout(Duration::from_secs(5), server.accept())
+        .await
+        .expect("accept after failure")
+        .expect("the next handshake succeeds");
+    drop(accepted);
+    drop(connection);
+}
+
+#[tokio::test]
+#[ignore = "long-running soak: run explicitly in the scheduled workflow"]
+async fn soak_echoes_many_streams_under_keepalive() {
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport(),
+            retry: false,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+    let server_task = tokio::spawn(async move {
+        let connection = server.accept().await.expect("accept");
+        while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+            let mut total = 0;
+            while total < 4096 {
+                let Some(chunk) = recv.read(8192).await.expect("read") else {
+                    break;
+                };
+                total += chunk.len();
+            }
+            send.write_all(&vec![0x5a; 4096]).await.expect("echo");
+            send.finish().await.expect("finish");
+        }
+    });
+
+    let client = Endpoint::client().await.expect("client endpoint");
+    let connection = client
+        .connect(
+            addr,
+            "localhost",
+            ClientConfigOwned {
+                tls: client_tls(),
+                transport: transport(),
+                versions: vec![netune_quic::wire::packet::VERSION_1],
+                congestion: netune_quic::CongestionAlgorithm::NewReno,
+                congestion_factory: None,
+                keep_alive: Some(Duration::from_millis(100)),
+                enable_early_data: false,
+                session_cache: None,
+            },
+        )
+        .await
+        .expect("connect");
+    for _ in 0..80 {
+        let (mut send, mut recv) = connection.open_bi().await.expect("open bi");
+        send.write_all(&vec![0x5a; 4096]).await.expect("write");
+        send.finish().await.expect("finish");
+        let mut total = 0;
+        while total < 4096 {
+            let Some(chunk) = tokio::time::timeout(Duration::from_secs(5), recv.read(8192))
+                .await
+                .expect("soak read timeout")
+                .expect("read")
+            else {
+                break;
+            };
+            total += chunk.len();
+        }
+        assert_eq!(total, 4096, "the soak echo was truncated");
+    }
+    connection.close(0, "soak complete");
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_task).await;
 }

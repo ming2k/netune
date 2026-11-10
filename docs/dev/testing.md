@@ -88,6 +88,21 @@ The benchmark gate is intentionally separate from `cargo test`: it measures
 instructions, not wall time, and fails a regression against a baseline generated
 in the same CI run (`ir=0%`).
 
+### 4.1 Fuzzing and soak
+
+The network parsers have `cargo-fuzz` targets under `fuzz/` (`quic_frames`,
+`quic_packets`, `h3_qpack`, `http2_frames`, `http1_target`). They run in the
+scheduled `Fuzz and soak` workflow, not on every pull request. The long-running
+QUIC echo/keep-alive test is ignored by default and is run by the same workflow:
+
+```bash
+cargo test -p netune-quic --test owned_server_e2e \
+  soak_echoes_many_streams_under_keepalive -- --ignored --exact
+```
+
+A fuzz finding is fixed with a minimal reproducer in the owning crate's test
+suite before the corpus is re-run.
+
 CI additionally sets `RUSTFLAGS="-D warnings"`, so warnings are failures on `main`.
 
 ---

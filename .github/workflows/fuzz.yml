@@ -1,0 +1,47 @@
+name: Fuzz and soak
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly hardening, not a per-PR tax. A regression found here is cut
+    # forward with a minimal reproducer in the owning crate.
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: cargo-fuzz (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [quic_frames, quic_packets, h3_qpack, http2_frames, http1_target]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz ${{ matrix.target }}
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=120 -rss_limit_mb=2048
+        working-directory: fuzz
+
+  soak:
+    name: QUIC soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+      - name: Repeated stream/keep-alive soak
+        run: cargo test -p netune-quic --test owned_server_e2e soak_echoes_many_streams_under_keepalive -- --ignored --exact

@@ -11,6 +11,7 @@ pub mod endpoint;
 pub mod session;
 
 pub use endpoint::{
-    ClientConfigOwned, Connection, Endpoint, RecvStream, SendStream, ServerConfigOwned,
+    AcceptError, ClientConfigOwned, Connection, Endpoint, RecvStream, SendStream,
+    ServerConfigOwned, ServerOptions,
 };
 pub use session::SessionCache;

@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::Method;
-use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TlsConnector};
+use netune::{
+    Client, ClientConfig, Connector, Pool, RequestHead, Target, TcpConnector, TlsConnector,
+};
 use netune_trace::{
     Alpn, AttemptRef, ConnectionInfo, EndpointRef, EventKind, Fidelity, FrameClass, Reason,
     RequestTrace, TraceCollector, TraceId, Validity,
@@ -111,6 +113,33 @@ fn tls_client(config: Arc<rustls::ClientConfig>) -> Client<TlsConnector<TcpConne
         Pool::default(),
         ClientConfig::default(),
     )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stalled_tls_handshake_is_bounded() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("address");
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+    let connector = TlsConnector::new(TcpConnector::new(), Arc::new(config))
+        .with_handshake_timeout(Some(std::time::Duration::from_millis(100)));
+
+    // The listener accepts the TCP connection into its backlog but never runs
+    // TLS, so the ClientHello gets no answer.
+    let target = Target::tls(address.to_string(), "localhost");
+    let error = match connector
+        .connect(&target, &TraceCollector::disabled())
+        .await
+    {
+        Ok(_) => panic!("a stalled handshake must not complete"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("exceeded"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

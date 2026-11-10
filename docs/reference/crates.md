@@ -92,7 +92,7 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `ConnectionPlan` / `ProfileId`: every TLS/H1/H2 name resolves through `Client::plan` before a socket is opened; unknown profiles fail loudly ([ADR-0019](../adr/0019-connection-plan-and-wire-profile-registry.md)).
   - `H1WireProfile` / `H1Registry`: declarative HTTP/1 header order and casing, applied per request (not part of the pool key).
   - `H2Registry`: built-in and caller-supplied HTTP/2 fingerprints, resolved independently of the TLS-name match.
-  - `TlsProfile` & `TlsRouterConnector`: Configures and lazily compiles TLS identities.
+  - `TlsProfile` & `TlsRouterConnector`: Configures and lazily compiles TLS identities; the handshake has a 10 s default bound (`with_handshake_timeout`), separate from the DNS/TCP connect timeout.
   - `FaultIo`: In-process fault injection engine.
   - `DnsResolver` & `StaticResolver`: Asynchronous, mockable DNS resolution.
   - `SocketConfig`: L3/L4 transport tuning — TTL, buffer sizing, MSS, `SO_MARK`,

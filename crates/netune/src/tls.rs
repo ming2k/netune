@@ -9,9 +9,15 @@
 //! Trust roots come from the platform store ([`rustls_platform_verifier`]) so a
 //! corporate root or an OS trust change is honoured without shipping our own
 //! bundle; ALPN advertises HTTP/1.1 only, which is what this client speaks.
+//!
+//! The handshake itself is bounded (10 s by default). A peer that accepts the
+//! TCP connection and then stops answering is reported as a connection failure
+//! rather than holding the attempt open indefinitely; use
+//! [`TlsConnector::with_handshake_timeout`] to change the bound.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use netune_trace::{Alpn, EventKind, TraceCollector};
 use rustls::pki_types::ServerName;
@@ -40,14 +46,34 @@ pub fn platform_client_config() -> Result<Arc<rustls::ClientConfig>, NetError> {
     Ok(Arc::new(config))
 }
 
+/// The default bound on a TLS handshake once the TCP connection exists.
+///
+/// The TCP connector's timeout covers DNS and TCP; a peer that accepts the
+/// socket and then never answers the ClientHello would otherwise hang the
+/// attempt without an error to report.
+const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A connector that establishes TLS on top of an inner connector.
 pub struct TlsConnector<C: Connector> {
     inner: C,
     config: Arc<rustls::ClientConfig>,
+    handshake_timeout: Option<Duration>,
 }
 impl<C: Connector> TlsConnector<C> {
     pub fn new(inner: C, config: Arc<rustls::ClientConfig>) -> Self {
-        Self { inner, config }
+        Self {
+            inner,
+            config,
+            handshake_timeout: Some(DEFAULT_TLS_HANDSHAKE_TIMEOUT),
+        }
+    }
+
+    /// Replace the handshake bound. `None` removes it; only do that when an
+    /// outer deadline exists that reports the stall as a connection failure.
+    #[must_use]
+    pub fn with_handshake_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.handshake_timeout = timeout;
+        self
     }
 
     /// Build a connector trusting the platform store.
@@ -72,6 +98,7 @@ async fn handshake(
     established: Established,
     target: &Target,
     recorder: &TraceCollector,
+    timeout: Option<Duration>,
 ) -> Result<Established, NetError> {
     let Some(server_name) = target.tls_server_name().map(str::to_owned) else {
         // A plaintext target passes straight through.
@@ -82,10 +109,17 @@ async fn handshake(
     let name = ServerName::try_from(server_name.clone())
         .map_err(|error| NetError::Connect(format!("invalid TLS server name: {error}")))?;
     let connector = RustlsConnector::from(Arc::clone(config));
-    let stream = connector
-        .connect(name, established.stream)
-        .await
-        .map_err(|error| NetError::Connect(format!("TLS handshake with {server_name}: {error}")))?;
+    let connecting = connector.connect(name, established.stream);
+    let stream = match timeout {
+        Some(limit) => tokio::time::timeout(limit, connecting).await.map_err(|_| {
+            NetError::Connect(format!(
+                "TLS handshake with {server_name} exceeded {} ms",
+                limit.as_millis()
+            ))
+        })?,
+        None => connecting.await,
+    }
+    .map_err(|error| NetError::Connect(format!("TLS handshake with {server_name}: {error}")))?;
 
     let (alpn, version) = {
         let (_, connection) = stream.get_ref();
@@ -125,7 +159,14 @@ impl<C: Connector> Connector for TlsConnector<C> {
         recorder: &TraceCollector,
     ) -> Result<Established, NetError> {
         let established = self.inner.connect(target, recorder).await?;
-        handshake(&self.config, established, target, recorder).await
+        handshake(
+            &self.config,
+            established,
+            target,
+            recorder,
+            self.handshake_timeout,
+        )
+        .await
     }
 }
 
@@ -148,6 +189,7 @@ pub struct TlsRouterConnector<C: Connector> {
     /// name may override a preset name (drift experiments, CA-pinned tests).
     custom: HashMap<String, TlsProfile>,
     configs: Mutex<HashMap<String, Arc<rustls::ClientConfig>>>,
+    handshake_timeout: Option<Duration>,
 }
 
 impl<C: Connector> TlsRouterConnector<C> {
@@ -157,7 +199,16 @@ impl<C: Connector> TlsRouterConnector<C> {
             provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
             custom: HashMap::new(),
             configs: Mutex::new(HashMap::new()),
+            handshake_timeout: Some(DEFAULT_TLS_HANDSHAKE_TIMEOUT),
         }
+    }
+
+    /// Replace the handshake bound. `None` removes it; only do that when an
+    /// outer deadline exists that reports the stall as a connection failure.
+    #[must_use]
+    pub fn with_handshake_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.handshake_timeout = timeout;
+        self
     }
 
     /// Register (or override) a named profile, selectable at request time via
@@ -229,6 +280,13 @@ impl<C: Connector> Connector for TlsRouterConnector<C> {
         let name = target.tls_profile().unwrap_or(Preset::NetuneDefault.name());
         let config = self.config_for(name)?;
         let established = self.inner.connect(target, recorder).await?;
-        handshake(&config, established, target, recorder).await
+        handshake(
+            &config,
+            established,
+            target,
+            recorder,
+            self.handshake_timeout,
+        )
+        .await
     }
 }

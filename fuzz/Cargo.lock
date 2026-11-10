@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "netune-egress"
-version = "0.0.21"
+version = "0.0.22"
 
 [[package]]
 name = "netune-fuzz"
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http1"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "bytes",
  "http",
@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http2"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "bytes",
  "http",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http3"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "bytes",
  "http",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "netune-quic"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -317,14 +317,14 @@ dependencies = [
 
 [[package]]
 name = "netune-trace"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "netune-webtransport"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "bytes",
  "http",

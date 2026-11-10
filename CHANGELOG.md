@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.22] - 2026-11-10
+
+### Documentation
+
+- Record the browser probe result precisely: Chrome 159 unstable advertises the
+  legacy draft-02 `0x2b603742` H3 setting, and neither Chrome 157 nor 159
+  advertises `reset_stream_at`. The browser half of ADR-0037 Gate 4 remains
+  externally blocked; no compatibility fallback is being mistaken for draft-17
+  completion.
+
 ## [0.0.21] - 2026-11-10
 
 ### Added
@@ -21,7 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Notes
 
 - Chrome 157 stable and Chrome 159 unstable were also probed against the owned
-  origin. Neither advertises `reset_stream_at`, so the browser half of
+  origin. Chrome 159 advertises the legacy draft-02 `0x2b603742` H3 setting and
+  neither browser advertises `reset_stream_at`, so the browser half of
   ADR-0037 Gate 4 remains externally blocked.
 
 ## [0.0.20] - 2026-11-10

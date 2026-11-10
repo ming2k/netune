@@ -1,0 +1,83 @@
+---
+id: ADR-0037
+title: "WebTransport Draft-17 Completion Gate"
+status: draft
+date: 2026-11-10
+scope: [protocol/webtransport, protocol/quic, api/webtransport, product/web]
+superseded_by: null
+---
+
+# 0037. WebTransport Draft-17 Completion Gate
+
+- Status: Draft
+- Date: 2026-11-10
+- Deciders: Ming Li
+- Related: [ADR-0033](0033-webtransport-over-http3.md),
+  [ADR-0028](0028-owned-quic.md), [ADR-0032](0032-h3-capsule-protocol.md)
+
+---
+
+## Context and Problem Statement
+
+ADR-0033 delivered a draft-17 baseline, but explicitly did not claim complete
+compliance. The remaining gaps are not cosmetic:
+
+- `RESET_STREAM_AT` reliable partial reset is absent from the owned QUIC wire
+  and send/recv state;
+- teardown/GOAWAY behavior is not exercised against an independent peer;
+- browser interop is unverified;
+- flow-control capsule enforcement needs an adversarial test, not only a happy
+  path.
+
+Calling WebTransport production-ready now would be a false claim. The correct
+response is a gated completion track, separate from the core QUIC/H3 release
+line.
+
+## Completion Gate
+
+WebTransport leaves the experimental posture only when all of the following
+hold:
+
+1. **Reliable reset.** `RESET_STREAM_AT` (type `0x24`) and the
+   `reset_stream_at` transport parameter (`0x1d`) are encoded, decoded and
+   applied with reliable-size semantics, with a lost-reset test.
+2. **Teardown.** Peer-initiated and local session close, CONNECT-stream
+   termination, GOAWAY and drain are tested from both roles.
+3. **Flow control.** Over-limit streams/data and malformed capsule sequences
+   close the session with the correct WT error code, not a generic transport
+   error.
+4. **Independent interop.** A browser/W3C-compatible peer and one non-Rust
+   implementation complete a bidirectional stream, a unidirectional stream and
+   a datagram exchange against `netune-webtransport`.
+5. **Security.** `:authority`, `:scheme`, `:path`, Origin and Session ID
+   validation are tested against spoofed and replayed inputs.
+
+Each gate is an independent test suite in `crates/netune-webtransport/tests/`;
+a gate that cannot run in CI is not a gate.
+
+## Boundaries
+
+- Core QUIC/H3 may ship without Gate 1–5; WebTransport may not claim production
+  completeness.
+- The draft pin stays `draft-ietf-webtrans-http3-17`; a draft change is a new
+  explicit implementation step, never silent absorption.
+- No WebTransport constant enters `netune-http3` or `netune-quic`; only generic
+  extension seams and `RESET_STREAM_AT` do.
+
+## Rejected Alternatives
+
+### Declare the baseline production-ready
+
+- **Why considered**: the happy-path tests pass.
+- **Why rejected**: the stated gaps are correctness and interop gaps, not polish.
+
+### Fold WebTransport into the H3 core release gate
+
+- **Why considered**: one release train.
+- **Why rejected**: a draft product layer must be able to lag the stable
+  transport without blocking it or borrowing its credibility.
+
+## Links
+
+- [ADR-0033](0033-webtransport-over-http3.md)
+- `draft-ietf-webtrans-http3-17`

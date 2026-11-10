@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.23] - 2026-11-10
+
+### Added
+
+- `ServerSessionConfig` carries `handshake_timeout` and `idle_timeout`; both
+  have production defaults, and `netune-server` maps them from `head_timeout`.
+- `TlsConnector::with_handshake_timeout` and
+  `TlsRouterConnector::with_handshake_timeout` expose the new TLS handshake
+  bound (10 s by default).
+
+### Security
+
+- **TLS handshakes are bounded.** `TlsConnector` and `TlsRouterConnector` now
+  time out a peer that completes TCP and then never answers the ClientHello.
+  `with_handshake_timeout(None)` keeps the old unbounded behaviour for callers
+  with an outer deadline.
+- **HTTP/2 ingress has handshake and idle bounds.** A peer that opens a
+  connection and never completes SETTINGS, or that leaves an H2 connection with
+  no open streams, no longer holds an admission permit indefinitely. The
+  orchestrator maps both bounds to its existing `head_timeout`.
+- **HTTP/2 header-block flood is bounded.** `CONTINUATION` reassembly now
+  enforces the advertised `SETTINGS_MAX_HEADER_LIST_SIZE` on both the raw
+  block and the decoded field list, and rejects an interleaved frame instead of
+  buffering around it. A peer can no longer grow the reassembly buffer without
+  limit (the "CONTINUATION flood" pattern).
+- **QUIC CRYPTO reassembly is bounded.** Out-of-order handshake data is capped
+  per packet space and per chunk count, so a peer that sends high offsets with
+  a gap cannot grow an unbounded `BTreeMap`.
+- **QUIC ACK processing is bounded.** A peer-controlled ACK frame is no longer
+  expanded into a set of every packet number it claims; coverage is checked per
+  outstanding packet. Received packet numbers retained for ACK generation are
+  capped, and ACK frames now carry real ranges instead of collapsing to the
+  largest packet whenever a gap exists.
+- **`https://` proxy URLs are refused.** `Proxy::parse` previously accepted the
+  scheme and then dialed the proxy in plaintext, putting `Proxy-Authorization`
+  on the wire unencrypted. The proxy hop is documented as plaintext-only.
+
 ## [0.0.22] - 2026-11-10
 
 ### Documentation

@@ -61,6 +61,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-WT-10]` | Close, drain and flow-control violations are terminal: no new streams, datagrams or control after close; drain refuses new local streams; regressed credit closes the session. | ADR-0039 |
 | `[INV-SOCKET-01]` | A `SocketConfig` option is either applied or reported; no pre-connect option may be silently skipped by the fast path (`needs_manual_socket`). | ADR-0006, ADR-0010 |
 | `[INV-TRANSPORT-00..04]` | Replay safety: a pooled socket that drops before any response-head byte is replaced; after that point it is never retried. Idle bound, distinct `Incomplete`. | ADR-0001 (`00`), ADR-0005 (`01..04`) |
+| `[INV-TRANSPORT-05]` | Every egress connection-establishment phase after DNS/TCP (proxy tunnel, TLS, HTTP/2 preface/SETTINGS, WebSocket upgrade, SOCKS5 UDP associate) completes under a configurable bound; expiry is a retryable `connect` failure naming the phase, and a stalled connection is never pooled. | ADR-0040 |
 | `[INV-EGRESS-01..03]` | Confinement is checked before connect; private, loopback, link-local and metadata ranges are refused. | ADR-0002 |
 | `[INV-TLS-01..03]` | TLS identity is explicit data (`TlsProfile`); presets keep a stable wire identity across dependency updates. | ADR-0004 |
 | `[INV-CUSTOM-01..03]` | Wire determinism: configured-or-documented socket/DNS/segmentation behaviour; no lowercasing of raw headers. | ADR-0006 |

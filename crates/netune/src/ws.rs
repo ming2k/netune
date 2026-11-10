@@ -20,7 +20,7 @@ use crate::error::NetError;
 pub use netune_ws::Limits as WsLimits;
 
 /// Optional negotiation knobs for the WebSocket upgrade request.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct WsHandshake {
     /// Subprotocols to offer, in preference order (RFC 6455 §4.1). Sent as
     /// `Sec-WebSocket-Protocol`; the server's echo must match one of these,
@@ -32,12 +32,37 @@ pub struct WsHandshake {
     pub extra_headers: Vec<(String, String)>,
     /// Size ceilings for frames and reassembled messages.
     pub limits: WsLimits,
+    /// Bound on the upgrade response after the request has been written.
+    ///
+    /// An HTTP/1.1 peer that accepts the request and never answers must not
+    /// hold the upgrade forever. Default 10 s; `None` removes the bound for a
+    /// caller whose own deadline reports the stall as a connection failure.
+    pub handshake_timeout: Option<std::time::Duration>,
+}
+
+impl Default for WsHandshake {
+    fn default() -> Self {
+        Self {
+            subprotocols: Vec::new(),
+            extra_headers: Vec::new(),
+            limits: WsLimits::default(),
+            handshake_timeout: Some(crate::handshake::DEFAULT_HANDSHAKE_TIMEOUT),
+        }
+    }
 }
 
 impl WsHandshake {
     /// Offer one subprotocol.
     pub fn with_subprotocol(mut self, subprotocol: impl Into<String>) -> Self {
         self.subprotocols.push(subprotocol.into());
+        self
+    }
+
+    /// Replace the upgrade-response bound. `None` removes it; only do that when
+    /// an outer deadline exists that reports the stall as a connection failure.
+    #[must_use]
+    pub fn with_handshake_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.handshake_timeout = timeout;
         self
     }
 

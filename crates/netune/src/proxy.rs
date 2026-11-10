@@ -9,11 +9,15 @@
 //!
 //! Both handshakes are bounded and typed: a proxy that answers garbage, refuses
 //! the tunnel, or demands credentials we do not have produces a [`NetError`],
-//! never a silently truncated stream.
+//! never a silently truncated stream. The bound covers the whole tunnel
+//! exchange and defaults to 10 s; use
+//! [`ProxyConnector::with_handshake_timeout`] to change it.
 //!
 //! The proxy hop itself is plaintext. `https://` proxy URLs are therefore
 //! refused rather than silently downgraded: terminate TLS to the proxy outside
 //! this connector if the hop must be encrypted.
+
+use std::time::Duration;
 
 use base64::Engine as _;
 use netune_http1::{Http1Reader, Limits};
@@ -102,11 +106,24 @@ impl Proxy {
 pub struct ProxyConnector<C: Connector> {
     inner: C,
     proxy: Proxy,
+    handshake_timeout: Option<Duration>,
 }
 
 impl<C: Connector> ProxyConnector<C> {
     pub fn new(inner: C, proxy: Proxy) -> Self {
-        Self { inner, proxy }
+        Self {
+            inner,
+            proxy,
+            handshake_timeout: Some(crate::handshake::DEFAULT_HANDSHAKE_TIMEOUT),
+        }
+    }
+
+    /// Replace the proxy-tunnel bound. `None` removes it; only do that when an
+    /// outer deadline exists that reports the stall as a connection failure.
+    #[must_use]
+    pub fn with_handshake_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.handshake_timeout = timeout;
+        self
     }
 }
 
@@ -129,14 +146,23 @@ impl<C: Connector> Connector for ProxyConnector<C> {
         let established = self.inner.connect(&hop, recorder).await?;
         let mut stream = established.stream;
 
-        match &self.proxy {
-            Proxy::Http { credentials, .. } => {
-                http_connect(&mut stream, &target.authority, credentials.as_ref()).await?;
+        let handshake = async {
+            match &self.proxy {
+                Proxy::Http { credentials, .. } => {
+                    http_connect(&mut stream, &target.authority, credentials.as_ref()).await
+                }
+                Proxy::Socks5 { credentials, .. } => {
+                    socks5_connect(&mut stream, &target.authority, credentials.as_ref()).await
+                }
             }
-            Proxy::Socks5 { credentials, .. } => {
-                socks5_connect(&mut stream, &target.authority, credentials.as_ref()).await?;
-            }
-        }
+        };
+        crate::handshake::bound(
+            self.handshake_timeout,
+            "proxy handshake",
+            self.proxy.authority(),
+            handshake,
+        )
+        .await??;
         recorder.mark(EventKind::ProxyTunnel, 0, 0);
 
         Ok(Established {

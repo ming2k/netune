@@ -343,3 +343,63 @@ async fn a_finished_http2_body_returns_the_connection_to_the_pool() {
 
     server.await.expect("server completed");
 }
+
+/// A peer can complete TCP and keep the socket open without ever answering the
+/// client's HTTP/2 preface. The handshake, not the request, is what is stuck;
+/// the configured bound must turn that into a retryable connect failure and
+/// abandon the socket instead of holding a streaming attempt.
+#[tokio::test]
+async fn a_peer_that_never_answers_settings_is_bounded() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (release, released) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (_socket, _) = listener.accept().await.expect("accept");
+        let _ = released.await;
+    });
+
+    let client = Client::new(
+        TcpConnector::new(),
+        Pool::default(),
+        ClientConfig {
+            enable_http2: true,
+            h2_handshake_timeout: Some(Duration::from_millis(100)),
+            ..ClientConfig::default()
+        },
+    );
+
+    let started = std::time::Instant::now();
+    let error = match client
+        .request(
+            &target(port),
+            RequestHead::new(Method::GET, "/api/data"),
+            None,
+        )
+        .await
+    {
+        Ok(_) => panic!("a peer that never sends SETTINGS must not complete the request"),
+        Err(error) => error,
+    };
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(80),
+        "the error must be the handshake bound, not an instant refusal: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the configured bound must fire long before the 10 s default: {elapsed:?}"
+    );
+    assert_eq!(error.class(), "connect");
+    assert!(
+        error.is_retryable(),
+        "a handshake timeout happened before dispatch and is retryable: {error}"
+    );
+    assert!(
+        error.to_string().contains("HTTP/2 handshake"),
+        "the failure must name the stalled phase: {error}"
+    );
+
+    let _ = release.send(());
+    let _ = server.await;
+}

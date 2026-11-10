@@ -60,8 +60,9 @@ object you can inspect, fingerprint, and change:
   time allowed to produce each. A peer that will not finish its head never reaches
   application code.
 
-**Resilience** — culled keep-alive absorption:
+**Resilience** — bounded establishment and culled keep-alive absorption:
 
+- Every egress connection-establishment phase after DNS/TCP — proxy tunnel, TLS, HTTP/2 preface + SETTINGS, WebSocket upgrade, SOCKS5 UDP associate — has a configurable 10 s default bound. A peer that accepts and then stalls is a retryable `connect` failure naming the phase, never a generation timeout from an outer watchdog (`INV-TRANSPORT-05`, ADR-0040).
 - Shortened idle pool bound (20 s) prevents handing out connections about to be culled by intermediate gateways.
 - Transparent single retry on stale pooled sockets before receiving a response head (`INV-TRANSPORT-01`), eliminating spurious keep-alive failures without request replay hazard.
 - Precise error classification (`HttpError::Incomplete`) distinguishing peer socket closure from protocol smuggling or violations.
@@ -85,8 +86,8 @@ The crates are consumed from this repository by tag:
 
 ```toml
 [dependencies]
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.24" }
-netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.24" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.25" }
+netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.25" }
 ```
 
 Pin a `tag` (or a `rev` for the strictest reproducibility) and upgrade
@@ -162,7 +163,7 @@ stages as if they had not happened.
 
 ## Status
 
-Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.24`.
+Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.25`.
 
 MSRV: 1.95. License: MIT.
 

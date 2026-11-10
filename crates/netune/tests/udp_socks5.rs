@@ -262,3 +262,47 @@ async fn the_reported_maximum_leaves_room_for_the_wrapper() {
         "a datagram maximum cannot exceed the IP ceiling, got {maximum}"
     );
 }
+
+/// The UDP control connection performs a greeting and `UDP ASSOCIATE` before
+/// the relay exists. A proxy that accepts the control socket and stops must
+/// release the session under the configured bound.
+#[tokio::test]
+async fn a_control_connection_that_never_answers_is_bounded() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (_socket, _) = listener.accept().await.expect("accept");
+        let _ = released.await;
+    });
+
+    let proxy = Proxy::parse(&format!("socks5://{address}")).expect("proxy url");
+    let connector = Socks5DatagramConnector::new(TcpConnector::new(), proxy)
+        .expect("connector")
+        .with_handshake_timeout(Some(Duration::from_millis(100)));
+    let recorder = TraceCollector::start(32);
+
+    let started = std::time::Instant::now();
+    let error = match connector.connect("127.0.0.1:9", &recorder).await {
+        Ok(_) => panic!("a proxy that never answers UDP ASSOCIATE must not open a session"),
+        Err(error) => error,
+    };
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(80),
+        "the error must be the associate bound: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the configured bound must fire long before the 10 s default: {elapsed:?}"
+    );
+    assert_eq!(error.class(), "connect");
+    assert!(
+        error.to_string().contains("socks5 UDP associate"),
+        "the failure must name the stalled phase: {error}"
+    );
+
+    let _ = release.send(());
+    let _ = server.await;
+}

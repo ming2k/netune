@@ -277,3 +277,59 @@ async fn test_ws_rejection_bad_accept_key() {
     let err_str = result.err().unwrap().to_string();
     assert!(err_str.contains("mismatch"));
 }
+
+/// The upgrade response is peer-controlled: a server can accept the request
+/// and never send the 101. The handshake bound must turn that into a connect
+/// failure rather than holding the socket until an outer watchdog fires.
+#[tokio::test]
+async fn a_peer_that_never_answers_the_upgrade_is_bounded() {
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("port").port();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 1024];
+        let _ = socket.read(&mut buf).await;
+        let _ = released.await;
+    });
+
+    let client = Client::new(
+        TcpConnector::new(),
+        Pool::default(),
+        ClientConfig::default(),
+    );
+    let target = Target::plain(format!("127.0.0.1:{port}"));
+    let started = std::time::Instant::now();
+    let error = match client
+        .connect_ws_traced(
+            &target,
+            "/chat",
+            TraceCollector::start(64),
+            netune::WsHandshake::default().with_handshake_timeout(Some(Duration::from_millis(100))),
+        )
+        .await
+    {
+        Ok(_) => panic!("a peer that never sends 101 must not complete the upgrade"),
+        Err(error) => error,
+    };
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(80),
+        "the error must be the WebSocket handshake bound: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the configured bound must fire long before the 10 s default: {elapsed:?}"
+    );
+    assert_eq!(error.class(), "connect");
+    assert!(
+        error.to_string().contains("WebSocket handshake"),
+        "the failure must name the stalled phase: {error}"
+    );
+
+    let _ = release.send(());
+    let _ = server.await;
+}

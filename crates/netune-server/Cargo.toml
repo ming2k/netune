@@ -16,12 +16,12 @@ all-features = true
 [dependencies]
 bytes = { workspace = true }
 http = { workspace = true }
-netune-http1 = { path = "../netune-http1", version = "0.0.24" }
-netune-http2 = { path = "../netune-http2", version = "0.0.24", optional = true }
-netune-http3 = { path = "../netune-http3", version = "0.0.24", optional = true }
-netune-quic = { path = "../netune-quic", version = "0.0.24", optional = true }
-netune-io = { path = "../netune-io", version = "0.0.24" }
-netune-trace = { path = "../netune-trace", version = "0.0.24" }
+netune-http1 = { path = "../netune-http1", version = "0.0.25" }
+netune-http2 = { path = "../netune-http2", version = "0.0.25", optional = true }
+netune-http3 = { path = "../netune-http3", version = "0.0.25", optional = true }
+netune-quic = { path = "../netune-quic", version = "0.0.25", optional = true }
+netune-io = { path = "../netune-io", version = "0.0.25" }
+netune-trace = { path = "../netune-trace", version = "0.0.25" }
 tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt", "macros"] }
 # TLS termination. `rustls` is a TLS implementation, not an HTTP one, so it does not cross the
 # red-line ADR-0001 draws: nothing here parses HTTP, and the handshake is exactly what a server has
@@ -52,11 +52,11 @@ http3 = ["dep:netune-http3", "dep:netune-quic", "dep:rustls", "tls"]
 # and our ingress server interoperate, which is a property neither crate's own tests
 # can assert without depending on the other. Production dependencies stay leaf-only
 # ([INV-SERVER-01]); a `[dependencies]` entry here would be the inversion.
-netune = { path = "../netune", version = "0.0.24" }
-netune-http1 = { path = "../netune-http1", version = "0.0.24" }
-netune-http2 = { path = "../netune-http2", version = "0.0.24" }
-netune-http3 = { path = "../netune-http3", version = "0.0.24" }
-netune-quic = { path = "../netune-quic", version = "0.0.24" }
+netune = { path = "../netune", version = "0.0.25" }
+netune-http1 = { path = "../netune-http1", version = "0.0.25" }
+netune-http2 = { path = "../netune-http2", version = "0.0.25" }
+netune-http3 = { path = "../netune-http3", version = "0.0.25" }
+netune-quic = { path = "../netune-quic", version = "0.0.25" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
 # A self-signed certificate generator, so the TLS suite tests a real handshake rather than a mock.
 rcgen = { workspace = true }

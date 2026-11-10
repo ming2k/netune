@@ -11,7 +11,7 @@
 //! response may mark `HeadComplete`, or TTFT would be measured against a 302.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 #[cfg(feature = "http2")]
@@ -191,6 +191,19 @@ pub struct ClientConfig {
     pub max_redirects: u8,
     /// Whether to automatically upgrade to HTTP/2 when ALPN negotiates `h2`.
     pub enable_http2: bool,
+    /// Bound on a newly dialed HTTP/2 connection's preface and SETTINGS
+    /// exchange.
+    ///
+    /// The TLS handshake proves the peer holds the certificate, not that it
+    /// speaks HTTP/2: a peer can stop after `TlsEnd` and never answer SETTINGS,
+    /// which would otherwise hold a streaming attempt until an outer watchdog
+    /// fires. This bound covers the whole exchange (preface, SETTINGS and the
+    /// peer's ACK) and produces a retryable `connect` failure when it expires.
+    ///
+    /// Default 10 s. `None` removes the bound for a caller whose own deadline
+    /// reports the stall as a connection failure. Ignored on a pooled
+    /// connection, which already completed the exchange.
+    pub h2_handshake_timeout: Option<Duration>,
     /// The default observation policy for [`Client::request`].
     pub observation: Observation,
 }
@@ -202,6 +215,7 @@ impl Default for ClientConfig {
             user_agent: format!("netune/{}", env!("CARGO_PKG_VERSION")),
             max_redirects: 5,
             enable_http2: false,
+            h2_handshake_timeout: Some(crate::handshake::DEFAULT_HANDSHAKE_TIMEOUT),
             observation: Observation::Counters,
         }
     }
@@ -326,6 +340,31 @@ impl<C: Connector> Client<C> {
         target.force_h2
             || target.identity.h2_profile.is_some()
             || target.h2_request_profile.is_some()
+    }
+
+    /// Complete the HTTP/2 preface and SETTINGS exchange under the configured
+    /// bound.
+    ///
+    /// This is the phase between a verified TLS peer and a usable connection:
+    /// the peer has accepted the socket but has not yet shown it speaks HTTP/2.
+    /// It is bounded here, at the orchestrator, because the codec owns framing
+    /// and must not own clocks. The timeout covers the whole exchange, including
+    /// the peer's SETTINGS and ACK, and a stalled peer is never pooled.
+    #[cfg(feature = "http2")]
+    async fn http2_handshake(
+        &self,
+        stream: Box<dyn crate::connect::Transport>,
+        fingerprint: H2Fingerprint,
+        authority: &str,
+    ) -> Result<H2ClientConnection<Box<dyn crate::connect::Transport>>, NetError> {
+        crate::handshake::bound(
+            self.config.h2_handshake_timeout,
+            "HTTP/2 handshake",
+            authority,
+            H2ClientConnection::handshake(stream, fingerprint),
+        )
+        .await?
+        .map_err(|error| h2_error("handshake", error))
     }
 
     /// Register or replace an HTTP/1 request-header wire profile.
@@ -469,9 +508,9 @@ impl<C: Connector> Client<C> {
             let fp = plan.h2.ok_or_else(|| {
                 NetError::Protocol("HTTP/2 prewarm has no resolved H2 profile".into())
             })?;
-            let h2 = H2ClientConnection::handshake(established.stream, fp)
-                .await
-                .map_err(|error| h2_error("handshake", error))?;
+            let h2 = self
+                .http2_handshake(established.stream, fp, &target.authority)
+                .await?;
             self.pool
                 .put_http2(&key, h2, established.local_port, established.socket);
             return Ok(true);
@@ -684,13 +723,24 @@ impl<C: Connector> Client<C> {
 
         let mut reader =
             Http1Reader::with_limits_and_buffer(io, self.config.limits, BytesMut::new());
-        let response_head = match reader.read_response_head(&Method::GET).await {
-            Ok(head) => head,
-            Err(error) => {
+        let response_head = match crate::handshake::bound(
+            handshake.handshake_timeout,
+            "WebSocket handshake",
+            &target.authority,
+            reader.read_response_head(&Method::GET),
+        )
+        .await
+        {
+            Ok(Ok(head)) => head,
+            Ok(Err(error)) => {
                 return Err(fail(
                     &recorder,
                     format!("WebSocket upgrade response read: {error}"),
                 ));
+            }
+            Err(error) => {
+                recorder.mark(EventKind::Error, 0, 0);
+                return Err(error);
             }
         };
 
@@ -1048,9 +1098,9 @@ impl<C: Connector> Client<C> {
             let fp = plan.h2.clone().ok_or_else(|| {
                 NetError::Protocol("HTTP/2 was selected but no H2 profile was resolved".into())
             })?;
-            let h2 = H2ClientConnection::handshake(established.stream, fp)
-                .await
-                .map_err(|error| h2_error("handshake", error))?;
+            let h2 = self
+                .http2_handshake(established.stream, fp, &target.authority)
+                .await?;
             return self
                 .send_http2(
                     h2,

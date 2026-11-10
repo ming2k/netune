@@ -14,6 +14,12 @@ The hop to the proxy is plaintext in both cases. An `https://` proxy URL is
 refused rather than silently downgraded; if the proxy hop must be encrypted,
 terminate TLS outside this connector.
 
+Both tunnel handshakes are bounded (10 s by default): a proxy that accepts the
+socket and never answers `CONNECT` or the SOCKS5 greeting fails with a
+retryable `connect` error instead of holding the attempt. Use
+`ProxyConnector::with_handshake_timeout` to change the bound; `None` is only
+appropriate when an outer deadline reports the stall as a connection failure.
+
 ---
 
 ## Tunneling through an HTTP CONNECT Proxy

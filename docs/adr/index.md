@@ -48,3 +48,4 @@ Binding decisions for this repository. `Scope` tags identify the subsystems a re
 
 
 
+| [0040](0040-egress-handshakes-share-a-bound.md) | Every Egress Connection-Establishment Phase Shares a Configurable Bound | accepted | transport/egress, transport/proxy, transport/http2, transport/websocket, transport/datagram, observability | A shared 10 s default bounds proxy tunnels, TLS, HTTP/2 preface/SETTINGS, WebSocket upgrades and SOCKS5 UDP associate; expiry is a retryable `connect` failure naming the phase (`INV-TRANSPORT-05`) | 2026-11-10 |

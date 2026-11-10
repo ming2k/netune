@@ -339,6 +339,7 @@ fn split_datagram_authority(authority: &str) -> Result<(&str, u16), NetError> {
 pub struct Socks5DatagramConnector<C: Connector> {
     inner: C,
     proxy: Proxy,
+    handshake_timeout: Option<Duration>,
 }
 
 impl<C: Connector> std::fmt::Debug for Socks5DatagramConnector<C> {
@@ -362,7 +363,19 @@ impl<C: Connector> Socks5DatagramConnector<C> {
                 "only a SOCKS5 proxy can associate a UDP datagram session".into(),
             ));
         }
-        Ok(Self { inner, proxy })
+        Ok(Self {
+            inner,
+            proxy,
+            handshake_timeout: Some(crate::handshake::DEFAULT_HANDSHAKE_TIMEOUT),
+        })
+    }
+
+    /// Replace the UDP-associate bound. `None` removes it; only do that when an
+    /// outer deadline exists that reports the stall as a connection failure.
+    #[must_use]
+    pub fn with_handshake_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.handshake_timeout = timeout;
+        self
     }
 }
 
@@ -382,7 +395,13 @@ impl<C: Connector> DatagramConnector for Socks5DatagramConnector<C> {
             let established = self.inner.connect(&control_target, recorder).await?;
             let mut control = established.stream;
 
-            let bound = socks5_udp_associate(&mut control).await?;
+            let bound = crate::handshake::bound(
+                self.handshake_timeout,
+                "socks5 UDP associate",
+                self.proxy.authority(),
+                socks5_udp_associate(&mut control),
+            )
+            .await??;
             recorder.mark(EventKind::ProxyTunnel, 0, 0);
 
             // The local socket binds a wildcard address, not the reply's: a

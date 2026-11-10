@@ -15,6 +15,7 @@ use crate::error::NetError;
 pub struct H2Client<C: Connector> {
     connector: C,
     fingerprint: H2Fingerprint,
+    handshake_timeout: Option<std::time::Duration>,
 }
 
 impl<C: Connector> H2Client<C> {
@@ -23,7 +24,16 @@ impl<C: Connector> H2Client<C> {
         Self {
             connector,
             fingerprint,
+            handshake_timeout: Some(crate::handshake::DEFAULT_HANDSHAKE_TIMEOUT),
         }
+    }
+
+    /// Replace the HTTP/2 preface + SETTINGS bound. `None` removes it; only do
+    /// that when an outer deadline reports the stall as a connection failure.
+    #[must_use]
+    pub fn with_handshake_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.handshake_timeout = timeout;
+        self
     }
 
     /// Access the configured fingerprint.
@@ -52,9 +62,14 @@ impl<C: Connector> H2Client<C> {
         };
         let authority = &target.authority;
 
-        let mut h2 = H2ClientConnection::handshake(established.stream, self.fingerprint.clone())
-            .await
-            .map_err(|e| NetError::Protocol(format!("HTTP/2 handshake: {e}")))?;
+        let mut h2 = crate::handshake::bound(
+            self.handshake_timeout,
+            "HTTP/2 handshake",
+            authority,
+            H2ClientConnection::handshake(established.stream, self.fingerprint.clone()),
+        )
+        .await?
+        .map_err(|e| NetError::Protocol(format!("HTTP/2 handshake: {e}")))?;
 
         let response = h2
             .request(
@@ -200,5 +215,46 @@ mod tests {
         assert_eq!(response.body.as_ref(), b"h2 response data");
 
         server.await.expect("server finished");
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_never_answers_settings_is_bounded() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accept");
+            let _ = released.await;
+        });
+
+        let target = Target::plain(format!("127.0.0.1:{port}"));
+        let client = H2Client::new(TcpConnector::new(), H2Fingerprint::chrome())
+            .with_handshake_timeout(Some(std::time::Duration::from_millis(100)));
+        let recorder = TraceCollector::start(64);
+
+        let started = std::time::Instant::now();
+        let error = match client
+            .send(&target, Method::GET, "/v1/test", &[], None, &recorder)
+            .await
+        {
+            Ok(_) => panic!("a peer that never sends SETTINGS must not complete"),
+            Err(error) => error,
+        };
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= std::time::Duration::from_millis(80),
+            "the error must be the handshake bound: {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "the configured bound must fire long before the 10 s default: {elapsed:?}"
+        );
+        assert_eq!(error.class(), "connect");
+        assert!(error.is_retryable());
+        assert!(error.to_string().contains("HTTP/2 handshake"), "{error}");
+
+        let _ = release.send(());
+        let _ = server.await;
     }
 }

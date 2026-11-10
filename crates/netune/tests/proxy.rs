@@ -259,7 +259,7 @@ async fn a_refused_tunnel_is_an_error_not_a_truncated_stream() {
         Pool::default(),
         ClientConfig::default(),
     );
-    let error = client
+    let error = match client
         .send_traced(
             &Target::plain("127.0.0.1:9"),
             TraceCollector::start(64),
@@ -267,9 +267,121 @@ async fn a_refused_tunnel_is_an_error_not_a_truncated_stream() {
             None,
         )
         .await
-        .err()
-        .expect("refused");
+    {
+        Ok(_) => panic!("a refused tunnel must be an error"),
+        Err(error) => error,
+    };
     assert_eq!(error.class(), "connect");
     assert!(error.to_string().contains("403"), "{error}");
     let _ = refusing.await;
+}
+
+/// The proxy hop has its own exchange after TCP: HTTP `CONNECT` asks the proxy
+/// to open a tunnel and waits for its answer. A proxy that accepts the socket
+/// and never answers must be abandoned under the configured bound, not held
+/// until the caller's streaming watchdog fires.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proxy_that_never_answers_connect_is_bounded() {
+    use std::time::Duration;
+
+    let (listener, address) = bind().await;
+    let (release, released) = tokio::sync::oneshot::channel();
+    let proxy_task = tokio::spawn(async move {
+        let (_socket, _) = listener.accept().await.expect("proxy accept");
+        let _ = released.await;
+    });
+
+    let proxy = Proxy::parse(&format!("http://{address}")).expect("proxy");
+    let client = Client::new(
+        ProxyConnector::new(TcpConnector::new(), proxy)
+            .with_handshake_timeout(Some(Duration::from_millis(100))),
+        Pool::default(),
+        ClientConfig::default(),
+    );
+
+    let started = std::time::Instant::now();
+    let error = match client
+        .request(
+            &Target::plain("example.com:443"),
+            RequestHead::new(Method::GET, "/through-proxy"),
+            None,
+        )
+        .await
+    {
+        Ok(_) => panic!("a proxy that never answers CONNECT must not complete the request"),
+        Err(error) => error,
+    };
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(80),
+        "the error must be the proxy handshake bound: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the configured bound must fire long before the 10 s default: {elapsed:?}"
+    );
+    assert_eq!(error.class(), "connect");
+    assert!(error.is_retryable(), "an unanswered tunnel is retryable");
+    assert!(
+        error.to_string().contains("proxy handshake"),
+        "the failure must name the stalled phase: {error}"
+    );
+
+    let _ = release.send(());
+    let _ = proxy_task.await;
+}
+
+/// SOCKS5 has two round trips before the tunnel exists (greeting, then the
+/// CONNECT request). The same bound covers both, so a proxy that stalls after
+/// accepting the control connection cannot hold a datagram or TCP session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_socks5_proxy_that_never_answers_is_bounded() {
+    use std::time::Duration;
+
+    let (listener, address) = bind().await;
+    let (release, released) = tokio::sync::oneshot::channel();
+    let proxy_task = tokio::spawn(async move {
+        let (_socket, _) = listener.accept().await.expect("socks accept");
+        let _ = released.await;
+    });
+
+    let proxy = Proxy::parse(&format!("socks5://{address}")).expect("proxy");
+    let client = Client::new(
+        ProxyConnector::new(TcpConnector::new(), proxy)
+            .with_handshake_timeout(Some(Duration::from_millis(100))),
+        Pool::default(),
+        ClientConfig::default(),
+    );
+
+    let started = std::time::Instant::now();
+    let error = match client
+        .request(
+            &Target::plain("example.com:443"),
+            RequestHead::new(Method::GET, "/through-proxy"),
+            None,
+        )
+        .await
+    {
+        Ok(_) => panic!("a proxy that never answers the greeting must not complete the request"),
+        Err(error) => error,
+    };
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(80),
+        "the error must be the proxy handshake bound: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the configured bound must fire long before the 10 s default: {elapsed:?}"
+    );
+    assert_eq!(error.class(), "connect");
+    assert!(
+        error.to_string().contains("proxy handshake"),
+        "the failure must name the stalled phase: {error}"
+    );
+
+    let _ = release.send(());
+    let _ = proxy_task.await;
 }

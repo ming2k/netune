@@ -8,18 +8,18 @@ This document provides a factual overview of all crates comprising the `netune` 
 
 | Crate | Directory | Current Version | Primary Responsibility |
 | :--- | :--- | :--- | :--- |
-| `netune-trace` | `crates/netune-trace` | `0.0.24` | Zero-allocation trace ring buffer, pure timing derivations, JA3/JA4 TLS ClientHello parser |
-| `netune-http1` | `crates/netune-http1` | `0.0.24` | HTTP/1.1 line protocol parser and serializer, differential-tested against `hyper` |
-| `netune-http2` | `crates/netune-http2` | `0.0.24` | HTTP/2 wire protocol (RFC 9113) in both roles, HPACK header compression (RFC 7541), and Akamai fingerprint impersonation |
-| `netune-ws` | `crates/netune-ws` | `0.0.24` | Pure RFC 6455 WebSocket codec: frame encoder/decoder, role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys |
-| `netune-io` | `crates/netune-io` | `0.0.24` | Byte-path transport adapters shared by both orchestrators: the `TimedIo` syscall tap and the `FaultIo` chaos twin. No socket, no policy |
-| `netune-egress` | `crates/netune-egress` | `0.0.24` | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the single source of truth every outbound transport (TCP, UDP, QUIC) confines with. No I/O, no socket |
-| `netune` | `crates/netune` | `0.0.24` | **Egress** orchestrator: DNS, TCP, TLS, **UDP datagrams**, pool, proxy (incl. SOCKS5 UDP associate), egress confinement, and client request orchestration |
-| `netune-server` | `crates/netune-server` | `0.0.24` | **Ingress** orchestrator: TCP accept loop, admission control, slow-peer bounds, per-connection ingress tracing, graceful drain, HTTP/1.1 + HTTP/2 + optional HTTP/3 over one handler |
-| `netune-quic` | `crates/netune-quic` | `0.0.24` | First-class QUIC transport (RFC 9000, RFC 9221) with `QuicProfile` handshake shaping, per-connection `QuicUdpSocketFactory`/`CongestionControllerFactory` consumer seams, keep-alive/idle policy and verified peer-certificate access, and unified `aws-lc-rs` crypto (`[INV-QUIC-01..04]`, `[INV-QUIC-18..22]`) |
-| `netune-http3` | `crates/netune-http3` | `0.0.24` | Owned HTTP/3 client and server transport (RFC 9114), owned dynamic QPACK (RFC 9204), and typed SETTINGS profiles |
-| `netune-webtransport` | `crates/netune-webtransport` | `0.0.24` | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, control/flow capsules, reliable reset, GOAWAY teardown and Adversarial request admission (browser interop still outstanding) |
-| `netune-probe` | `crates/netune-probe` | `0.0.24` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
+| `netune-trace` | `crates/netune-trace` | `0.0.25` | Zero-allocation trace ring buffer, pure timing derivations, JA3/JA4 TLS ClientHello parser |
+| `netune-http1` | `crates/netune-http1` | `0.0.25` | HTTP/1.1 line protocol parser and serializer, differential-tested against `hyper` |
+| `netune-http2` | `crates/netune-http2` | `0.0.25` | HTTP/2 wire protocol (RFC 9113) in both roles, HPACK header compression (RFC 7541), and Akamai fingerprint impersonation |
+| `netune-ws` | `crates/netune-ws` | `0.0.25` | Pure RFC 6455 WebSocket codec: frame encoder/decoder, role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys |
+| `netune-io` | `crates/netune-io` | `0.0.25` | Byte-path transport adapters shared by both orchestrators: the `TimedIo` syscall tap and the `FaultIo` chaos twin. No socket, no policy |
+| `netune-egress` | `crates/netune-egress` | `0.0.25` | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the single source of truth every outbound transport (TCP, UDP, QUIC) confines with. No I/O, no socket |
+| `netune` | `crates/netune` | `0.0.25` | **Egress** orchestrator: DNS, TCP, TLS, **UDP datagrams**, pool, proxy (incl. SOCKS5 UDP associate), egress confinement, and client request orchestration |
+| `netune-server` | `crates/netune-server` | `0.0.25` | **Ingress** orchestrator: TCP accept loop, admission control, slow-peer bounds, per-connection ingress tracing, graceful drain, HTTP/1.1 + HTTP/2 + optional HTTP/3 over one handler |
+| `netune-quic` | `crates/netune-quic` | `0.0.25` | First-class QUIC transport (RFC 9000, RFC 9221) with `QuicProfile` handshake shaping, per-connection `QuicUdpSocketFactory`/`CongestionControllerFactory` consumer seams, keep-alive/idle policy and verified peer-certificate access, and unified `aws-lc-rs` crypto (`[INV-QUIC-01..04]`, `[INV-QUIC-18..22]`) |
+| `netune-http3` | `crates/netune-http3` | `0.0.25` | Owned HTTP/3 client and server transport (RFC 9114), owned dynamic QPACK (RFC 9204), and typed SETTINGS profiles |
+| `netune-webtransport` | `crates/netune-webtransport` | `0.0.25` | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, control/flow capsules, reliable reset, GOAWAY teardown and Adversarial request admission (browser interop still outstanding) |
+| `netune-probe` | `crates/netune-probe` | `0.0.25` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
 
 ---
 
@@ -85,14 +85,17 @@ This document provides a factual overview of all crates comprising the `netune` 
 
 ### `netune`
 - **Key Types**:
-  - `Client`: Drives the request lifecycle, redirect handling, and response body streaming.
-  - `Client::connect_ws` / `WsStream`: RFC 6455 client upgrade over the owned transport, with automatic pong and close-handshake completion ([ADR-0007](../adr/0007-owned-client-websocket-codec.md)).
+  - `Client`: Drives the request lifecycle, redirect handling, and response body streaming. `ClientConfig::h2_handshake_timeout` bounds a newly dialed HTTP/2 preface + SETTINGS exchange (10 s by default); a pooled connection is not re-bound.
+  - `H2Client`: Explicit HTTP/2 client with fingerprint impersonation; `with_handshake_timeout` applies the same preface + SETTINGS bound when the caller drives the connection directly.
+  - `Client::connect_ws` / `WsStream`: RFC 6455 client upgrade over the owned transport, with automatic pong and close-handshake completion ([ADR-0007](../adr/0007-owned-client-websocket-codec.md)); `WsHandshake::with_handshake_timeout` bounds the upgrade response (10 s by default).
   - `WsSession` / `WsSessionConfig`: Client-driven heartbeat liveness (ping interval + pong deadline) for long-lived WebSocket sessions; automatic reconnection is deliberately excluded as harness policy.
   - `Pool` / `PoolKey`: Connection reuse keyed on `(authority, ConnectionIdentity)` with a 20 s idle timeout. The typed key makes an omitted identity axis a compile error, not a cache bug.
   - `ConnectionPlan` / `ProfileId`: every TLS/H1/H2 name resolves through `Client::plan` before a socket is opened; unknown profiles fail loudly ([ADR-0019](../adr/0019-connection-plan-and-wire-profile-registry.md)).
   - `H1WireProfile` / `H1Registry`: declarative HTTP/1 header order and casing, applied per request (not part of the pool key).
   - `H2Registry`: built-in and caller-supplied HTTP/2 fingerprints, resolved independently of the TLS-name match.
   - `TlsProfile` & `TlsRouterConnector`: Configures and lazily compiles TLS identities; the handshake has a 10 s default bound (`with_handshake_timeout`), separate from the DNS/TCP connect timeout.
+  - `ProxyConnector`: HTTP `CONNECT` and SOCKS5 tunnel exchange; `with_handshake_timeout` bounds the whole exchange (10 s by default). The proxy hop is plaintext, and `https://` proxy URLs are refused rather than downgraded.
+  - Establishment bounds (`[INV-TRANSPORT-05]`): DNS/TCP, proxy tunnel, TLS, HTTP/2 preface + SETTINGS, WebSocket upgrade and SOCKS5 UDP associate each complete under a configurable bound; expiry is a retryable `connect` failure naming the phase ([ADR-0040](../adr/0040-egress-handshakes-share-a-bound.md)).
   - `FaultIo`: In-process fault injection engine.
   - `DnsResolver` & `StaticResolver`: Asynchronous, mockable DNS resolution.
   - `SocketConfig`: L3/L4 transport tuning — TTL, buffer sizing, MSS, `SO_MARK`,
@@ -109,6 +112,8 @@ This document provides a factual overview of all crates comprising the `netune` 
     confinement and `SocketConfig`, with `SO_MARK` before `connect`.
   - `Socks5DatagramConnector`: SOCKS5 UDP associate; destinations are literal IP
     addresses, foreign-source datagrams are dropped, fragments are refused.
+    `with_handshake_timeout` bounds the greeting + associate exchange (10 s by
+    default).
   - **Not implemented, by decision**: REALITY client authentication. It needs a
     caller-chosen `legacy_session_id` and a CA-bypassing verifier, neither of
     which `rustls` 0.23 exposes; see

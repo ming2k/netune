@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.25] - 2026-11-10
+
+### Added
+
+- **Per-phase handshake overrides.** `ClientConfig::h2_handshake_timeout`,
+  `H2Client::with_handshake_timeout`, `ProxyConnector::with_handshake_timeout`,
+  `Socks5DatagramConnector::with_handshake_timeout` and
+  `WsHandshake::with_handshake_timeout` expose the bound on the phase each one
+  owns. Every phase defaults to the same 10 s budget; `None` removes it only
+  for a caller whose outer deadline reports the stall as a connection failure.
+
+### Security
+
+- **Every egress connection-establishment phase is bounded.** The HTTP/2
+  preface + SETTINGS exchange, HTTP `CONNECT` and SOCKS5 proxy tunnels,
+  WebSocket upgrade responses and SOCKS5 UDP associate now run under
+  `[INV-TRANSPORT-05]` (ADR-0040). Previously a peer could accept TCP and, if
+  TLS had already completed, never answer the next exchange; the stall
+  surfaced at an outer streaming watchdog as a generation failure. Expiry is a
+  retryable `NetError::Connect` naming the phase and peer, and a never-completed
+  connection is never pooled.
+- **The proxy module's "bounded" claim is now true.** Its HTTP `CONNECT` and
+  SOCKS5 greeting/CONNECT exchanges had no clock attached; both now share the
+  same bound.
+
 ## [0.0.24] - 2026-11-10
 
 ### Added

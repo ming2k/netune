@@ -54,6 +54,7 @@ mod error;
 mod evasion;
 #[cfg(feature = "http2")]
 mod h2_client;
+mod handshake;
 mod pool;
 mod profile;
 mod proxy;

@@ -26,6 +26,7 @@ use tokio_rustls::TlsConnector as RustlsConnector;
 
 use crate::connect::{Connector, Established, Target};
 use crate::error::NetError;
+use crate::handshake::{DEFAULT_HANDSHAKE_TIMEOUT, bound};
 use crate::tls_profile::{Preset, TlsProfile};
 
 /// Build the client TLS configuration: platform roots, HTTP/1.1 ALPN, and the
@@ -46,13 +47,6 @@ pub fn platform_client_config() -> Result<Arc<rustls::ClientConfig>, NetError> {
     Ok(Arc::new(config))
 }
 
-/// The default bound on a TLS handshake once the TCP connection exists.
-///
-/// The TCP connector's timeout covers DNS and TCP; a peer that accepts the
-/// socket and then never answers the ClientHello would otherwise hang the
-/// attempt without an error to report.
-const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// A connector that establishes TLS on top of an inner connector.
 pub struct TlsConnector<C: Connector> {
     inner: C,
@@ -64,7 +58,7 @@ impl<C: Connector> TlsConnector<C> {
         Self {
             inner,
             config,
-            handshake_timeout: Some(DEFAULT_TLS_HANDSHAKE_TIMEOUT),
+            handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
         }
     }
 
@@ -110,16 +104,9 @@ async fn handshake(
         .map_err(|error| NetError::Connect(format!("invalid TLS server name: {error}")))?;
     let connector = RustlsConnector::from(Arc::clone(config));
     let connecting = connector.connect(name, established.stream);
-    let stream = match timeout {
-        Some(limit) => tokio::time::timeout(limit, connecting).await.map_err(|_| {
-            NetError::Connect(format!(
-                "TLS handshake with {server_name} exceeded {} ms",
-                limit.as_millis()
-            ))
-        })?,
-        None => connecting.await,
-    }
-    .map_err(|error| NetError::Connect(format!("TLS handshake with {server_name}: {error}")))?;
+    let stream = bound(timeout, "TLS handshake", &server_name, connecting)
+        .await?
+        .map_err(|error| NetError::Connect(format!("TLS handshake with {server_name}: {error}")))?;
 
     let (alpn, version) = {
         let (_, connection) = stream.get_ref();
@@ -199,7 +186,7 @@ impl<C: Connector> TlsRouterConnector<C> {
             provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
             custom: HashMap::new(),
             configs: Mutex::new(HashMap::new()),
-            handshake_timeout: Some(DEFAULT_TLS_HANDSHAKE_TIMEOUT),
+            handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
         }
     }
 

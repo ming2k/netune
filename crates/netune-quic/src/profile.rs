@@ -43,6 +43,8 @@ pub struct QuicTransportParameters {
     pub active_connection_id_limit: u64,
     /// Whether RFC 9221 unreliable datagram support is enabled.
     pub enable_datagrams: bool,
+    /// Whether reliable partial stream reset (`RESET_STREAM_AT`) is supported.
+    pub reset_stream_at: bool,
 }
 
 impl Default for QuicTransportParameters {
@@ -58,6 +60,7 @@ impl Default for QuicTransportParameters {
             max_udp_payload_size: Some(1472),
             active_connection_id_limit: 4,
             enable_datagrams: true,
+            reset_stream_at: true,
         }
     }
 }
@@ -156,6 +159,7 @@ impl QuicProfile {
                 max_udp_payload_size: Some(1472),
                 active_connection_id_limit: 4,
                 enable_datagrams: true,
+                reset_stream_at: true,
             },
             congestion: CongestionAlgorithm::Bbr,
             enable_0rtt: true,
@@ -179,6 +183,7 @@ impl QuicProfile {
                 max_udp_payload_size: Some(1472),
                 active_connection_id_limit: 8,
                 enable_datagrams: true,
+                reset_stream_at: true,
             },
             congestion: CongestionAlgorithm::Bbr,
             enable_0rtt: true,

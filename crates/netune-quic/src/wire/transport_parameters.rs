@@ -25,6 +25,7 @@ pub const ACTIVE_CONNECTION_ID_LIMIT: u64 = 0x0e;
 pub const INITIAL_SOURCE_CONNECTION_ID: u64 = 0x0f;
 pub const RETRY_SOURCE_CONNECTION_ID: u64 = 0x10;
 pub const MAX_DATAGRAM_FRAME_SIZE: u64 = 0x20;
+pub const RESET_STREAM_AT: u64 = 0x1d;
 
 /// The preferred-address transport parameter payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +59,7 @@ pub struct TransportParameters {
     pub initial_source_connection_id: Option<Vec<u8>>,
     pub retry_source_connection_id: Option<Vec<u8>>,
     pub max_datagram_frame_size: Option<u64>,
+    pub reset_stream_at: bool,
     pub unknown: Vec<(u64, Vec<u8>)>,
 }
 
@@ -148,6 +150,10 @@ impl TransportParameters {
             MAX_DATAGRAM_FRAME_SIZE,
             self.max_datagram_frame_size,
         )?;
+        if self.reset_stream_at {
+            varint::encode(&mut out, RESET_STREAM_AT)?;
+            varint::encode(&mut out, 0)?;
+        }
         for (id, value) in &self.unknown {
             put_bytes(&mut out, *id, value)?;
         }
@@ -253,6 +259,12 @@ impl TransportParameters {
                 }
                 MAX_DATAGRAM_FRAME_SIZE => {
                     parameters.max_datagram_frame_size = Some(read_varint(id, value)?);
+                }
+                RESET_STREAM_AT => {
+                    if !value.is_empty() {
+                        return Err(invalid(id, "reset_stream_at must be empty"));
+                    }
+                    parameters.reset_stream_at = true;
                 }
                 _ => {
                     if value.len() > 1 << 20 {
@@ -373,6 +385,7 @@ mod tests {
             initial_source_connection_id: Some(vec![5, 6, 7]),
             retry_source_connection_id: Some(vec![8, 9]),
             max_datagram_frame_size: Some(1200),
+            reset_stream_at: true,
             unknown: vec![(0x1f * 2 + 0x21, vec![1, 2, 3])],
         }
     }

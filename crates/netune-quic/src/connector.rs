@@ -268,6 +268,7 @@ impl QuicConnector {
             } else {
                 None
             },
+            reset_stream_at: parameters.reset_stream_at,
             ..TransportParameters::default()
         }
     }

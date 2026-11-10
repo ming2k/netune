@@ -46,6 +46,10 @@ struct FlowState {
 pub struct WebTransportSendStream {
     inner: SendStream,
     flow: Arc<Mutex<FlowState>>,
+    /// Bytes of the WT stream header already written before the application
+    /// payload. Reliable reset sizes include this prefix.
+    header_len: u64,
+    reset: bool,
 }
 
 impl WebTransportSendStream {
@@ -53,6 +57,11 @@ impl WebTransportSendStream {
         self.inner.id()
     }
     pub async fn write_all(&mut self, data: &[u8]) -> Result<(), WebTransportError> {
+        if self.reset {
+            return Err(WebTransportError::SessionClosed(
+                "stream was reset".to_string(),
+            ));
+        }
         {
             let mut flow = self.flow.lock().unwrap_or_else(|e| e.into_inner());
             if flow.closed {
@@ -68,10 +77,33 @@ impl WebTransportSendStream {
         self.inner.write_all(data).await.map_err(quic_error)
     }
     pub async fn finish(&mut self) -> Result<(), WebTransportError> {
+        if self.reset {
+            return Err(WebTransportError::SessionClosed(
+                "stream was reset".to_string(),
+            ));
+        }
         self.inner.finish().await.map_err(quic_error)
     }
     pub fn reset(&mut self, code: u64) {
+        self.reset = true;
         self.inner.reset(code);
+    }
+
+    /// Reset the WT stream after reliably delivering `payload_reliable_size`
+    /// application bytes. The WT stream header is included automatically.
+    pub fn reset_reliable(
+        &mut self,
+        code: u64,
+        payload_reliable_size: u64,
+    ) -> Result<(), WebTransportError> {
+        let result = self
+            .inner
+            .reset_at(code, self.header_len.saturating_add(payload_reliable_size))
+            .map_err(quic_error);
+        if result.is_ok() {
+            self.reset = true;
+        }
+        result
     }
 }
 
@@ -138,6 +170,14 @@ impl WebTransportClient {
         .await
         .map_err(http3_error)?;
         h3.wait_settings().await;
+        if !h3
+            .quic_connection()
+            .is_some_and(netune_quic::owned::Connection::peer_reset_stream_at)
+        {
+            return Err(WebTransportError::Settings(
+                "peer did not advertise reset_stream_at".to_string(),
+            ));
+        }
         let enabled = h3.peer_setting(SETTINGS_WT_ENABLED).unwrap_or(0);
         if enabled != 1 {
             return Err(WebTransportError::Settings(
@@ -235,10 +275,16 @@ impl WebTransportServer {
                 "WebTransport server must enable WT".to_string(),
             ));
         }
+        let peer_reset_stream_at = connection.peer_reset_stream_at();
         let h3 = H3ServerConnection::new(connection, &h3_profile(settings))
             .await
             .map_err(http3_error)?;
         h3.wait_settings().await;
+        if !peer_reset_stream_at {
+            return Err(WebTransportError::Settings(
+                "peer did not advertise reset_stream_at".to_string(),
+            ));
+        }
         if h3.peer_setting(SETTINGS_WT_ENABLED).unwrap_or(0) != 1 {
             return Err(WebTransportError::Settings(
                 "peer did not enable WebTransport over HTTP/3".to_string(),
@@ -403,6 +449,8 @@ impl WebTransportSession {
             send: WebTransportSendStream {
                 inner: send,
                 flow: self.flow.clone(),
+                header_len: header.len() as u64,
+                reset: false,
             },
             recv: WebTransportRecvStream {
                 inner: recv,
@@ -431,6 +479,8 @@ impl WebTransportSession {
         Ok(WebTransportSendStream {
             inner: send,
             flow: self.flow.clone(),
+            header_len: header.len() as u64,
+            reset: false,
         })
     }
 
@@ -455,6 +505,8 @@ impl WebTransportSession {
                         send: WebTransportSendStream {
                             inner: send,
                             flow: self.flow.clone(),
+                            header_len: 0,
+                            reset: false,
                         },
                         recv: WebTransportRecvStream {
                             inner: recv,

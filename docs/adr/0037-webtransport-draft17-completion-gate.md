@@ -1,7 +1,7 @@
 ---
 id: ADR-0037
 title: "WebTransport Draft-17 Completion Gate"
-status: draft
+status: accepted
 date: 2026-11-10
 scope: [protocol/webtransport, protocol/quic, api/webtransport, product/web]
 superseded_by: null
@@ -9,13 +9,20 @@ superseded_by: null
 
 # 0037. WebTransport Draft-17 Completion Gate
 
-- Status: Draft
+- Status: Accepted
 - Date: 2026-11-10
 - Deciders: Ming Li
 - Related: [ADR-0033](0033-webtransport-over-http3.md),
   [ADR-0028](0028-owned-quic.md), [ADR-0032](0032-h3-capsule-protocol.md)
 
 ---
+
+> Implementation status: Gates 1 and 3 have landed — `RESET_STREAM_AT` wire and
+> transport parameter, reliable-prefix delivery, reliable partial reset on the
+> send side, session close/drain/peer-close and flow-control rejection. Gate 2
+> still needs GOAWAY-specific teardown; Gate 4 (browser/non-Rust interop) and the
+> adversarial replay portion of Gate 5 remain outstanding. This ADR does not
+> claim draft-17 completeness.
 
 ## Context and Problem Statement
 
@@ -32,6 +39,19 @@ compliance. The remaining gaps are not cosmetic:
 Calling WebTransport production-ready now would be a false claim. The correct
 response is a gated completion track, separate from the core QUIC/H3 release
 line.
+
+### Invariants & Behavioral Boundaries
+
+- **`[INV-WT-05]` Reliable Reset Preserves the Prefix**: a reliable reset must
+  deliver exactly the bytes up to its reliable size, then surface the reset; it
+  never delivers bytes beyond that prefix, and it requires the peer's
+  `reset_stream_at` advertisement. *Enforced by*:
+  `a_reliable_partial_reset_delivers_the_prefix_before_the_reset` and
+  `reset_at_before_stream_data_opens_the_stream_and_keeps_the_prefix`.
+- **`[INV-WT-06]` Closed Sessions Refuse New Streams**: a local or peer
+  `WT_CLOSE_SESSION`, and a drain acknowledgement, must terminate the session;
+  no new stream may be opened after the close is observed. *Enforced by*:
+  the close/drain session test and the peer-close test.
 
 ## Completion Gate
 

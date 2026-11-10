@@ -613,6 +613,15 @@ impl Connection {
             .path_mtu()
     }
 
+    /// Whether the peer advertised reliable partial stream reset.
+    pub fn peer_reset_stream_at(&self) -> bool {
+        self.inner
+            .core
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .peer_reset_stream_at()
+    }
+
     /// The peer's certificate chain, when the handshake presented one.
     pub fn peer_certificates(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
         self.inner
@@ -867,6 +876,17 @@ impl SendStream {
         }
         self.inner.notify.notify_one();
     }
+
+    /// Reset the stream after reliably delivering its prefix up to
+    /// `reliable_size` bytes.
+    pub fn reset_at(&mut self, code: u64, reliable_size: u64) -> Result<(), QuicError> {
+        {
+            let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());
+            core.reset_at(self.id, code, reliable_size)?;
+        }
+        self.inner.notify.notify_one();
+        Ok(())
+    }
 }
 
 /// A receive half of an owned QUIC stream.
@@ -892,6 +912,11 @@ impl RecvStream {
             match result {
                 ReadResult::Data(data) => return Ok(Some(data)),
                 ReadResult::Fin => return Ok(None),
+                ReadResult::Reset(code) => {
+                    return Err(QuicError::Stream(format!(
+                        "stream reset by peer with application code {code}"
+                    )));
+                }
                 ReadResult::Pending => notified.await,
             }
         }

@@ -601,6 +601,13 @@ impl H3Client {
         Ok(client)
     }
 
+    /// The underlying QUIC connection, when this client owns one.
+    pub fn quic_connection(&self) -> Option<&netune_quic::owned::Connection> {
+        self.quic
+            .as_ref()
+            .map(netune_quic::QuicConnection::connection)
+    }
+
     /// Wait for the underlying QUIC handshake to complete.
     pub async fn wait_handshake(&self) -> Result<(), H3Error> {
         if let Some(quic) = &self.quic {

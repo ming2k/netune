@@ -48,6 +48,12 @@ pub enum Frame {
         error_code: u64,
         final_size: u64,
     },
+    ResetStreamAt {
+        stream_id: u64,
+        error_code: u64,
+        final_size: u64,
+        reliable_size: u64,
+    },
     StopSending {
         stream_id: u64,
         error_code: u64,
@@ -134,6 +140,12 @@ impl Frame {
                 stream_id: varint::decode(buf)?,
                 error_code: varint::decode(buf)?,
                 final_size: varint::decode(buf)?,
+            }),
+            0x24 => Ok(Self::ResetStreamAt {
+                stream_id: varint::decode(buf)?,
+                error_code: varint::decode(buf)?,
+                final_size: varint::decode(buf)?,
+                reliable_size: varint::decode(buf)?,
             }),
             0x05 => Ok(Self::StopSending {
                 stream_id: varint::decode(buf)?,
@@ -263,6 +275,18 @@ impl Frame {
                 varint::encode(out, *stream_id)?;
                 varint::encode(out, *error_code)?;
                 varint::encode(out, *final_size)?;
+            }
+            Self::ResetStreamAt {
+                stream_id,
+                error_code,
+                final_size,
+                reliable_size,
+            } => {
+                varint::encode(out, 0x24)?;
+                varint::encode(out, *stream_id)?;
+                varint::encode(out, *error_code)?;
+                varint::encode(out, *final_size)?;
+                varint::encode(out, *reliable_size)?;
             }
             Self::StopSending {
                 stream_id,
@@ -516,6 +540,12 @@ mod tests {
                 stream_id: 4,
                 error_code: 0x10,
                 final_size: 1024,
+            },
+            Frame::ResetStreamAt {
+                stream_id: 6,
+                error_code: 0x12,
+                final_size: 2048,
+                reliable_size: 1024,
             },
             Frame::StopSending {
                 stream_id: 8,

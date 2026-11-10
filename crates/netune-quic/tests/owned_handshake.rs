@@ -472,6 +472,7 @@ impl OwnedClient {
                 | Frame::PathResponse(_)
                 | Frame::NewToken { .. }
                 | Frame::ResetStream { .. }
+                | Frame::ResetStreamAt { .. }
                 | Frame::StopSending { .. }
                 | Frame::Datagram { .. } => {}
                 Frame::Stream {

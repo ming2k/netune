@@ -59,6 +59,7 @@ fn frame_len(frame: &Frame) -> Result<usize, QuicError> {
 pub(crate) enum ReadResult {
     Data(Bytes),
     Fin,
+    Reset(u64),
     Pending,
 }
 
@@ -94,6 +95,8 @@ struct SendState {
     fin: bool,
     fin_sent: bool,
     reset: Option<u64>,
+    reset_at: Option<u64>,
+    reset_frame_sent: bool,
     max_data: u64,
 }
 
@@ -105,6 +108,8 @@ struct RecvState {
     window: u64,
     consumed: u64,
     stopped: bool,
+    reset: Option<u64>,
+    reliable_size: Option<u64>,
 }
 
 struct Stream {
@@ -1225,6 +1230,8 @@ impl Core {
                     fin: false,
                     fin_sent: false,
                     reset: None,
+                    reset_at: None,
+                    reset_frame_sent: false,
                     max_data: window,
                 }),
                 recv: Some(RecvState {
@@ -1235,6 +1242,8 @@ impl Core {
                     window: self.local_stream_window(true),
                     consumed: 0,
                     stopped: false,
+                    reset: None,
+                    reliable_size: None,
                 }),
             },
         );
@@ -1260,6 +1269,8 @@ impl Core {
                     fin: false,
                     fin_sent: false,
                     reset: None,
+                    reset_at: None,
+                    reset_frame_sent: false,
                     max_data: window,
                 }),
                 recv: None,
@@ -1306,12 +1317,15 @@ impl Core {
             .recv
             .as_mut()
             .ok_or_else(|| QuicError::Stream("stream is send-only".to_string()))?;
+        let limit = recv.reliable_size.unwrap_or(u64::MAX);
         let mut data = BytesMut::new();
-        while data.len() < max {
+        while data.len() < max && recv.read < limit {
             let Some(chunk) = recv.chunks.remove(&recv.read) else {
                 break;
             };
-            let take = (max - data.len()).min(chunk.len());
+            let take = (max - data.len())
+                .min((limit - recv.read) as usize)
+                .min(chunk.len());
             data.extend_from_slice(&chunk[..take]);
             recv.read += take as u64;
             if take < chunk.len() {
@@ -1336,6 +1350,13 @@ impl Core {
                     .push(Frame::MaxData(self.local_max_data));
             }
             return Ok(ReadResult::Data(data.freeze()));
+        }
+        if let Some(code) = recv.reset
+            && recv
+                .reliable_size
+                .is_none_or(|reliable| recv.read >= reliable)
+        {
+            return Ok(ReadResult::Reset(code));
         }
         if recv.fin == Some(recv.read) {
             return Ok(ReadResult::Fin);
@@ -1371,7 +1392,34 @@ impl Core {
             && let Some(send) = stream.send.as_mut()
         {
             send.reset = Some(code);
+            send.reset_at = None;
+            send.reset_frame_sent = true;
         }
+    }
+
+    pub(crate) fn reset_at(
+        &mut self,
+        id: u64,
+        code: u64,
+        reliable_size: u64,
+    ) -> Result<(), QuicError> {
+        let stream = self
+            .streams
+            .get_mut(&id)
+            .ok_or_else(|| QuicError::Stream("unknown stream".to_string()))?;
+        let send = stream
+            .send
+            .as_mut()
+            .ok_or_else(|| QuicError::Stream("stream is receive-only".to_string()))?;
+        if reliable_size > send.data.len() as u64 {
+            return Err(QuicError::Stream(
+                "reliable reset exceeds buffered stream data".to_string(),
+            ));
+        }
+        send.reset = Some(code);
+        send.reset_at = Some(reliable_size);
+        send.reset_frame_sent = false;
+        Ok(())
     }
 
     pub(crate) fn accept_bi(&mut self) -> Option<u64> {
@@ -1407,6 +1455,12 @@ impl Core {
 
     pub(crate) fn path_mtu(&self) -> usize {
         self.validated_mtu
+    }
+
+    pub(crate) fn peer_reset_stream_at(&self) -> bool {
+        self.peer_tp
+            .as_ref()
+            .is_some_and(|parameters| parameters.reset_stream_at)
     }
 
     fn packet_budget(&self, level: Level) -> usize {
@@ -1570,12 +1624,63 @@ impl Core {
                     error_code,
                     final_size,
                 } => {
+                    self.ensure_peer_stream(stream_id)?;
                     if let Some(stream) = self.streams.get_mut(&stream_id)
                         && let Some(recv) = stream.recv.as_mut()
                     {
+                        if final_size < recv.read {
+                            return Err(QuicError::Protocol(
+                                "RESET_STREAM final size is below bytes already read".to_string(),
+                            ));
+                        }
                         recv.fin = Some(final_size);
                         recv.consumed = final_size;
-                        let _ = error_code;
+                        recv.reset = Some(error_code);
+                        recv.reliable_size = None;
+                        recv.chunks.clear();
+                    }
+                }
+                Frame::ResetStreamAt {
+                    stream_id,
+                    error_code,
+                    final_size,
+                    reliable_size,
+                } => {
+                    if reliable_size > final_size {
+                        return Err(QuicError::Protocol(
+                            "RESET_STREAM_AT reliable size exceeds final size".to_string(),
+                        ));
+                    }
+                    self.ensure_peer_stream(stream_id)?;
+                    if let Some(stream) = self.streams.get_mut(&stream_id)
+                        && let Some(recv) = stream.recv.as_mut()
+                    {
+                        if final_size < recv.read {
+                            return Err(QuicError::Protocol(
+                                "RESET_STREAM_AT final size is below bytes already read"
+                                    .to_string(),
+                            ));
+                        }
+                        recv.fin = Some(final_size);
+                        recv.consumed = final_size;
+                        recv.reset = Some(error_code);
+                        recv.reliable_size = Some(reliable_size);
+                        recv.chunks.retain(|offset, _| *offset < reliable_size);
+                        if let Some((&offset, len)) = recv
+                            .chunks
+                            .iter()
+                            .find(|(offset, chunk)| {
+                                **offset < reliable_size
+                                    && **offset + chunk.len() as u64 > reliable_size
+                            })
+                            .map(|(offset, chunk)| (offset, chunk.len()))
+                        {
+                            let keep = (reliable_size - offset) as usize;
+                            let _ = len;
+                            if let Some(chunk) = recv.chunks.get_mut(&offset) {
+                                *chunk = chunk.slice(..keep);
+                            }
+                        }
                     }
                 }
                 Frame::Ack(ack) => self.handle_ack(level, ack),
@@ -1607,6 +1712,68 @@ impl Core {
         Ok(ack_eliciting)
     }
 
+    fn ensure_peer_stream(&mut self, id: u64) -> Result<(), QuicError> {
+        if self.streams.contains_key(&id) {
+            return Ok(());
+        }
+        if self.is_local_stream(id) {
+            return Err(QuicError::Protocol(
+                "peer referenced a local-only stream".to_string(),
+            ));
+        }
+        let bidi = id & 0x2 == 0;
+        let limit = if bidi {
+            self.local_tp.initial_max_streams_bidi.unwrap_or(0)
+        } else {
+            self.local_tp.initial_max_streams_uni.unwrap_or(0)
+        };
+        let opened = if bidi {
+            &mut self.peer_opened_bidi
+        } else {
+            &mut self.peer_opened_uni
+        };
+        if *opened >= limit {
+            return Err(QuicError::Protocol(
+                "peer exceeded the stream limit".to_string(),
+            ));
+        }
+        *opened += 1;
+        let stream = Stream {
+            send: if bidi {
+                Some(SendState {
+                    data: Vec::new(),
+                    sent: 0,
+                    fin: false,
+                    fin_sent: false,
+                    reset: None,
+                    reset_at: None,
+                    reset_frame_sent: false,
+                    max_data: self.peer_stream_window(true),
+                })
+            } else {
+                None
+            },
+            recv: Some(RecvState {
+                chunks: BTreeMap::new(),
+                read: 0,
+                fin: None,
+                max_data: self.local_stream_window(bidi),
+                window: self.local_stream_window(bidi),
+                consumed: 0,
+                stopped: false,
+                reset: None,
+                reliable_size: None,
+            }),
+        };
+        self.streams.insert(id, stream);
+        if bidi {
+            self.accept_bi.push_back(id);
+        } else {
+            self.accept_uni.push_back(id);
+        }
+        Ok(())
+    }
+
     fn handle_stream(
         &mut self,
         id: u64,
@@ -1614,59 +1781,7 @@ impl Core {
         fin: bool,
         data: &[u8],
     ) -> Result<(), QuicError> {
-        if !self.streams.contains_key(&id) {
-            if self.is_local_stream(id) {
-                return Err(QuicError::Protocol(
-                    "peer referenced a local-only stream".to_string(),
-                ));
-            }
-            let bidi = id & 0x2 == 0;
-            let limit = if bidi {
-                self.local_tp.initial_max_streams_bidi.unwrap_or(0)
-            } else {
-                self.local_tp.initial_max_streams_uni.unwrap_or(0)
-            };
-            let opened = if bidi {
-                &mut self.peer_opened_bidi
-            } else {
-                &mut self.peer_opened_uni
-            };
-            if *opened >= limit {
-                return Err(QuicError::Protocol(
-                    "peer exceeded the stream limit".to_string(),
-                ));
-            }
-            *opened += 1;
-            let stream = Stream {
-                send: if bidi {
-                    Some(SendState {
-                        data: Vec::new(),
-                        sent: 0,
-                        fin: false,
-                        fin_sent: false,
-                        reset: None,
-                        max_data: self.peer_stream_window(true),
-                    })
-                } else {
-                    None
-                },
-                recv: Some(RecvState {
-                    chunks: BTreeMap::new(),
-                    read: 0,
-                    fin: None,
-                    max_data: self.local_stream_window(bidi),
-                    window: self.local_stream_window(bidi),
-                    consumed: 0,
-                    stopped: false,
-                }),
-            };
-            self.streams.insert(id, stream);
-            if bidi {
-                self.accept_bi.push_back(id);
-            } else {
-                self.accept_uni.push_back(id);
-            }
-        }
+        self.ensure_peer_stream(id)?;
         let Some(stream) = self.streams.get_mut(&id) else {
             return Err(QuicError::Protocol("stream disappeared".to_string()));
         };
@@ -2007,23 +2122,29 @@ impl Core {
         let mut ids: Vec<u64> = self.streams.keys().copied().collect();
         ids.sort_unstable();
         for id in ids {
-            let mut frame = None;
+            let mut data_frame = None;
+            let mut reset_frame = None;
             if let Some(stream) = self.streams.get_mut(&id)
                 && let Some(send) = stream.send.as_mut()
             {
+                if send.reset.is_some() && send.reset_at.is_none() {
+                    continue;
+                }
                 let available = send.data.len() as u64 - send.sent;
-                if available > 0 {
+                let reliable = send.reset_at.unwrap_or(u64::MAX);
+                if available > 0 && send.sent < reliable {
                     let window = send
                         .max_data
                         .saturating_sub(send.sent)
                         .min(send_max_data.saturating_sub(self.send_data))
                         .min(MAX_STREAM_FRAME as u64)
-                        .min(available);
+                        .min(available)
+                        .min(reliable.saturating_sub(send.sent));
                     if window > 0 {
                         let start = send.sent as usize;
                         let end = start + window as usize;
                         let data = Bytes::copy_from_slice(&send.data[start..end]);
-                        let fin = send.fin && end == send.data.len();
+                        let fin = send.fin && end == send.data.len() && send.reset_at.is_none();
                         let candidate = Frame::Stream {
                             stream_id: id,
                             offset: start as u64,
@@ -2038,9 +2159,9 @@ impl Core {
                         send.fin_sent |= fin;
                         send.sent += window;
                         self.send_data += window;
-                        frame = Some(candidate);
+                        data_frame = Some(candidate);
                     }
-                } else if send.fin && !send.fin_sent {
+                } else if send.fin && !send.fin_sent && send.reset.is_none() {
                     let candidate = Frame::Stream {
                         stream_id: id,
                         offset: send.sent,
@@ -2053,10 +2174,31 @@ impl Core {
                     }
                     *budget -= len;
                     send.fin_sent = true;
-                    frame = Some(candidate);
+                    data_frame = Some(candidate);
+                }
+                if let Some(reliable) = send.reset_at
+                    && send.sent >= reliable
+                    && !send.reset_frame_sent
+                {
+                    let candidate = Frame::ResetStreamAt {
+                        stream_id: id,
+                        error_code: send.reset.unwrap_or(0),
+                        final_size: send.data.len() as u64,
+                        reliable_size: reliable,
+                    };
+                    let len = frame_len(&candidate)?;
+                    if len > *budget {
+                        break;
+                    }
+                    *budget -= len;
+                    send.reset_frame_sent = true;
+                    reset_frame = Some(candidate);
                 }
             }
-            if let Some(frame) = frame {
+            if let Some(frame) = data_frame {
+                frames.push(frame);
+            }
+            if let Some(frame) = reset_frame {
                 frames.push(frame);
             }
         }
@@ -2268,6 +2410,43 @@ mod tests {
         let mut bytes = BytesMut::new();
         frame.encode(&mut bytes).expect("encode");
         bytes.freeze()
+    }
+
+    #[test]
+    fn reset_at_before_stream_data_opens_the_stream_and_keeps_the_prefix() {
+        let mut core = core();
+        core.local_tp.initial_max_streams_bidi = Some(10);
+        core.local_tp.initial_max_stream_data_bidi_remote = Some(1024);
+        core.local_tp.initial_max_data = Some(1024);
+        core.local_max_data = 1024;
+        core.process_frames(
+            Level::OneRtt,
+            &frame_bytes(Frame::ResetStreamAt {
+                stream_id: 1,
+                error_code: 9,
+                final_size: 8,
+                reliable_size: 4,
+            }),
+        )
+        .expect("reset frame opens the stream");
+        core.process_frames(
+            Level::OneRtt,
+            &frame_bytes(Frame::Stream {
+                stream_id: 1,
+                offset: 0,
+                fin: false,
+                data: Bytes::from_static(b"0123"),
+            }),
+        )
+        .expect("stream data after reset");
+        match core.read(1, 16).expect("read prefix") {
+            ReadResult::Data(data) => assert_eq!(data.as_ref(), b"0123"),
+            _ => panic!("expected the reliable prefix"),
+        }
+        assert!(matches!(
+            core.read(1, 16).expect("read reset"),
+            ReadResult::Reset(9)
+        ));
     }
 
     #[test]

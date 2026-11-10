@@ -40,7 +40,7 @@ Binding decisions for this repository. `Scope` tags identify the subsystems a re
 | [0034](0034-quic-consumer-seams.md) | Consumer Seams for the Owned QUIC Transport | accepted | transport/quic, api/quic, security/egress, security/tls, recovery/congestion | Per-connection `QuicUdpSocketFactory`, `CongestionControllerFactory`, keep-alive/idle timeout and verified peer-certificate access; product policy stays outside the engine (`INV-QUIC-18..22`) | 2026-11-10 |
 | [0035](0035-quic-ingress-handshake-observability.md) | Incoming QUIC Handshake Failures Are Observable and Non-Fatal | accepted | transport/quic, transport/ingress, api/quic, observability | `AcceptError` separates endpoint shutdown from handshake failure; H3 ingress continues and publishes failures through a bounded broadcast (`INV-QUIC-23`, `INV-SERVER-25`) | 2026-11-10 |
 | [0036](0036-dplpmtud-probe-state-machine.md) | DPLPMTUD Is a Bounded Probe State Machine | accepted | transport/quic, protocol/rfc9000, recovery/path-mtu, observability | Probe state machine with validated path MTU, ACK/loss feedback and black-hole response; no application frames in probes | 2026-11-10 |
-| [0037](0037-webtransport-draft17-completion-gate.md) | WebTransport Draft-17 Completion Gate | draft | protocol/webtransport, protocol/quic, api/webtransport, product/web | Explicit gates for reliable reset, teardown, flow control, browser interop and security before production claim | 2026-11-10 |
+| [0037](0037-webtransport-draft17-completion-gate.md) | WebTransport Draft-17 Completion Gate | accepted | protocol/webtransport, protocol/quic, api/webtransport, product/web | Explicit gates for reliable reset, teardown, flow control, browser interop and security before production claim | 2026-11-10 |
 
 
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.17] - 2026-11-10
+
+### Added
+
+- **Reliable partial stream reset.** QUIC implements `RESET_STREAM_AT` and the
+  `reset_stream_at` transport parameter. WebTransport exposes
+  `reset_reliable`, delivers exactly the reliable application prefix and then
+  surfaces the reset; the receive path also handles a reset that arrives before
+  the first STREAM frame.
+- **WebTransport teardown.** Close/drain delivery, peer-initiated close and
+  post-close stream refusal are covered by tests; flow-control overrun is
+  rejected before it reaches the wire. ADR-0037 gates 1 and 3 are landed,
+  close/drain/peer-close teardown is covered, and GOAWAY-specific teardown,
+  browser interop and adversarial replay remain outstanding.
+
 ## [0.0.16] - 2026-11-10
 
 ### Added

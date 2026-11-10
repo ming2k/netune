@@ -254,7 +254,7 @@ dependencies = [
 
 [[package]]
 name = "netune-egress"
-version = "0.0.20"
+version = "0.0.21"
 
 [[package]]
 name = "netune-fuzz"
@@ -267,11 +267,12 @@ dependencies = [
  "netune-http2",
  "netune-http3",
  "netune-quic",
+ "netune-webtransport",
 ]
 
 [[package]]
 name = "netune-http1"
-version = "0.0.20"
+version = "0.0.21"
 dependencies = [
  "bytes",
  "http",
@@ -280,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http2"
-version = "0.0.20"
+version = "0.0.21"
 dependencies = [
  "bytes",
  "http",
@@ -289,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http3"
-version = "0.0.20"
+version = "0.0.21"
 dependencies = [
  "bytes",
  "http",
@@ -301,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "netune-quic"
-version = "0.0.20"
+version = "0.0.21"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -316,9 +317,21 @@ dependencies = [
 
 [[package]]
 name = "netune-trace"
-version = "0.0.20"
+version = "0.0.21"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "netune-webtransport"
+version = "0.0.21"
+dependencies = [
+ "bytes",
+ "http",
+ "netune-http3",
+ "netune-quic",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

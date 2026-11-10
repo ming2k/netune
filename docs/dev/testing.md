@@ -114,7 +114,8 @@ harness as browser interoperability.
 ### 4.2 Fuzzing and soak
 
 The network parsers have `cargo-fuzz` targets under `fuzz/` (`quic_frames`,
-`quic_packets`, `h3_qpack`, `http2_frames`, `http1_target`). They run in the
+`quic_packets`, `h3_qpack`, `http2_frames`, `http1_target`,
+`webtransport_capsules`). They run in the
 scheduled `Fuzz and soak` workflow, not on every pull request. The long-running
 QUIC echo/keep-alive test is ignored by default and is run by the same workflow:
 

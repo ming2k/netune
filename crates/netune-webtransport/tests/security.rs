@@ -583,6 +583,68 @@ async fn a_spoofed_uni_session_id_closes_the_h3_connection() {
 }
 
 #[tokio::test]
+async fn an_incoming_data_overrun_terminates_the_session() {
+    let endpoint = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport(),
+            retry: false,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = endpoint.local_addr();
+    let server_task = tokio::spawn(async move {
+        let connection = endpoint.accept().await.expect("accept");
+        let mut wt = WebTransportServer::new(
+            connection,
+            WebTransportSettings {
+                initial_max_data: 4,
+                ..WebTransportSettings::default()
+            },
+        )
+        .await
+        .expect("wt server");
+        let mut session = wt.accept().await.expect("accept wt").expect("session");
+        let mut stream = session.accept_bidi().await.expect("accept bidi");
+        let error = stream
+            .recv
+            .read(16)
+            .await
+            .expect_err("incoming WT_MAX_DATA overrun must fail");
+        assert!(error.to_string().contains("WT_MAX_DATA"), "{error}");
+        assert!(
+            session.open_bidi().await.is_err(),
+            "an incoming flow-control violation must close the session"
+        );
+    });
+    let connector =
+        QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config((*client_tls()).clone());
+    let mut client = WebTransportClient::connect(
+        &connector,
+        addr,
+        "localhost",
+        WebTransportSettings::default(),
+    )
+    .await
+    .expect("wt client");
+    let session = client
+        .connect_session("https://localhost/incoming-limit")
+        .await
+        .expect("session");
+    let mut header = bytes::BytesMut::new();
+    netune_webtransport::encode_bidi_header(session.id(), &mut header).expect("header");
+    let mut send = session.quic().open_bi().await.expect("raw stream").0;
+    send.write_all(&header).await.expect("header write");
+    send.write_all(&[0u8; 8]).await.expect("payload write");
+    send.finish().await.expect("finish");
+    server_task.await.expect("server task");
+}
+
+#[tokio::test]
 async fn a_reset_before_payload_surfaces_only_the_stream_header() {
     let endpoint = Endpoint::server(
         "127.0.0.1:0",

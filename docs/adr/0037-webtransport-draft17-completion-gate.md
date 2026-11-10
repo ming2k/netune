@@ -22,7 +22,7 @@ superseded_by: null
 > send side, session close/drain/peer-close, GOAWAY session refusal and
 > flow-control rejection. Gate 4 is partially landed: the non-Rust
 > `quic-go/webtransport-go` peer completes bidi, uni and datagram exchanges
-> (ADR-0038), but Chrome 157 does not advertise `reset_stream_at`, so the browser
+> (ADR-0038), but Chrome 157 and Chrome 159 unstable do not advertise `reset_stream_at`, so the browser
 > half remains blocked. Gate 5 is now exercised by the admission, Origin,
 > session-ID and adversarial control suite in ADR-0039. This ADR does not claim
 > draft-17 completeness while the browser gate remains open.

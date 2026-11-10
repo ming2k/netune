@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [quic_frames, quic_packets, h3_qpack, http2_frames, http1_target]
+        target: [quic_frames, quic_packets, h3_qpack, http2_frames, http1_target, webtransport_capsules]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

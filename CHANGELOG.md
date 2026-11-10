@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.21] - 2026-11-10
+
+### Added
+
+- **WebTransport fuzz coverage.** `fuzz/fuzz_targets/webtransport_capsules.rs`
+  fuzzes WT control capsules, unidirectional headers and bidirectional stream
+  signals; the target is part of the scheduled fuzz matrix.
+- **Incoming flow-control test.** A peer that exceeds the advertised
+  `WT_MAX_DATA` via a raw WebTransport stream now has its session marked
+  terminal and is covered by `an_incoming_data_overrun_terminates_the_session`.
+
+### Notes
+
+- Chrome 157 stable and Chrome 159 unstable were also probed against the owned
+  origin. Neither advertises `reset_stream_at`, so the browser half of
+  ADR-0037 Gate 4 remains externally blocked.
+
 ## [0.0.20] - 2026-11-10
 
 ### Security

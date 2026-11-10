@@ -116,6 +116,7 @@ ADR-0037 Gate 5 is satisfied by the following test classes:
 | post-drain stream | `a_drain_refuses_new_streams` |
 | early client enable setting | `a_client_enable_setting_does_not_gate_server_admission` |
 | reset before payload | `a_reset_before_payload_surfaces_only_the_stream_header` |
+| incoming data overrun | `an_incoming_data_overrun_terminates_the_session` |
 
 This table is the gate definition, not a claim that every possible WebTransport
 security property has been tested.

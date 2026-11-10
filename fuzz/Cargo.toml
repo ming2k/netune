@@ -15,6 +15,7 @@ netune-http1 = { path = "../crates/netune-http1" }
 netune-http2 = { path = "../crates/netune-http2" }
 netune-http3 = { path = "../crates/netune-http3" }
 netune-quic = { path = "../crates/netune-quic" }
+netune-webtransport = { path = "../crates/netune-webtransport" }
 
 [workspace]
 
@@ -45,5 +46,11 @@ doc = false
 [[bin]]
 name = "http1_target"
 path = "fuzz_targets/http1_target.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "webtransport_capsules"
+path = "fuzz_targets/webtransport_capsules.rs"
 test = false
 doc = false

@@ -20,7 +20,7 @@ superseded_by: null
 
 > Implementation status: the non-Rust half of ADR-0037 Gate 4 now passes
 > against `quic-go/webtransport-go` for bidirectional streams, unidirectional
-> streams and datagrams. The browser half remains blocked: Chrome 157 does not
+> streams and datagrams. The browser half remains blocked: Chrome 157 and Chrome 159 unstable do not
 > advertise the `reset_stream_at` QUIC transport parameter required by
 > draft-ietf-webtrans-http3-17. Gate 4 is therefore not complete.
 

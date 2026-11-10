@@ -11,8 +11,8 @@ readme = false
 [dependencies]
 bytes = { workspace = true }
 http = { workspace = true }
-netune-quic = { path = "../netune-quic", version = "0.0.20" }
-netune-trace = { path = "../netune-trace", version = "0.0.20" }
+netune-quic = { path = "../netune-quic", version = "0.0.21" }
+netune-trace = { path = "../netune-trace", version = "0.0.21" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "time", "sync"] }
 

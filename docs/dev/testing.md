@@ -88,7 +88,27 @@ The benchmark gate is intentionally separate from `cargo test`: it measures
 instructions, not wall time, and fails a regression against a baseline generated
 in the same CI run (`ir=0%`).
 
-### 4.1 Fuzzing and soak
+### 4.1 Independent WebTransport interop
+
+`scripts/webtransport-go-interop.sh` starts the owned WebTransport origin and
+runs the independent Go peer in `interop/webtransport-go/`. The peer must
+complete a bidirectional stream, a unidirectional stream in each direction and
+a datagram exchange in both directions against `netune-webtransport`. The same
+script is the `WebTransport non-Rust interop (Go)` CI job:
+
+```bash
+./scripts/webtransport-go-interop.sh
+```
+
+The harness uses loopback only. `go run` may fetch the pinned Go modules on its
+first invocation; that is tool acquisition, not a live network test.
+
+The browser half of ADR-0037 Gate 4 is not automated yet: Chrome 157 does not
+advertise the `reset_stream_at` transport parameter that draft-17 requires, so a
+browser run fails before the first WebTransport session. Do not treat the Go
+harness as browser interoperability.
+
+### 4.2 Fuzzing and soak
 
 The network parsers have `cargo-fuzz` targets under `fuzz/` (`quic_frames`,
 `quic_packets`, `h3_qpack`, `http2_frames`, `http1_target`). They run in the

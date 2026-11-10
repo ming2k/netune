@@ -52,8 +52,10 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-H3-09..11]` | H3 datagrams require bilateral SETTINGS, route only by Quarter Stream ID and are bounded before registration; extended CONNECT is an opt-in typed `:protocol` extension. | ADR-0030 |
 | `[INV-H3-12]` | Early H3 request frames are retained until the handshake decision and replayed in 1-RTT after rejection. | ADR-0031 |
 | `[INV-H3-13..14]` | Capsule values are bounded, incomplete prefixes retained and truncation rejected; duplex CONNECT keeps the request body open after the response head. | ADR-0032 |
+| `[INV-H3-15]` | Extended CONNECT is gated by the accepting server's own `SETTINGS_ENABLE_CONNECT_PROTOCOL`; the client's setting is not required. | ADR-0038 |
 | `[INV-WT-01..04]` | WebTransport session IDs are client-initiated bidi stream IDs; the draft is isolated in `netune-webtransport`; CONNECT never uses 0-RTT; WT stream/data limits are cumulative and enforced. | ADR-0033 |
 | `[INV-WT-05..06]` | Reliable reset delivers exactly its prefix and requires `reset_stream_at`; a closed session refuses new streams. | ADR-0037 |
+| `[INV-WT-07]` | A draft-17 endpoint advertises both WebTransport SETTINGS codepoints and selects the peer's highest common draft; the server ignores the client's server-only enable setting. | ADR-0038 |
 | `[INV-SOCKET-01]` | A `SocketConfig` option is either applied or reported; no pre-connect option may be silently skipped by the fast path (`needs_manual_socket`). | ADR-0006, ADR-0010 |
 | `[INV-TRANSPORT-00..04]` | Replay safety: a pooled socket that drops before any response-head byte is replaced; after that point it is never retried. Idle bound, distinct `Incomplete`. | ADR-0001 (`00`), ADR-0005 (`01..04`) |
 | `[INV-EGRESS-01..03]` | Confinement is checked before connect; private, loopback, link-local and metadata ranges are refused. | ADR-0002 |
@@ -78,6 +80,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-QUIC-18..22]` | Consumer seams never widen the transport: confinement precedes a per-connection client socket factory (an ingress endpoint multiplexes many connections over its bound socket), a custom congestion controller is policy only, keep-alive is a post-handshake PING bounded by the idle timer, and peer certificates are exposed only after rustls verification. | ADR-0034 |
 | `[INV-QUIC-23]` | A failed incoming handshake is reported exactly once as `AcceptError::Handshake`, never as a connection and never as endpoint shutdown. | ADR-0035 |
 | `[INV-QUIC-24]` | A path MTU is raised only by an ACKed probe packet; probes never carry application frames, never exceed the local/peer ceiling, and a lost/black-holed probe leaves the validated MTU unchanged. | ADR-0036 |
+| `[INV-QUIC-25]` | A server Initial uses the client's source connection ID as its destination CID, including a zero-length value, and chooses an independent non-zero local source CID. | ADR-0038 |
 
 The authoritative wording of each invariant lives in its ADR. This table is an index, not a second source of truth; if the two disagree, the ADR wins and this table is corrected.
 

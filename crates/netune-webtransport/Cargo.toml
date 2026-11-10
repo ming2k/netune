@@ -10,8 +10,8 @@ description = "Owned WebTransport over HTTP/3 (draft-ietf-webtrans-http3-17) for
 [dependencies]
 bytes = { workspace = true }
 http = { workspace = true }
-netune-http3 = { path = "../netune-http3", version = "0.0.18" }
-netune-quic = { path = "../netune-quic", version = "0.0.18" }
+netune-http3 = { path = "../netune-http3", version = "0.0.19" }
+netune-quic = { path = "../netune-quic", version = "0.0.19" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 

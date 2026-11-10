@@ -79,7 +79,7 @@ impl H3ServerConnection {
                         .extensions()
                         .get::<crate::proto::ExtendedConnectProtocol>()
                         .is_some()
-                        && !self.connection.shared().extended_connect_enabled()
+                        && !self.connection.shared().local_extended_connect_enabled()
                     {
                         self.connection.shared().set_error(
                             crate::proto::code::error_code::H3_MESSAGE_ERROR,

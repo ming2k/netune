@@ -20,9 +20,11 @@ superseded_by: null
 > Implementation status: Gates 1-3 have landed — `RESET_STREAM_AT` wire and
 > transport parameter, reliable-prefix delivery, reliable partial reset on the
 > send side, session close/drain/peer-close, GOAWAY session refusal and
-> flow-control rejection. Gate 4 (browser/non-Rust interop) and the adversarial
-> replay portion of Gate 5 remain outstanding. This ADR does not claim draft-17
-> completeness.
+> flow-control rejection. Gate 4 is partially landed: the non-Rust
+> `quic-go/webtransport-go` peer completes bidi, uni and datagram exchanges
+> (ADR-0038), but Chrome 157 does not advertise `reset_stream_at`, so the browser
+> half remains blocked. The adversarial replay portion of Gate 5 remains
+> outstanding. This ADR does not claim draft-17 completeness.
 
 ## Context and Problem Statement
 
@@ -99,5 +101,6 @@ a gate that cannot run in CI is not a gate.
 
 ## Links
 
-- [ADR-0033](0033-webtransport-over-http3.md)
+- [ADR-0033](0033-webtransport-over-http3.md),
+  [ADR-0038](0038-webtransport-external-interoperability.md)
 - `draft-ietf-webtrans-http3-17`

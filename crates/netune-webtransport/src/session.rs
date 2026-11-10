@@ -13,7 +13,7 @@ use netune_http3::{
 use netune_quic::owned::{Connection as QuicConnection, RecvStream, SendStream};
 
 use crate::{
-    ControlCapsule, SETTINGS_WT_ENABLED, SETTINGS_WT_INITIAL_MAX_DATA,
+    ControlCapsule, SETTINGS_WT_ENABLED, SETTINGS_WT_ENABLED_DRAFT16, SETTINGS_WT_INITIAL_MAX_DATA,
     SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI, SETTINGS_WT_INITIAL_MAX_STREAMS_UNI, SessionId,
     WT_STREAM_SIGNAL, WT_UNI_STREAM_TYPE, WebTransportError, WebTransportSettings,
     encode_bidi_header, encode_uni_header,
@@ -178,7 +178,10 @@ impl WebTransportClient {
                 "peer did not advertise reset_stream_at".to_string(),
             ));
         }
-        let enabled = h3.peer_setting(SETTINGS_WT_ENABLED).unwrap_or(0);
+        let enabled = h3
+            .peer_setting(SETTINGS_WT_ENABLED)
+            .or_else(|| h3.peer_setting(SETTINGS_WT_ENABLED_DRAFT16))
+            .unwrap_or(0);
         if enabled != 1 {
             return Err(WebTransportError::Settings(
                 "peer did not enable WebTransport over HTTP/3".to_string(),
@@ -285,11 +288,8 @@ impl WebTransportServer {
                 "peer did not advertise reset_stream_at".to_string(),
             ));
         }
-        if h3.peer_setting(SETTINGS_WT_ENABLED).unwrap_or(0) != 1 {
-            return Err(WebTransportError::Settings(
-                "peer did not enable WebTransport over HTTP/3".to_string(),
-            ));
-        }
+        // draft-ietf-webtrans-http3-17 Section 3.1: SETTINGS_WT_ENABLED has no
+        // meaning when sent by a client; a server MUST ignore it.
         let peer = peer_settings(&h3)?;
         let events = h3.enable_stream_extension(vec![WT_UNI_STREAM_TYPE], WT_STREAM_SIGNAL);
         let routes: Routes = Arc::new(Mutex::new(HashMap::new()));

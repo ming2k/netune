@@ -751,10 +751,10 @@ impl H3Client {
             .extensions()
             .get::<crate::proto::ExtendedConnectProtocol>()
             .is_some()
-            && !self.connection.shared().extended_connect_enabled()
+            && !self.connection.shared().peer_extended_connect_enabled()
         {
             self.connection.shared().wait_settings().await;
-            if !self.connection.shared().extended_connect_enabled() {
+            if !self.connection.shared().peer_extended_connect_enabled() {
                 return Err(H3Error::H3(
                     "extended CONNECT was not negotiated".to_string(),
                 ));

@@ -41,6 +41,7 @@ Binding decisions for this repository. `Scope` tags identify the subsystems a re
 | [0035](0035-quic-ingress-handshake-observability.md) | Incoming QUIC Handshake Failures Are Observable and Non-Fatal | accepted | transport/quic, transport/ingress, api/quic, observability | `AcceptError` separates endpoint shutdown from handshake failure; H3 ingress continues and publishes failures through a bounded broadcast (`INV-QUIC-23`, `INV-SERVER-25`) | 2026-11-10 |
 | [0036](0036-dplpmtud-probe-state-machine.md) | DPLPMTUD Is a Bounded Probe State Machine | accepted | transport/quic, protocol/rfc9000, recovery/path-mtu, observability | Probe state machine with validated path MTU, ACK/loss feedback and black-hole response; no application frames in probes | 2026-11-10 |
 | [0037](0037-webtransport-draft17-completion-gate.md) | WebTransport Draft-17 Completion Gate | accepted | protocol/webtransport, protocol/quic, api/webtransport, product/web | Explicit gates for reliable reset, teardown, flow control, browser interop and security before production claim | 2026-11-10 |
+| [0038](0038-webtransport-external-interoperability.md) | WebTransport External Interoperability and Role-Correct Framing | accepted | protocol/webtransport, protocol/quic, protocol/http3, api/webtransport, product/web | Independent Go peer completes bidi, uni and datagram exchange; role-correct server CID and extended CONNECT framing; dual draft-16/draft-17 SETTINGS negotiation (`INV-QUIC-25`, `INV-H3-15`, `INV-WT-07`) | 2026-11-10 |
 
 
 

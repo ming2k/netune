@@ -1344,3 +1344,71 @@ async fn dplpmtud_does_not_validate_a_black_holed_size() {
     drop(connection);
     let _ = tokio::time::timeout(Duration::from_secs(5), server_task).await;
 }
+
+#[tokio::test]
+async fn server_addresses_a_client_with_a_zero_length_source_cid() {
+    use bytes::Bytes;
+    use netune_quic::crypto::{initial_keys, protect_long};
+    use netune_quic::wire::packet::{LongPacket, LongType, VERSION_1};
+
+    let server = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: server_tls(),
+            transport: transport(),
+            retry: false,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
+        },
+    )
+    .await
+    .expect("server endpoint");
+    let addr = server.local_addr();
+
+    let original_dcid = b"netune-raw".to_vec();
+    let keys = initial_keys(&original_dcid, rustls::Side::Client).expect("initial keys");
+    let mut payload = vec![0u8; 1200];
+    payload[0] = 0x01; // PING makes the packet ACK-eliciting; the rest is PADDING.
+    let packet = LongPacket {
+        ty: LongType::Initial,
+        version: VERSION_1,
+        destination_connection_id: original_dcid,
+        source_connection_id: Vec::new(),
+        token: Vec::new(),
+        packet_number: 0,
+        packet_number_len: 4,
+        payload: Bytes::from(payload),
+    };
+    let protected = protect_long(&packet, &keys.local).expect("protect Initial");
+
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("raw client socket");
+    client
+        .send_to(&protected, addr)
+        .await
+        .expect("send Initial");
+    let mut response = [0u8; 1500];
+    let (received, _) =
+        tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut response))
+            .await
+            .expect("server response timeout")
+            .expect("receive server response");
+    assert!(response[0] & 0x80 != 0, "expected a long-header response");
+
+    let mut cursor = &response[5..received];
+    let dcid_len = usize::from(cursor[0]);
+    let dcid = cursor[1..1 + dcid_len].to_vec();
+    cursor = &cursor[1 + dcid_len..];
+    let scid_len = usize::from(cursor[0]);
+    let scid = cursor[1..1 + scid_len].to_vec();
+
+    assert!(
+        dcid.is_empty(),
+        "server must address the client's zero-length SCID, got {dcid:?}"
+    );
+    assert!(
+        !scid.is_empty(),
+        "server must choose an independent, non-zero source CID"
+    );
+}

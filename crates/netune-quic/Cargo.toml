@@ -11,8 +11,8 @@ readme = false
 [dependencies]
 aws-lc-rs = { workspace = true }
 bytes = { workspace = true }
-netune-egress = { path = "../netune-egress", version = "0.0.18" }
-netune-trace = { path = "../netune-trace", version = "0.0.18" }
+netune-egress = { path = "../netune-egress", version = "0.0.19" }
+netune-trace = { path = "../netune-trace", version = "0.0.19" }
 rustls = { workspace = true }
 rustls-platform-verifier = { workspace = true }
 socket2 = { workspace = true }

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.19] - 2026-11-10
+
+### Added
+
+- **Independent WebTransport peer.** `interop/webtransport-go` and
+  `scripts/webtransport-go-interop.sh` drive a bidirectional stream, a
+  unidirectional stream in each direction and a datagram exchange against
+  `netune-webtransport` with `quic-go/webtransport-go`; the script runs in CI.
+- **Draft-16 SETTINGS negotiation.** A draft-17 endpoint advertises both
+  `SETTINGS_WT_ENABLED` codepoints and accepts either from the peer. The server
+  ignores the client's server-only enable setting, as draft-17 requires.
+
+### Fixed
+
+- **QUIC connection-ID roles.** A server now chooses an independent non-zero
+  local source CID and addresses the client by its source CID, including a legal
+  zero-length CID. This was the reason browser and Go peers could not handshake.
+- **Extended CONNECT capability.** `SETTINGS_ENABLE_CONNECT_PROTOCOL` is treated
+  as a server capability; a server no longer requires the client to advertise
+  it before accepting an extended CONNECT request.
+
+### Known gaps
+
+- ADR-0037 Gate 4 is still open for browsers: Chrome 157 does not advertise the
+  `reset_stream_at` transport parameter required by draft-17. Gate 5's
+  adversarial replay suite is also outstanding.
+
 ## [0.0.18] - 2026-11-10
 
 ### Added

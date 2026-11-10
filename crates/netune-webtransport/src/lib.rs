@@ -18,6 +18,10 @@ pub use session::{WebTransportBidi, WebTransportClient, WebTransportServer, WebT
 pub const DRAFT_VERSION: &str = "draft-ietf-webtrans-http3-17";
 
 pub const SETTINGS_WT_ENABLED: u64 = 0x20b8_933b;
+/// Draft-16 `SETTINGS_WT_ENABLED` codepoint. Draft-17 endpoints advertise both
+/// codepoints when they can speak the draft-16 wire subset; the highest common
+/// version is selected by the codepoint the peer sends.
+pub const SETTINGS_WT_ENABLED_DRAFT16: u64 = 0x2c7c_f000;
 pub const SETTINGS_WT_INITIAL_MAX_STREAMS_UNI: u64 = 0x2b64;
 pub const SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI: u64 = 0x2b65;
 pub const SETTINGS_WT_INITIAL_MAX_DATA: u64 = 0x2b61;
@@ -108,7 +112,10 @@ impl Default for WebTransportSettings {
 
 impl WebTransportSettings {
     pub fn extra_settings(self) -> Vec<(u64, u64)> {
-        let mut settings = vec![(SETTINGS_WT_ENABLED, u64::from(self.enabled))];
+        let mut settings = vec![
+            (SETTINGS_WT_ENABLED, u64::from(self.enabled)),
+            (SETTINGS_WT_ENABLED_DRAFT16, u64::from(self.enabled)),
+        ];
         if self.initial_max_streams_uni > 0 {
             settings.push((
                 SETTINGS_WT_INITIAL_MAX_STREAMS_UNI,
@@ -136,13 +143,13 @@ impl WebTransportSettings {
         };
         for (id, value) in settings {
             match *id {
-                SETTINGS_WT_ENABLED => {
+                SETTINGS_WT_ENABLED | SETTINGS_WT_ENABLED_DRAFT16 => {
                     if *value > 1 {
                         return Err(WebTransportError::Settings(
                             "SETTINGS_WT_ENABLED must be 0 or 1".to_string(),
                         ));
                     }
-                    output.enabled = *value == 1;
+                    output.enabled |= *value == 1;
                 }
                 SETTINGS_WT_INITIAL_MAX_STREAMS_UNI => output.initial_max_streams_uni = *value,
                 SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI => output.initial_max_streams_bidi = *value,
@@ -404,6 +411,24 @@ mod tests {
         let mut extra = settings.extra_settings();
         extra.push((SETTINGS_WT_ENABLED, 2));
         assert!(WebTransportSettings::from_extra(&extra).is_err());
+    }
+
+    #[test]
+    fn settings_negotiate_both_webtransport_codepoints() {
+        let settings = WebTransportSettings {
+            enabled: true,
+            initial_max_streams_uni: 1,
+            initial_max_streams_bidi: 1,
+            initial_max_data: 1,
+        };
+        let extra = settings.extra_settings();
+        assert!(extra.contains(&(SETTINGS_WT_ENABLED, 1)));
+        assert!(extra.contains(&(SETTINGS_WT_ENABLED_DRAFT16, 1)));
+
+        for id in [SETTINGS_WT_ENABLED, SETTINGS_WT_ENABLED_DRAFT16] {
+            let negotiated = WebTransportSettings::from_extra(&[(id, 1)]).expect("peer settings");
+            assert!(negotiated.enabled);
+        }
     }
 
     #[test]

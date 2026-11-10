@@ -360,6 +360,7 @@ impl Core {
         tls: TlsSession,
         original_dcid: Vec<u8>,
         local_cid: Vec<u8>,
+        peer_cid: Vec<u8>,
         local_tp: TransportParameters,
         version: u32,
         congestion: CongestionAlgorithm,
@@ -380,7 +381,7 @@ impl Core {
             ],
             original_dcid,
             local_cid,
-            peer_cid: Vec::new(),
+            peer_cid,
             local_tp,
             peer_tp: None,
             streams: HashMap::new(),
@@ -2073,11 +2074,10 @@ impl Core {
                     LongType::Handshake
                 };
                 let dcid = if self.server {
-                    if self.peer_cid.is_empty() {
-                        self.original_dcid.clone()
-                    } else {
-                        self.peer_cid.clone()
-                    }
+                    // The server always addresses the client by the source CID
+                    // from its Initial packet, including a legitimate
+                    // zero-length CID.
+                    self.peer_cid.clone()
                 } else if level == Level::Initial || self.peer_cid.is_empty() {
                     self.original_dcid.clone()
                 } else {

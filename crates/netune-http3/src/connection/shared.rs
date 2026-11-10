@@ -311,8 +311,14 @@ impl Shared {
         self.local_h3_datagram && self.peer_h3_datagram.load(Ordering::SeqCst)
     }
 
-    pub fn extended_connect_enabled(&self) -> bool {
-        self.local_connect_protocol && self.peer_connect_protocol.load(Ordering::SeqCst)
+    /// The peer advertised extended CONNECT support in its SETTINGS.
+    pub fn peer_extended_connect_enabled(&self) -> bool {
+        self.peer_connect_protocol.load(Ordering::SeqCst)
+    }
+
+    /// This endpoint advertised extended CONNECT support in its SETTINGS.
+    pub fn local_extended_connect_enabled(&self) -> bool {
+        self.local_connect_protocol
     }
 
     pub async fn wait_settings(&self) {

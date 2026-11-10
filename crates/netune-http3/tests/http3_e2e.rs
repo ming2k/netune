@@ -689,3 +689,48 @@ async fn goaway_refuses_new_requests_on_the_h3_client() {
     assert!(error.to_string().contains("GOAWAY"), "{error}");
     server_task.await.expect("server task");
 }
+
+#[tokio::test]
+async fn extended_connect_requires_only_the_server_setting() {
+    let (server, addr) = make_server_endpoint().await;
+    tokio::spawn(async move {
+        let conn = server.accept().await.expect("server handshake");
+        let settings = netune_http3::H3SettingsProfile::default().with_extended_connect();
+        let mut h3_conn = netune_http3::H3ServerConnection::new(conn, &settings)
+            .await
+            .expect("server h3 connection");
+        let request = h3_conn.accept().await.expect("accept").expect("request");
+        let (_request, mut stream) = request.into_parts();
+        let response = http::Response::builder()
+            .status(200)
+            .body(())
+            .expect("response");
+        stream.send_response(response).await.expect("response head");
+        stream.finish().await.expect("finish");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    });
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let client_crypto = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("safe protocols")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    let connector = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto);
+    // The client deliberately does not advertise SETTINGS_ENABLE_CONNECT_PROTOCOL:
+    // RFC 9220 makes it a server capability, not a client requirement.
+    let mut client = H3Client::connect_with_settings(
+        &connector,
+        addr,
+        "localhost",
+        None,
+        netune_http3::H3SettingsProfile::default(),
+    )
+    .await
+    .expect("h3 client");
+    client
+        .connect_extended("webtransport", "https://localhost/session")
+        .await
+        .expect("extended connect");
+}

@@ -457,7 +457,10 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
                     continue;
                 }
             } else {
-                (client_dcid.clone(), client_scid)
+                let Ok(local_cid) = random_cid(inner.cid_len) else {
+                    continue;
+                };
+                (client_dcid.clone(), local_cid)
             };
             let mut local_tp = server.transport.clone();
             local_tp.initial_source_connection_id = Some(local_cid.clone());
@@ -481,6 +484,7 @@ async fn endpoint_driver(inner: Arc<EndpointInner>) {
                 tls,
                 client_dcid.clone(),
                 local_cid.clone(),
+                client_scid.clone(),
                 local_tp,
                 version,
                 server.congestion,

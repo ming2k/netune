@@ -85,7 +85,7 @@ Without TLS the listener speaks HTTP directly; with it, the handshake happens in
 connection pipeline — same admission control, same drain, same trace. Turn the feature on to use it:
 
 ```toml
-netune-server = { git = "https://github.com/ming2k/netune", tag = "v0.0.26", features = ["tls"] }
+netune-server = { git = "https://github.com/ming2k/netune", tag = "v0.0.27", features = ["tls"] }
 ```
 
 ```rust
@@ -117,9 +117,9 @@ let config = ServerConfig::default()
 
 Four things are true because the handshake is ours, and none of them are true of a fronting proxy:
 
-- **The handshake is a recorded fact.** `IngressTlsEnd` is written when it completes and an `Error`
-  carrying `ERROR_TLS_HANDSHAKE` when it fails, so a derivation separates "the identity cost this"
-  from "the client was slow to speak" (`[INV-SERVER-18]`).
+- **The handshake is a recorded fact.** `IngressTlsEnd` is written when it completes and a
+  `DiagnosticRecord` with `NET-E-SERVER-TLS-HANDSHAKE` when it fails, so a derivation separates
+  "the identity cost this" from "the client was slow to speak" (`[INV-SERVER-18]`).
 - **ALPN decides the protocol, once.** `h2` in the handshake means HTTP/2; anything else is HTTP/1.1;
   the HTTP/2 preface is still read inside the tunnel. No upgrade path exists (`[INV-SERVER-09]`).
 - **A handshake is bounded by `head_timeout`.** Opening a socket and never speaking is the cheapest

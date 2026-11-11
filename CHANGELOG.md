@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.27] - 2026-11-11
+
+### Fixed
+
+- Corrected the post-0.0.26 documentation references to the removed
+  `ERROR_TLS_HANDSHAKE` constant. TLS handshake failure is documented as the
+  registered `NET-E-SERVER-TLS-HANDSHAKE` diagnostic. No API or wire behaviour
+  changed from 0.0.26.
+- Corrected the ADR-0042 registry summary: listener-scoped events use the
+  dedicated `ListenerObserver`, not the attempt `TraceSink`.
+
 ## [0.0.26] - 2026-11-11
 
 ### Added

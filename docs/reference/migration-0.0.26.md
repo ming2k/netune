@@ -1,6 +1,6 @@
 # Migrating to 0.0.26
 
-`0.0.26` is a deliberate breaking release. The diagnostic model is now part of the trace, and failure boundaries carry evidence. There is no compatibility shim.
+`0.0.26` is a deliberate breaking release. The diagnostic model is now part of the trace, and failure boundaries carry evidence. There is no compatibility shim. `0.0.27` is a documentation-only correction and keeps the same API.
 
 ## Trace envelope
 

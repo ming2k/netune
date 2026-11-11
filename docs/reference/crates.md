@@ -8,19 +8,19 @@ This document provides a factual overview of all crates comprising the `netune` 
 
 | Crate | Directory | Current Version | Primary Responsibility |
 | :--- | :--- | :--- | :--- |
-| `netune-trace` | `crates/netune-trace` | `0.0.26` | Zero-allocation trace ring buffer, pure timing derivations, JA3/JA4 TLS ClientHello parser |
-| `netune-http1` | `crates/netune-http1` | `0.0.26` | HTTP/1.1 line protocol parser and serializer, differential-tested against `hyper` |
-| `netune-http2` | `crates/netune-http2` | `0.0.26` | HTTP/2 wire protocol (RFC 9113) in both roles, HPACK header compression (RFC 7541), and Akamai fingerprint impersonation |
-| `netune-ws` | `crates/netune-ws` | `0.0.26` | Pure RFC 6455 WebSocket codec: frame encoder/decoder, role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys |
-| `netune-io` | `crates/netune-io` | `0.0.26` | Byte-path transport adapters shared by both orchestrators: the `TimedIo` syscall tap and the `FaultIo` chaos twin. No socket, no policy |
-| `netune-diagnostics` | `crates/netune-diagnostics` | `0.0.26` | Native diagnostic sinks and review bundles: stderr/JSONL output, redaction, manifest + trace + diagnosis artifacts. No socket, no orchestrator |
-| `netune-egress` | `crates/netune-egress` | `0.0.26` | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the single source of truth every outbound transport (TCP, UDP, QUIC) confines with. No I/O, no socket |
-| `netune` | `crates/netune` | `0.0.26` | **Egress** orchestrator: DNS, TCP, TLS, **UDP datagrams**, pool, proxy (incl. SOCKS5 UDP associate), egress confinement, and client request orchestration |
-| `netune-server` | `crates/netune-server` | `0.0.26` | **Ingress** orchestrator: TCP accept loop, admission control, slow-peer bounds, per-connection ingress tracing, graceful drain, HTTP/1.1 + HTTP/2 + optional HTTP/3 over one handler |
-| `netune-quic` | `crates/netune-quic` | `0.0.26` | First-class QUIC transport (RFC 9000, RFC 9221) with `QuicProfile` handshake shaping, per-connection `QuicUdpSocketFactory`/`CongestionControllerFactory` consumer seams, keep-alive/idle policy and verified peer-certificate access, and unified `aws-lc-rs` crypto (`[INV-QUIC-01..04]`, `[INV-QUIC-18..22]`) |
-| `netune-http3` | `crates/netune-http3` | `0.0.26` | Owned HTTP/3 client and server transport (RFC 9114), owned dynamic QPACK (RFC 9204), and typed SETTINGS profiles |
-| `netune-webtransport` | `crates/netune-webtransport` | `0.0.26` | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, control/flow capsules, reliable reset, GOAWAY teardown and Adversarial request admission (browser interop still outstanding) |
-| `netune-probe` | `crates/netune-probe` | `0.0.26` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
+| `netune-trace` | `crates/netune-trace` | `0.0.27` | Zero-allocation trace ring buffer, pure timing derivations, JA3/JA4 TLS ClientHello parser |
+| `netune-http1` | `crates/netune-http1` | `0.0.27` | HTTP/1.1 line protocol parser and serializer, differential-tested against `hyper` |
+| `netune-http2` | `crates/netune-http2` | `0.0.27` | HTTP/2 wire protocol (RFC 9113) in both roles, HPACK header compression (RFC 7541), and Akamai fingerprint impersonation |
+| `netune-ws` | `crates/netune-ws` | `0.0.27` | Pure RFC 6455 WebSocket codec: frame encoder/decoder, role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys |
+| `netune-io` | `crates/netune-io` | `0.0.27` | Byte-path transport adapters shared by both orchestrators: the `TimedIo` syscall tap and the `FaultIo` chaos twin. No socket, no policy |
+| `netune-diagnostics` | `crates/netune-diagnostics` | `0.0.27` | Native diagnostic sinks and review bundles: stderr/JSONL output, redaction, manifest + trace + diagnosis artifacts. No socket, no orchestrator |
+| `netune-egress` | `crates/netune-egress` | `0.0.27` | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the single source of truth every outbound transport (TCP, UDP, QUIC) confines with. No I/O, no socket |
+| `netune` | `crates/netune` | `0.0.27` | **Egress** orchestrator: DNS, TCP, TLS, **UDP datagrams**, pool, proxy (incl. SOCKS5 UDP associate), egress confinement, and client request orchestration |
+| `netune-server` | `crates/netune-server` | `0.0.27` | **Ingress** orchestrator: TCP accept loop, admission control, slow-peer bounds, per-connection ingress tracing, graceful drain, HTTP/1.1 + HTTP/2 + optional HTTP/3 over one handler |
+| `netune-quic` | `crates/netune-quic` | `0.0.27` | First-class QUIC transport (RFC 9000, RFC 9221) with `QuicProfile` handshake shaping, per-connection `QuicUdpSocketFactory`/`CongestionControllerFactory` consumer seams, keep-alive/idle policy and verified peer-certificate access, and unified `aws-lc-rs` crypto (`[INV-QUIC-01..04]`, `[INV-QUIC-18..22]`) |
+| `netune-http3` | `crates/netune-http3` | `0.0.27` | Owned HTTP/3 client and server transport (RFC 9114), owned dynamic QPACK (RFC 9204), and typed SETTINGS profiles |
+| `netune-webtransport` | `crates/netune-webtransport` | `0.0.27` | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, control/flow capsules, reliable reset, GOAWAY teardown and Adversarial request admission (browser interop still outstanding) |
+| `netune-probe` | `crates/netune-probe` | `0.0.27` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
 
 ---
 
@@ -140,7 +140,8 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `H3Server`: a separate QUIC listener behind the `http3` feature, with the same handler, admission, timeout, body-ceiling and drain configuration; it forces ALPN `h3`, records `ServedProtocol::Http3` at L0, continues after a failed peer handshake, publishes failures through `subscribe_handshake_errors()`, and accepts a custom `QuicUdpSocket` stack plus `ServerOptions` through `bind_with_socket` / `bind_with_quic_options` ([ADR-0025](../adr/0025-h3-ingress-peer-transport.md), [ADR-0034](../adr/0034-quic-consumer-seams.md), [ADR-0035](../adr/0035-quic-ingress-handshake-observability.md)).
   - `H2Ingress`: the HTTP/2 bounds that are also the SETTINGS the peer is told (`max_concurrent_streams`, `initial_window_size`, `connection_window_size`, `max_frame_size`, `header_table_size`, `max_header_list_size`).
   - `Handler` / `HandlerFuture` / `Response` / `ResponseBody` / `BodyStream`: the single application boundary, serving both protocols. No routing, no extractors, no middleware.
-  - `TraceObserver` / `IngressTrace` / `ServedProtocol`: every finished connection's complete trace, tagged with the protocol that served it and with each event carrying its stream identity. `SinkObserver` bridges to an existing `netune_trace::TraceSink`; `CollectingObserver` keeps everything.
+  - `TraceObserver` / `IngressTrace` / `ServedProtocol`: every finished connection's complete trace, tagged with `TraceMeta`, `DiagnosticTable`, the protocol that served it and each event's stream identity. `SinkObserver` bridges to an existing `netune_trace::TraceSink`; `CollectingObserver` keeps everything.
+  - `ListenerObserver` / `ListenerEvent` / `CollectingListenerObserver`: listener-scoped bind, accept-failure, shed, protocol-selection, drain-expiry and H3-handshake events, with a bounded collecting observer for tests.
   - `RequestBody`: a borrow of the connection's decoder, so a handler can read exactly its body and never the next request's bytes, with `read_to_end_within` for an application-level ceiling.
 - **Not a framework**: it is a transport. Routing, deserialization and authorization belong above it.
 - **Features**: `http2` (default), `tls` (off by default), and `http3` (off by default; implies `tls`).
@@ -148,7 +149,7 @@ This document provides a factual overview of all crates comprising the `netune` 
   bind time, and HTTP/3 is a separate `H3Server` rather than a `Protocols` mode.
 - **TLS**: `TlsTermination` (`single` / `per_name`) terminates TLS inside the connection pipeline,
   selects the configuration from the SNI name, lets ALPN decide the protocol, and records the handshake as
-  `IngressTlsEnd` or an `ERROR_TLS_HANDSHAKE` error ([ADR-0015](../adr/0015-self-terminated-tls.md)).
+  `IngressTlsEnd` or a `DiagnosticRecord` with `NET-E-SERVER-TLS-HANDSHAKE` ([ADR-0015](../adr/0015-self-terminated-tls.md), [ADR-0041](../adr/0041-diagnostic-spine-side-table.md)).
 - **Not implemented, by decision**: WebSocket upgrade serving is a separate, later decision ([ADR-0011](../adr/0011-server-side-ingress-transport.md)); client certificates and resumption tuning belong to the deployment's `rustls::ServerConfig`.
 
 ### `netune-quic`

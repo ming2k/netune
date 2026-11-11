@@ -72,7 +72,8 @@ dependency graph?**
 Chosen option: **"Option 2"**, for four reasons:
 
 1. **The handshake becomes an event, so its cost is a derivation.** `IngressTlsEnd` is written when the
-   handshake completes, and a failed handshake is an `Error` carrying `ERROR_TLS_HANDSHAKE`. The trace
+   handshake completes, and a failed handshake is a `DiagnosticRecord` with
+   `NET-E-SERVER-TLS-HANDSHAKE`. The trace
    therefore separates "the identity cost this much" from "the client was slow to speak", which is the
    whole argument ADR-0011 made and the thing a terminator cannot give back.
 2. **`LazyConfigAcceptor`, not `TlsAcceptor`.** The acceptor reads the ClientHello, exposes the SNI and
@@ -92,8 +93,8 @@ Chosen option: **"Option 2"**, for four reasons:
 ### Invariants & Behavioral Boundaries
 
 - **`[INV-SERVER-18]` TLS Termination Is Inside the Trace**: a listener that terminates TLS records the
-  handshake's completion as `IngressTlsEnd` and its failure as an `Error` carrying
-  `ERROR_TLS_HANDSHAKE`; a handshake cost is never inferred from wall-clock around the connection.
+  handshake's completion as `IngressTlsEnd` and its failure as a `DiagnosticRecord` with
+  `NET-E-SERVER-TLS-HANDSHAKE`; a handshake cost is never inferred from wall-clock around the connection.
   *Enforced by*: `a_completed_handshake_is_a_recorded_fact` and
   `a_client_that_stalls_mid_handshake_is_cut_off_at_the_bound`.
 - **`[INV-SERVER-19]` The Configuration Serves the Name the Peer Asked For**: a TLS listener selects its

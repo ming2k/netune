@@ -36,6 +36,8 @@ This reference document defines system boundaries, layering models, and behavior
 └───────────────────────┘ └───────────────────────┘ └─────────────────────┘
 ```
 
+`netune-diagnostics` is the optional presentation leaf above `netune-trace`: it owns native stderr/JSONL sinks, redaction, and review bundles, but no socket and no orchestrator. The trace model itself stays pure data and pure derivations.
+
 ---
 
 ## Architectural Decision Records Mapping
@@ -80,6 +82,8 @@ The architectural evolution is governed by the following decisions:
 | [ADR-0034](../adr/0034-quic-consumer-seams.md) | QUIC Consumer Seams | Per-connection socket and congestion factories, keep-alive/idle policy, verified peer certificates (`INV-QUIC-18..22`). |
 | [ADR-0035](../adr/0035-quic-ingress-handshake-observability.md) | QUIC Ingress Handshake Observability | `AcceptError` separates shutdown from failed handshakes; H3 ingress continues and publishes errors (`INV-QUIC-23`, `INV-SERVER-25`). |
 | [ADR-0036](../adr/0036-dplpmtud-probe-state-machine.md) | DPLPMTUD Probe State Machine | Validated path MTU grows only on an ACKed probe; probes carry no application frames (`INV-QUIC-24`). |
+| [ADR-0041](../adr/0041-diagnostic-spine-side-table.md) | Diagnostic Spine | Failure narration is a bounded side table on the trace; stable codes; evidence survives `Observation::Off` (`INV-DIAG-01..02`, `INV-DIAG-05..06`). |
+| [ADR-0042](../adr/0042-trace-identity-and-sink-context.md) | Trace Identity & Sink Context | One real trace id across directions; sink v2 carries the envelope; listener events share the control scope (`INV-DIAG-03..04`, `INV-DIAG-07`). |
 
 ---
 

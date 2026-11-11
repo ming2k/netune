@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.26] - 2026-11-11
+
+### Added
+
+- **Diagnostic Spine.** `netune-trace` now carries a bounded `DiagnosticTable`
+  beside the event log. `DiagnosticCode` is a stable, registered classification
+  with phase, level and retry verdict; `DiagnosticRecord` carries bounded
+  message/field detail; `Diagnose` is the reviewed mapping implemented by the
+  orchestrator error vocabularies (`INV-DIAG-01..06`, ADR-0041).
+- **Failure evidence survives the observation tier.** `Client::request*`,
+  `send*`, WebSocket connect, `H3Client::connect*` and `H3Client::execute`
+  return an attempt error carrying a `TraceSnapshot`. `Observation::Off` still
+  records the terminal diagnostic, and `diagnose()` derives the failure phase,
+  retry verdict, fidelity caveat and next checks without reading a clock.
+- **One trace identity and sink contract.** `TraceMeta` carries a generated
+  UUIDv7-shaped id, direction, wall-clock start, build and process provenance.
+  `TraceSink` v2 receives the envelope with every event, and listener events
+  cover bind, accept failure, shed, protocol selection, drain expiry and H3
+  handshake failure (`INV-DIAG-03..04`, `INV-DIAG-07`, ADR-0042). Trace-id
+  propagation is an explicit policy (`TracePropagation::Off | Header`).
+- **Native diagnostics crate.** `netune-diagnostics` provides `StderrSink`,
+  `JsonLinesSink`, `FanoutSink`, production-safe `RedactionPolicy`, and
+  `TraceBundle` (manifest, trace, diagnosis, notes) with restrictive Unix file
+  permissions. `netune-diagnose inspect|diff` reviews a bundle offline.
+- **Review workflow.** Postmortem and runbook indexes/templates, a failure
+  report issue template, a pull-request failure record, `DOC-015`/`DOC-016`
+  gates and `ARCH-011` (no direct `EventKind::Error` producer) are enforced.
+- **More content hooks.** DNS/TCP/TLS/proxy failures carry phase detail; H2
+  GOAWAY/RST_STREAM codes and debug data are recorded; QPACK blocked state,
+  QUIC path MTU/close, pool stale-socket and WebSocket close code/abnormal EOF
+  are recorded. `TraceDiff` compares two snapshots for regression review.
+
+### Changed
+
+- **Breaking: trace schema v2.** `RequestTrace` replaces the bare `id` with
+  `TraceMeta` and adds `diagnostics`; `IngressTrace` does the same.
+- **Breaking: sink v2.** `TraceSink::event` now takes `&TraceMeta` and the trait
+  gains `trace_started` / `trace_finished`; sink drops are counted.
+- **Breaking: error boundary.** `netune` request methods return `AttemptError`;
+  `netune-http3` `connect*`/`execute` return `H3AttemptError`. `netune-server`
+  deletes the public `ERROR_*` constants in favour of `DiagnosticCode`.
+- **Breaking:** `ServerConfig` gains `listener_sink` and `trace_propagation`;
+  `TraceConfig` gains `propagation`; `IngressTrace` gains `meta` and
+  `diagnostics`.
+
+### Fixed
+
+- `log_from_events` preserves `Event::stream`; a multiplexed H2 log rebuilt
+  through it no longer attributes one stream's events to stream 0.
+- Handler panic messages and TLS handshake reasons are no longer discarded;
+  they travel in the diagnostic side table.
+- A listener accept failure, admission shed, drain expiry and H3 handshake
+  failure are no longer silent.
+
+### Security
+
+- **Production-safe bundle redaction.** `RedactionPolicy::default()` keeps only
+  public fields and text; `internal()` is the explicit local-review policy.
+  `Secret` fields and text are always removed. Bundle directories are `0700`
+  and files `0600` on Unix.
+- Quiet defaults: no sink, no bundle, and no trace propagation unless the
+  caller opts in.
+
 ## [0.0.25] - 2026-11-10
 
 ### Added

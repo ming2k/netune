@@ -78,7 +78,7 @@ pub use connect::{
 };
 pub use decompress::Decoder;
 pub use dns::{DnsResolver, StaticResolver, SystemResolver};
-pub use error::NetError;
+pub use error::{AttemptError, NetError};
 pub use evasion::SegmentingIo;
 #[cfg(feature = "http2")]
 pub use h2_client::H2Client;

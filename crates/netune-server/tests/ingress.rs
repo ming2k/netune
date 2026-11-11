@@ -232,7 +232,10 @@ async fn a_two_request_connection_yields_two_exchanges_from_the_real_transport()
     assert_eq!(exchange_count(&ingress.log), 2);
 
     let trace = netune_trace::RequestTrace {
-        id: netune_trace::TraceId::new("two"),
+        meta: netune_trace::TraceMeta::new(
+            netune_trace::TraceId::new("two"),
+            netune_trace::Direction::Ingress,
+        ),
         attempt: netune_trace::AttemptRef {
             round: 0,
             turn: 0,
@@ -248,6 +251,7 @@ async fn a_two_request_connection_yields_two_exchanges_from_the_real_transport()
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: netune_trace::Fidelity::l1(),
         log: ingress.log,
+        diagnostics: ingress.diagnostics,
     };
 
     // A single derivation must refuse: one set of spans cannot describe two requests.

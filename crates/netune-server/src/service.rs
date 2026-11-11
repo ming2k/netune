@@ -29,13 +29,15 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use netune_trace::{EventLog, Fidelity, TraceCollector};
+use netune_trace::{
+    DiagnosticCode, DiagnosticPhase, DiagnosticTable, EventLog, Fidelity, TraceCollector, TraceMeta,
+};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
-use crate::config::{ServerConfig, TraceObserver};
+use crate::config::{ListenerEvent, ProtocolVia, ServerConfig, TraceObserver, emit_listener};
 use crate::handler::Handler;
 
 /// One finished connection's ingress trace.
@@ -46,6 +48,8 @@ use crate::handler::Handler;
 /// per-exchange view.
 #[derive(Debug, Clone)]
 pub struct IngressTrace {
+    /// Identity, direction, start time and build provenance.
+    pub meta: TraceMeta,
     /// The peer this connection belonged to.
     pub peer: SocketAddr,
     /// The local address it arrived on, which names the listener when several are bound.
@@ -59,6 +63,8 @@ pub struct IngressTrace {
     pub fidelity: Fidelity,
     /// The recorded events.
     pub log: EventLog,
+    /// Bounded failure narration for this connection.
+    pub diagnostics: DiagnosticTable,
 }
 
 /// Which protocol a connection was served with.
@@ -196,6 +202,17 @@ impl Server {
         } = self;
         let config = Arc::new(config);
 
+        emit_listener(
+            &config.listener_sink,
+            ListenerEvent::Bound {
+                local: listener
+                    .local_addr()
+                    .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0))),
+                protocols: config.protocols,
+                max_connections: config.max_connections,
+            },
+        );
+
         let mut connections: JoinSet<()> = JoinSet::new();
         // The drain signal every connection watches. Flipped once, after the listener stops
         // accepting, so a connection that is idle in a read learns about the drain immediately.
@@ -210,17 +227,35 @@ impl Server {
 
                 () = &mut shutdown => break,
                 accepted = listener.accept() => {
-                    let Ok((stream, peer)) = accepted else {
-                        // A failed `accept` is almost always a per-connection error (the peer reset
-                        // before we got to it), not a listener failure. Keep serving rather than
-                        // taking the port down.
-                        continue;
+                    let (stream, peer) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            // A failed `accept` is almost always a per-connection error (the peer
+                            // reset before we got to it), not a listener failure. Keep serving, but
+                            // do not make the failure invisible.
+                            emit_listener(
+                                &config.listener_sink,
+                                ListenerEvent::AcceptFailed {
+                                    error: error.to_string(),
+                                },
+                            );
+                            continue;
+                        }
                     };
                     let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
                         // No permit: shed now, explicitly. The client learns immediately, which is
-                        // what makes a retry possible.
+                        // what makes a retry possible. The listener observer learns why.
+                        emit_listener(
+                            &config.listener_sink,
+                            ListenerEvent::Shed {
+                                peer,
+                                active: config
+                                    .max_connections
+                                    .saturating_sub(permits.available_permits()),
+                                max: config.max_connections,
+                            },
+                        );
                         drop(stream);
-                        let _ = peer;
                         continue;
                     };
                     let handler = Arc::clone(&handler);
@@ -232,7 +267,16 @@ impl Server {
                 }
                 // Reap finished connections so the set does not grow without bound on a long-lived
                 // listener.
-                Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                    if let Err(error) = joined {
+                        emit_listener(
+                            &config.listener_sink,
+                            ListenerEvent::TaskFailed {
+                                error: error.to_string(),
+                            },
+                        );
+                    }
+                }
             }
         }
 
@@ -243,20 +287,48 @@ impl Server {
         // being aborted when the drain deadline expires.
         let _ = drain_tx.send(true);
 
+        emit_listener(
+            &config.listener_sink,
+            ListenerEvent::DrainStarted {
+                inflight: config
+                    .max_connections
+                    .saturating_sub(permits.available_permits()),
+            },
+        );
+
         let deadline = tokio::time::Instant::now() + config.drain_timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
+                emit_listener(
+                    &config.listener_sink,
+                    ListenerEvent::DrainExpired {
+                        aborted: connections.len(),
+                    },
+                );
                 connections.shutdown().await;
                 return;
             }
             tokio::select! {
                 joined = connections.join_next() => {
-                    if joined.is_none() {
-                        return;
+                    match joined {
+                        None => return,
+                        Some(Err(error)) => emit_listener(
+                            &config.listener_sink,
+                            ListenerEvent::TaskFailed {
+                                error: error.to_string(),
+                            },
+                        ),
+                        Some(Ok(())) => {}
                     }
                 }
                 () = tokio::time::sleep(remaining) => {
+                    emit_listener(
+                        &config.listener_sink,
+                        ListenerEvent::DrainExpired {
+                            aborted: connections.len(),
+                        },
+                    );
                     connections.shutdown().await;
                     return;
                 }
@@ -309,16 +381,26 @@ async fn run_connection(
         // A peer that never sends anything gets no protocol and no trace beyond the accept: the
         // connection is closed, which is the whole point of the head bound.
         Err(_) => {
-            recorder.mark(
-                netune_trace::EventKind::Error,
-                crate::h1::ERROR_HEAD_TIMEOUT,
-                0,
+            crate::h1::record_error(
+                &recorder,
+                DiagnosticCode::SERVER_HEAD_TIMEOUT,
+                DiagnosticPhase::Listener,
+                "connection sent no protocol preface within the configured bound",
             );
             hand_over(&config, peer, local, ServedProtocol::Http1, 0, &recorder);
             drop(permit);
             return;
         }
     };
+
+    emit_listener(
+        &config.listener_sink,
+        ListenerEvent::ProtocolSelected {
+            peer,
+            protocol,
+            via: ProtocolVia::Preface,
+        },
+    );
 
     let (exchanges, protocol) = serve_selected(
         stream,
@@ -359,18 +441,29 @@ async fn run_tls_connection(
         match crate::tls::accept(stream, config.head_timeout, move |name| selected(name)).await {
             Ok(negotiated) => negotiated,
             Err(error) => {
-                recorder.mark(
-                    netune_trace::EventKind::Error,
-                    crate::h1::ERROR_TLS_HANDSHAKE,
-                    0,
+                crate::h1::record_error(
+                    &recorder,
+                    DiagnosticCode::SERVER_TLS_HANDSHAKE,
+                    DiagnosticPhase::Tls,
+                    error.reason(),
                 );
-                let _ = error.reason();
                 hand_over(&config, peer, local, ServedProtocol::Http1, 0, &recorder);
                 return;
             }
         };
 
     let (mut stream, negotiated) = negotiated;
+    emit_listener(
+        &config.listener_sink,
+        ListenerEvent::ProtocolSelected {
+            peer,
+            protocol: match negotiated {
+                crate::tls::Negotiated::Http2 => ServedProtocol::Http2,
+                crate::tls::Negotiated::Http1 => ServedProtocol::Http1,
+            },
+            via: ProtocolVia::Alpn,
+        },
+    );
     // The handshake's end is a recorded fact, so a derivation can separate "the TLS identity cost
     // this" from "the client was slow to speak".
     recorder.mark(
@@ -499,16 +592,20 @@ pub(crate) fn hand_over(
     recorder: &TraceCollector,
 ) {
     if let Some(observer) = &config.trace_sink {
+        let fidelity = match protocol {
+            ServedProtocol::Http1 => Fidelity::l1(),
+            ServedProtocol::Http2 | ServedProtocol::Http3 => Fidelity::l0(),
+        };
+        let snapshot = recorder.snapshot(fidelity);
         observer.connection_finished(IngressTrace {
+            meta: snapshot.meta,
             peer,
             local,
             exchanges,
             protocol,
-            fidelity: match protocol {
-                ServedProtocol::Http1 => Fidelity::l1(),
-                ServedProtocol::Http2 | ServedProtocol::Http3 => Fidelity::l0(),
-            },
-            log: recorder.log(),
+            fidelity,
+            log: snapshot.log,
+            diagnostics: snapshot.diagnostics,
         });
     }
 }
@@ -577,12 +674,14 @@ mod tests {
     fn a_discarding_observer_compiles_as_a_trace_sink() {
         let observer: Arc<dyn TraceObserver> = Arc::new(DiscardingObserver);
         observer.connection_finished(IngressTrace {
+            meta: TraceMeta::ingress(),
             peer: SocketAddr::from(([127, 0, 0, 1], 1)),
             local: SocketAddr::from(([127, 0, 0, 1], 2)),
             exchanges: 0,
             protocol: ServedProtocol::Http1,
             fidelity: Fidelity::l1(),
             log: EventLog::with_capacity(1),
+            diagnostics: DiagnosticTable::default(),
         });
     }
 }

@@ -258,7 +258,7 @@ impl WebTransportClient {
             h3_profile(settings),
         )
         .await
-        .map_err(http3_error)?;
+        .map_err(|error| http3_error(error.into_parts().0))?;
         h3.wait_settings().await;
         if !h3
             .quic_connection()

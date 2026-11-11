@@ -74,7 +74,7 @@ async fn serve(listener: TcpListener, responses: usize) {
 
 fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
     RequestTrace {
-        id: TraceId::new("e2e"),
+        meta: netune_trace::TraceMeta::new(TraceId::new("e2e"), netune_trace::Direction::Egress),
         attempt: AttemptRef {
             round: 1,
             turn: 1,
@@ -90,6 +90,7 @@ fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: Fidelity::l1(),
         log,
+        diagnostics: netune_trace::DiagnosticTable::default(),
     }
 }
 
@@ -220,6 +221,13 @@ async fn a_pooled_socket_the_peer_dropped_is_replaced_transparently() {
         log.iter()
             .any(|event| event.kind == EventKind::ConnectStaleDiscarded),
         "the stale socket is recorded as discarded"
+    );
+    assert!(
+        recorder
+            .diagnostics()
+            .iter()
+            .any(|record| record.code == netune_trace::DiagnosticCode::EGRESS_POOL_STALE),
+        "the stale socket has a non-terminal diagnostic"
     );
     assert!(
         log.iter().any(|event| event.kind == EventKind::TcpStart),

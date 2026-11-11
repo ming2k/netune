@@ -325,9 +325,13 @@ async fn test_http3_client_request_response_and_trace() {
         .await
         .expect_err("body ceiling must fail");
     assert!(matches!(
-        error,
+        error.error(),
         netune_http3::H3Error::BodyTooLarge { limit: 1 }
     ));
+    assert!(
+        !error.trace().diagnostics.is_empty(),
+        "a failed H3 execution carries its diagnostic evidence"
+    );
 
     // Verify trace events [INV-QUIC-03]
     let log = recorder.log();
@@ -354,7 +358,10 @@ async fn test_http3_client_request_response_and_trace() {
     // function of the recorded events, and this is that function. A multi-exchange log
     // must not be attributed to the first request.
     let trace = netune_trace::RequestTrace {
-        id: netune_trace::TraceId::new("http3-e2e"),
+        meta: netune_trace::TraceMeta::new(
+            netune_trace::TraceId::new("http3-e2e"),
+            netune_trace::Direction::Egress,
+        ),
         attempt: netune_trace::AttemptRef {
             round: 1,
             turn: 1,
@@ -370,6 +377,7 @@ async fn test_http3_client_request_response_and_trace() {
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: netune_trace::Fidelity::l0(),
         log,
+        diagnostics: netune_trace::DiagnosticTable::default(),
     };
     let single = netune_trace::derive_h3(&trace);
     assert_eq!(

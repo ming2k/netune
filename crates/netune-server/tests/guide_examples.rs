@@ -152,7 +152,10 @@ async fn the_guide_timing_table_describes_a_real_exchange() {
     let log = ingress.log;
 
     let trace = netune_trace::RequestTrace {
-        id: netune_trace::TraceId::new("guide"),
+        meta: netune_trace::TraceMeta::new(
+            netune_trace::TraceId::new("guide"),
+            netune_trace::Direction::Ingress,
+        ),
         attempt: netune_trace::AttemptRef {
             round: 0,
             turn: 0,
@@ -168,6 +171,7 @@ async fn the_guide_timing_table_describes_a_real_exchange() {
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: netune_trace::Fidelity::l1(),
         log,
+        diagnostics: netune_trace::DiagnosticTable::default(),
     };
 
     // The guide's inline example, exercised.

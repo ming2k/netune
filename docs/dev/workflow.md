@@ -52,6 +52,7 @@ separately so both privilege postures are proven rather than assumed.
 | `ARCH-007` | A crate that does not inherit `[workspace.package] version`. |
 | `ARCH-008` | A transmit path that compiles without `--features inject`. |
 | `ARCH-009` | A workspace `path` dependency with no `version`, or the wrong one. |
+| `ARCH-011` | A production crate emitting `EventKind::Error` directly instead of through `record_error`. |
 
 The allowed edges live in one table inside that script, because the real graph
 is not a flat ring: `netune-io` depends on `netune-trace`, since `TimedIo`
@@ -82,6 +83,7 @@ to catch got there in the first place.
 | Build, bootstrap, or toolchain | `docs/dev/setup.md` |
 | Versioning, tagging, or distribution | `docs/dev/release-and-versioning.md` |
 | A rule reviewers must enforce | `docs/dev/standards/` |
+| A diagnostic code, failure phase, or retry verdict | `docs/reference/diagnostics.md` and the registry test |
 | An incident with a systemic gap | `docs/dev/postmortems/` |
 
 If a change makes a documented statement false and you cannot fix it in the
@@ -112,9 +114,27 @@ Before a version bump or tag:
    `[workspace.package] version`, and every consumer snippet in `README.md`
    shows the current tag (`DOC-014` enforces both).
 8. Working tree is clean; no scratch files or experiments are staged.
+9. No Sev 1 or Sev 2 postmortem is open with an unverified action item. Every
+   action item names a test, gate, or invariant that exists in the repository.
+10. Every diagnostic code emitted by a public failure path is registered and
+    documented; no production path emits `NET-E-UNCLASSIFIED`.
 
 Tagging and distribution are defined in
 [release-and-versioning.md](release-and-versioning.md).
+
+### Failure review gate
+
+A bug fix is not complete when the test is green. It is complete when the
+failure has a record:
+
+1. Reproduce the failure and capture the `AttemptError` or a `TraceBundle`.
+2. Add a regression test named `diag_<code>_<symptom>`.
+3. Assert the terminal `DiagnosticCode`, the phase, and the retry verdict.
+4. If the failure reveals a systemic gap, open a postmortem from
+   [`postmortems/TEMPLATE.md`](postmortems/TEMPLATE.md) and link the bundle and
+   the regression test.
+5. If the fix establishes a durable boundary, ratify it in an ADR and add the
+   invariant to [`invariants.md`](invariants.md).
 
 ---
 

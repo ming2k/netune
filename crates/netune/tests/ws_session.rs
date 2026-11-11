@@ -386,14 +386,30 @@ async fn peer_close_code_is_echoed_in_the_reply() {
     ));
 
     let client = test_client();
+    let recorder = TraceCollector::start(64);
     let mut ws = client
-        .connect_ws(&test_target(port), "/ws")
+        .connect_ws_traced(
+            &test_target(port),
+            "/ws",
+            recorder.clone(),
+            netune::WsHandshake::default(),
+        )
         .await
         .expect("connect");
 
     // Client's receive completes the close handshake.
     let msg = ws.receive().await.expect("receive").expect("close msg");
     assert!(matches!(msg, WsMessage::Close(_)));
+    assert!(
+        recorder.diagnostics().iter().any(|record| {
+            record.code == netune_trace::DiagnosticCode::EGRESS_WS_CLOSED
+                && record
+                    .fields
+                    .iter()
+                    .any(|field| field.key == "close_code" && field.value == "1008")
+        }),
+        "the peer close code is recorded in the diagnostic table"
+    );
 
     // The server then relays the client's reply close frame.
     drop(tx);

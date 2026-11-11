@@ -32,7 +32,9 @@ use netune_http1::{
     write_interim,
 };
 use netune_io::{RingIo, TimedIo};
-use netune_trace::{EventKind, NoTap, Ring, TraceCollector};
+use netune_trace::{
+    DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EventKind, NoTap, Ring, TraceCollector,
+};
 use tokio::io::AsyncWrite;
 
 use crate::body::{BodySource, RequestBody};
@@ -102,7 +104,12 @@ where
                 // The peer did not produce a head in time: slow loris. An attempt is made to tell it
                 // why, but the connection is closed either way because its framing position is
                 // unknown.
-                record_error(&recorder, ERROR_HEAD_TIMEOUT);
+                record_error(
+                    &recorder,
+                    DiagnosticCode::SERVER_HEAD_TIMEOUT,
+                    DiagnosticPhase::Http1,
+                    "request head exceeded the configured bound",
+                );
                 let _ = tokio::time::timeout(
                     Duration::from_secs(1),
                     // No head was parsed, so no method is known: `GET` is the only method whose
@@ -120,6 +127,7 @@ where
             }
         };
 
+        crate::config::adopt_trace_id(&config, &recorder, &head.headers);
         mark(
             &recorder,
             EventKind::RequestHeadComplete,
@@ -128,7 +136,12 @@ where
 
         // -- validate before application code --------------------------------
         if let Some(rejection) = validate(&head, &config) {
-            record_error(&recorder, ERROR_INVALID_REQUEST);
+            record_error(
+                &recorder,
+                DiagnosticCode::SERVER_INVALID_REQUEST,
+                DiagnosticPhase::Http1,
+                "request validation refused the head",
+            );
             let _ = write_failure(&mut reader, &head.method, rejection, config.write_timeout).await;
             return exchanges;
         }
@@ -185,18 +198,25 @@ where
                 Ok(Err(payload)) => {
                     // A panicking handler is answered, not dropped: a peer that receives a status
                     // line can retry or report, while a reset socket is indistinguishable from a
-                    // network failure.
-                    // The message itself already reached stderr through the default panic hook; the
-                    // trace carries the classification, because an `Error` event holds two `u32`s and
-                    // a string payload would make every trace allocation-bearing.
-                    let _described = crate::panic::describe(payload.as_ref());
-                    mark(&recorder, EventKind::Error, ERROR_HANDLER_PANIC);
+                    // network failure. The payload travels in the diagnostic side table, so a
+                    // review can see what panicked without putting a string in every event.
+                    record_error(
+                        &recorder,
+                        DiagnosticCode::SERVER_HANDLER_PANIC,
+                        DiagnosticPhase::Server,
+                        crate::panic::describe(payload.as_ref()),
+                    );
                     Response::internal_error()
                 }
                 Err(_) => {
                     // A handler that never returns would hold the connection forever and make
                     // draining impossible.
-                    record_error(&recorder, ERROR_HANDLER_TIMEOUT);
+                    record_error(
+                        &recorder,
+                        DiagnosticCode::SERVER_HANDLER_TIMEOUT,
+                        DiagnosticPhase::Server,
+                        "handler did not return within the configured bound",
+                    );
                     Response::internal_error()
                 }
             }
@@ -207,7 +227,12 @@ where
         // it would hand the next request the wrong bytes.
         let drained = drain_body(&mut reader, body_kind, &config).await;
         if !drained {
-            mark(&recorder, EventKind::Error, ERROR_BODY_TIMEOUT);
+            record_error(
+                &recorder,
+                DiagnosticCode::SERVER_BODY_TIMEOUT,
+                DiagnosticPhase::Http1,
+                "request body did not finish within the configured bound",
+            );
             return exchanges;
         }
 
@@ -541,21 +566,6 @@ pub(crate) fn wants_close(head: &IncomingRequest, config: &ServerConfig) -> bool
     }
 }
 
-/// Stable numeric codes a trace carries for a terminal failure.
-///
-/// Codes, not strings: an aggregate can filter on them without parsing English, and they survive a
-/// trace being serialized and read elsewhere.
-pub const ERROR_PROTOCOL: u32 = 1;
-pub const ERROR_LIMIT: u32 = 2;
-pub const ERROR_INCOMPLETE: u32 = 3;
-pub const ERROR_IO: u32 = 4;
-pub const ERROR_HEAD_TIMEOUT: u32 = 5;
-pub const ERROR_BODY_TIMEOUT: u32 = 6;
-pub const ERROR_HANDLER_TIMEOUT: u32 = 7;
-pub const ERROR_HANDLER_PANIC: u32 = 8;
-pub const ERROR_INVALID_REQUEST: u32 = 9;
-pub const ERROR_TLS_HANDSHAKE: u32 = 10;
-
 pub(crate) fn mark(recorder: &TraceCollector, kind: EventKind, a: u32) {
     recorder.mark(kind, a, 0);
 }
@@ -581,20 +591,50 @@ fn record_read_failure(recorder: &TraceCollector, error: &HttpError) {
     if matches!(error, HttpError::Incomplete(_)) {
         return;
     }
-    record_error(recorder, code_for(error));
+    record_error(
+        recorder,
+        code_for(error),
+        DiagnosticPhase::Http1,
+        error.to_string(),
+    );
 }
 
-pub(crate) fn code_for(error: &HttpError) -> u32 {
+pub(crate) fn code_for(error: &HttpError) -> DiagnosticCode {
     match error.class() {
-        "protocol" => ERROR_PROTOCOL,
-        "limit" => ERROR_LIMIT,
-        "incomplete" => ERROR_INCOMPLETE,
-        _ => ERROR_IO,
+        "protocol" => DiagnosticCode::SERVER_PROTOCOL,
+        "limit" => DiagnosticCode::SERVER_LIMIT,
+        "incomplete" => DiagnosticCode::SERVER_INCOMPLETE,
+        _ => DiagnosticCode::SERVER_IO,
     }
 }
 
-pub(crate) fn record_error(recorder: &TraceCollector, code: u32) {
-    mark(recorder, EventKind::Error, code);
+pub(crate) fn record_error(
+    recorder: &TraceCollector,
+    code: DiagnosticCode,
+    phase: DiagnosticPhase,
+    message: impl Into<String>,
+) {
+    recorder.record_error(
+        DiagnosticRecord::new(code)
+            .with_phase(phase)
+            .with_message(message),
+    );
+}
+
+#[cfg(any(feature = "http2", feature = "http3"))]
+pub(crate) fn record_error_stream(
+    recorder: &TraceCollector,
+    stream: u32,
+    code: DiagnosticCode,
+    phase: DiagnosticPhase,
+    message: impl Into<String>,
+) {
+    recorder.record_error_stream(
+        stream,
+        DiagnosticRecord::new(code)
+            .with_phase(phase)
+            .with_message(message),
+    );
 }
 
 #[cfg(test)]

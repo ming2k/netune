@@ -57,6 +57,27 @@ fn inv_transport_01_replaces_a_socket_that_dies_before_the_head() { /* ... */ }
 
 A test that verifies an invariant keeps the invariant tag in its name, so the ADR, the test, and the failure message are searchable as one unit.
 
+### 3.1 Failure-first tests
+
+A bug fix starts with a test that fails for the reported reason and is named for
+the diagnostic it protects:
+
+```text
+diag_<diagnostic-code>_<symptom>
+```
+
+The test asserts the terminal `DiagnosticCode`, the phase, and the retry verdict,
+not only the `Display` string. A failure that changes a public path must also
+assert that a `TraceSnapshot` is returned, including under `Observation::Off`.
+When the failure is reproducible through `FaultIo`, assert the diagnostic and the
+recorded events together. A `TraceBundle` may be attached to a postmortem, but
+the test itself must remain hermetic.
+
+The `netune-trace` suite owns the registry contract: codes are unique, stable,
+registered, documented, and never renumber. `netune-diagnostics` owns the
+redaction and bundle-round-trip contract. The orchestrators own the mapping from
+their error vocabulary to the registry.
+
 ---
 
 ## 4. Running the Suite

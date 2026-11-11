@@ -1,0 +1,50 @@
+name: Failure report
+description: Report a failed netune attempt with its diagnostic evidence
+title: "[failure] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A failure report without evidence is a guess. Attach the `TraceId` or a redacted `TraceBundle` when possible.
+  - type: textarea
+    id: symptom
+    attributes:
+      label: Symptom
+      description: What did you expect, and what happened?
+    validations:
+      required: true
+  - type: input
+    id: diagnostic
+    attributes:
+      label: Terminal diagnostic code
+      description: The `DiagnosticCode` from `AttemptError::diagnostic()` or the bundle, e.g. `NET-E-TLS-FAILED`.
+  - type: input
+    id: trace
+    attributes:
+      label: Trace id
+      description: The `TraceId` from `AttemptError::trace().meta.id` or the bundle manifest.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Command, `FaultIo` scenario, or minimal program. Do not include credentials.
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - "Sev 3: contained"
+        - "Sev 2: silent desync / replay / leak"
+        - "Sev 1: privilege / corruption / credential"
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: I removed credentials, cookies, authorization headers, and body contents from the attached evidence.
+          required: true

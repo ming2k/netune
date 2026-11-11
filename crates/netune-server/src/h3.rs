@@ -20,12 +20,12 @@ use http::header;
 use netune_http1::{BodyKind, HttpError, IncomingRequest, TargetForm};
 use netune_http3::{H3ServerConnection, H3ServerStream, H3SettingsProfile};
 use netune_quic::owned::{AcceptError, ServerOptions};
-use netune_trace::{EventKind, TraceCollector};
+use netune_trace::{DiagnosticCode, DiagnosticPhase, EventKind, TraceCollector};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
 use tokio::task::JoinSet;
 
 use crate::body::{BodySource, RequestBody};
-use crate::config::ServerConfig;
+use crate::config::{ListenerEvent, ServerConfig, emit_listener};
 use crate::handler::{BodyStream, Handler, Response, ResponseBody};
 use crate::panic::CatchPanic;
 use crate::service::{BindError, ServedProtocol, hand_over};
@@ -210,6 +210,13 @@ impl H3Server {
         } = self;
         let config = Arc::new(config);
         let settings = Arc::new(settings);
+        emit_listener(
+            &config.listener_sink,
+            ListenerEvent::H3Bound {
+                local,
+                max_connections: config.max_connections,
+            },
+        );
         let (drain_tx, drain_rx) = watch::channel(false);
         let mut connections = JoinSet::new();
         let mut shutdown = Box::pin(shutdown);
@@ -223,6 +230,12 @@ impl H3Server {
                         Ok(connection) => connection,
                         Err(AcceptError::EndpointClosed) => break,
                         Err(AcceptError::Handshake(error)) => {
+                            emit_listener(
+                                &config.listener_sink,
+                                ListenerEvent::H3HandshakeFailed {
+                                    error: error.to_string(),
+                                },
+                            );
                             let _ = handshake_errors.send(Arc::new(error));
                             continue;
                         }
@@ -230,6 +243,16 @@ impl H3Server {
                     let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
                         // Admission is explicit: a peer learns now and may retry,
                         // rather than occupying an unbounded queue.
+                        emit_listener(
+                            &config.listener_sink,
+                            ListenerEvent::Shed {
+                                peer: connection.remote_address(),
+                                active: config
+                                    .max_connections
+                                    .saturating_sub(permits.available_permits()),
+                                max: config.max_connections,
+                            },
+                        );
                         connection.close(0x010b, "server busy");
                         continue;
                     };
@@ -242,28 +265,66 @@ impl H3Server {
                             .await;
                     });
                 }
-                Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                Some(joined) = connections.join_next(), if !connections.is_empty() => {
+                    if let Err(error) = joined {
+                        emit_listener(
+                            &config.listener_sink,
+                            ListenerEvent::TaskFailed {
+                                error: error.to_string(),
+                            },
+                        );
+                    }
+                }
             }
         }
 
         let _ = drain_tx.send(true);
+        emit_listener(
+            &config.listener_sink,
+            ListenerEvent::DrainStarted {
+                inflight: config
+                    .max_connections
+                    .saturating_sub(permits.available_permits()),
+            },
+        );
 
         let deadline = tokio::time::Instant::now() + config.drain_timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
+                emit_listener(
+                    &config.listener_sink,
+                    ListenerEvent::DrainExpired {
+                        aborted: connections.len(),
+                    },
+                );
                 connections.shutdown().await;
                 endpoint.close();
                 return;
             }
             tokio::select! {
                 joined = connections.join_next() => {
-                    if joined.is_none() {
-                        endpoint.close();
-                        return;
+                    match joined {
+                        None => {
+                            endpoint.close();
+                            return;
+                        }
+                        Some(Err(error)) => emit_listener(
+                            &config.listener_sink,
+                            ListenerEvent::TaskFailed {
+                                error: error.to_string(),
+                            },
+                        ),
+                        Some(Ok(())) => {}
                     }
                 }
                 () = tokio::time::sleep(remaining) => {
+                    emit_listener(
+                        &config.listener_sink,
+                        ListenerEvent::DrainExpired {
+                            aborted: connections.len(),
+                        },
+                    );
                     connections.shutdown().await;
                     endpoint.close();
                     return;
@@ -295,8 +356,36 @@ async fn serve_connection(
     .await;
     let mut h3 = match handshake {
         Ok(Ok(h3)) => h3,
-        Ok(Err(_)) | Err(_) => {
-            recorder.mark(EventKind::Error, crate::h1::ERROR_TLS_HANDSHAKE, 0);
+        Ok(Err(error)) => {
+            crate::h1::record_error(
+                &recorder,
+                DiagnosticCode::SERVER_H3_HANDSHAKE,
+                DiagnosticPhase::Http3,
+                error.to_string(),
+            );
+            emit_listener(
+                &config.listener_sink,
+                ListenerEvent::H3HandshakeFailed {
+                    error: error.to_string(),
+                },
+            );
+            hand_over(&config, peer, local, ServedProtocol::Http3, 0, &recorder);
+            drop(permit);
+            return;
+        }
+        Err(_) => {
+            crate::h1::record_error(
+                &recorder,
+                DiagnosticCode::SERVER_TLS_HANDSHAKE,
+                DiagnosticPhase::Http3,
+                "H3 handshake exceeded the configured bound",
+            );
+            emit_listener(
+                &config.listener_sink,
+                ListenerEvent::H3HandshakeFailed {
+                    error: "H3 handshake exceeded the configured bound".to_owned(),
+                },
+            );
             hand_over(&config, peer, local, ServedProtocol::Http3, 0, &recorder);
             drop(permit);
             return;
@@ -333,10 +422,20 @@ async fn serve_connection(
                         // One stream failed to produce a complete head; reset
                         // that stream and keep the QUIC connection available to
                         // its other streams.
-                        recorder.mark(EventKind::Error, crate::h1::ERROR_HEAD_TIMEOUT, 0);
+                        crate::h1::record_error(
+                            &recorder,
+                            DiagnosticCode::SERVER_HEAD_TIMEOUT,
+                            DiagnosticPhase::Http3,
+                            "H3 request head exceeded the configured bound",
+                        );
                     }
-                    Err(_) => {
-                        recorder.mark(EventKind::Error, crate::h1::ERROR_PROTOCOL, 0);
+                    Err(error) => {
+                        crate::h1::record_error(
+                            &recorder,
+                            DiagnosticCode::SERVER_PROTOCOL,
+                            DiagnosticPhase::Http3,
+                            error.to_string(),
+                        );
                         break;
                     }
                 }
@@ -400,12 +499,14 @@ async fn serve_request(
 
     let is_head = request.method() == http::Method::HEAD;
     let incoming = incoming_request(&request);
+    crate::config::adopt_trace_id(&config, &recorder, &incoming.headers);
     if config.require_host && !incoming.headers.contains_key(header::HOST) {
-        recorder.mark_stream(
+        crate::h1::record_error_stream(
+            &recorder,
             stream_id,
-            EventKind::Error,
-            crate::h1::ERROR_INVALID_REQUEST,
-            0,
+            DiagnosticCode::SERVER_INVALID_REQUEST,
+            DiagnosticPhase::Http3,
+            "H3 request is missing the Host field",
         );
         let _ = write_response(
             &mut stream,
@@ -435,21 +536,23 @@ async fn serve_request(
         .await;
         match outcome {
             Ok(Ok(response)) => response,
-            Ok(Err(_)) => {
-                recorder.mark_stream(
+            Ok(Err(payload)) => {
+                crate::h1::record_error_stream(
+                    &recorder,
                     stream_id,
-                    EventKind::Error,
-                    crate::h1::ERROR_HANDLER_PANIC,
-                    0,
+                    DiagnosticCode::SERVER_HANDLER_PANIC,
+                    DiagnosticPhase::Server,
+                    crate::panic::describe(payload.as_ref()),
                 );
                 Response::internal_error()
             }
             Err(_) => {
-                recorder.mark_stream(
+                crate::h1::record_error_stream(
+                    &recorder,
                     stream_id,
-                    EventKind::Error,
-                    crate::h1::ERROR_HANDLER_TIMEOUT,
-                    0,
+                    DiagnosticCode::SERVER_HANDLER_TIMEOUT,
+                    DiagnosticPhase::Server,
+                    "handler did not return within the configured bound",
                 );
                 Response::internal_error()
             }

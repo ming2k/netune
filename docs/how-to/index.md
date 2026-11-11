@@ -8,6 +8,7 @@ Task-oriented guides for a competent user. Each assumes you have completed [Gett
 
 | Guide | Solves |
 | :--- | :--- |
+| [Diagnose a Failed Request](diagnose-failures.md) | Read the diagnostic and trace snapshot a failed attempt returns, and capture a review bundle. |
 | [Configure TLS Profiles and Fingerprints](configure-tls-profiles.md) | Select a TLS identity per request and keep its wire fingerprint stable. |
 | [Simulate Network Chaos with FaultIo](fault-injection.md) | Inject delays, splits, truncations, and resets into a connection. |
 | [Configure Proxies](configure-proxies.md) | Route egress through HTTP CONNECT or SOCKS5. |

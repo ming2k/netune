@@ -17,7 +17,7 @@ use netune_quic::profile::QuicProfile;
 use netune_quic::socket::QuicSocketConfig;
 use netune_quic::wire::transport_parameters::TransportParameters;
 use netune_quic::{QuicConnector, QuicError};
-use netune_trace::{EventKind, TraceCollector};
+use netune_trace::{DiagnosticCode, EventKind, TraceCollector};
 
 #[derive(Debug)]
 struct AcceptAnyCert;
@@ -157,6 +157,13 @@ async fn test_quic_stream_and_trace_lifecycle() {
     assert!(kinds.contains(&EventKind::QuicStart));
     assert!(kinds.contains(&EventKind::QuicEnd));
     assert!(kinds.contains(&EventKind::QuicStreamOpen));
+    assert!(
+        recorder
+            .diagnostics()
+            .iter()
+            .any(|record| record.code == netune_trace::DiagnosticCode::EGRESS_QUIC_PATH_MTU),
+        "the validated path MTU is recorded at handshake completion"
+    );
 }
 
 /// `[INV-EGRESS-01]` / `[INV-QUIC-02]`: a `StrictPublic` connector refuses a
@@ -171,11 +178,19 @@ async fn strict_public_confinement_refuses_a_loopback_target() {
         .with_tls_config(client_crypto())
         .strict_public();
 
+    let recorder = TraceCollector::start(64);
     let error = connector
-        .connect(addr, "localhost", None)
+        .connect(addr, "localhost", Some(recorder.clone()))
         .await
         .expect_err("loopback must be refused");
     assert!(matches!(error, QuicError::Connect(_)));
+    assert_eq!(
+        recorder
+            .diagnostics()
+            .last_error()
+            .map(|record| record.code),
+        Some(DiagnosticCode::EGRESS_QUIC_FAILED)
+    );
 }
 
 #[tokio::test]

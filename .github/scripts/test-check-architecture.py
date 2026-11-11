@@ -70,6 +70,12 @@ BASE_FILES: dict[str, str] = {
         """,
     ),
     "crates/netune-egress/Cargo.toml": manifest(name="netune-egress"),
+    "crates/netune-diagnostics/Cargo.toml": manifest(
+        name="netune-diagnostics",
+        dependencies="""
+            netune-trace = { path = "../netune-trace", version = "1.2.3" }
+        """,
+    ),
     "crates/netune-http1/Cargo.toml": manifest(
         name="netune-http1",
         dev_dependencies="""
@@ -188,6 +194,23 @@ def test_gate_runs_on_the_real_workspace() -> None:
     violations = check_architecture.Workspace(root).run()
     if violations:
         FAILURES.append(f"the real workspace violates its own topology: {[v.render() for v in violations]}")
+
+
+# --- ARCH-011: one diagnostic producer path -------------------------------
+
+
+def test_direct_error_event_is_reported() -> None:
+    expect(
+        "ARCH-011",
+        merged(
+            **{
+                "crates/netune/src/diag.rs": (
+                    "pub fn leak() { let _ = EventKind::Error; }\n"
+                )
+            }
+        ),
+        message="a crate emits EventKind::Error directly",
+    )
 
 
 # --- ARCH-001: the allowed-edge table -------------------------------------

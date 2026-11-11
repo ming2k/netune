@@ -15,7 +15,7 @@ use std::time::Instant;
 use crate::event::{Event, EventKind, TimeSource};
 use crate::log::EventLog;
 use crate::record::TraceSink;
-use crate::trace::Fidelity;
+use crate::trace::{Fidelity, TraceMeta};
 
 /// A strategy for observing bytes crossing one transport stream.
 ///
@@ -136,15 +136,31 @@ impl std::ops::Deref for TapLog {
 pub struct Ring {
     origin: Instant,
     log: EventLog,
+    meta: TraceMeta,
     sink: Option<Arc<dyn TraceSink>>,
 }
 
 impl Ring {
     /// Create a ring tap against `origin` with a bounded capacity.
+    ///
+    /// The generated identity is used only when a sink is installed through
+    /// [`Ring::new`]; a caller that already owns a collector should use
+    /// [`Ring::new_with_meta`] so the byte events carry the same identity.
     pub fn new(origin: Instant, capacity: usize, sink: Option<Arc<dyn TraceSink>>) -> Self {
+        Self::new_with_meta(origin, capacity, TraceMeta::egress(), sink)
+    }
+
+    /// Create a ring tap bound to an existing trace identity.
+    pub fn new_with_meta(
+        origin: Instant,
+        capacity: usize,
+        meta: TraceMeta,
+        sink: Option<Arc<dyn TraceSink>>,
+    ) -> Self {
         Self {
             origin,
             log: EventLog::with_capacity(capacity),
+            meta,
             sink,
         }
     }
@@ -160,7 +176,7 @@ impl Ring {
 
     fn emit(&self, event: Event) {
         if let Some(sink) = &self.sink {
-            let _ = sink.event(event);
+            let _ = sink.event(&self.meta, event);
         }
     }
 }

@@ -45,3 +45,6 @@ pub struct FaultInjectionExamples;
 
 #[doc = include_str!("../../../docs/how-to/websocket-client.md")]
 pub struct WebSocketExamples;
+
+#[doc = include_str!("../../../docs/how-to/diagnose-failures.md")]
+pub struct DiagnoseFailuresExamples;

@@ -39,7 +39,11 @@ This document codifies the workspace topology, dependency direction, and non-neg
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**Dependency rule**: no leaf depends on an orchestrator; `netune` and `netune-server` never depend on each other (`[INV-SERVER-01]`, ADR-0011); `netune-probe` depends on no workspace crate at all. Leaves may depend on other leaves only along the edges the topology table permits (`netune-io → netune-trace`; `netune-quic → netune-egress, netune-io, netune-trace`; `netune-http3 → netune-quic, netune-trace`; `netune-webtransport → netune-http3, netune-quic`; `netune-server → netune-http3, netune-quic` for the optional H3 ingress). Any edge not in that table — a leaf importing an orchestrator, an orchestrator importing the other orchestrator, or a cycle — is an architectural inversion and is rejected by the gate `.github/scripts/check-architecture.py`.
+**Dependency rule**: no leaf depends on an orchestrator; `netune` and `netune-server` never depend on each other (`[INV-SERVER-01]`, ADR-0011); `netune-probe` depends on no workspace crate at all. Leaves may depend on other leaves only along the edges the topology table permits (`netune-io → netune-trace`; `netune-diagnostics → netune-trace`; `netune-quic → netune-egress, netune-io, netune-trace`; `netune-http3 → netune-quic, netune-trace`; `netune-webtransport → netune-http3, netune-quic`; `netune-server → netune-http3, netune-quic` for the optional H3 ingress). Any edge not in that table — a leaf importing an orchestrator, an orchestrator importing the other orchestrator, or a cycle — is an architectural inversion and is rejected by the gate `.github/scripts/check-architecture.py`.
+
+### 1.1 Diagnostic Spine
+
+`netune-trace` owns the event log and a bounded `DiagnosticTable` on the same envelope (ADR-0041). The event stays fixed-size; strings live only in the cold-path side table. `netune-diagnostics` is the optional presentation leaf: stderr/JSONL sinks and review bundles, no socket and no orchestrator. A failure at the public boundary returns an `AttemptError` with a `TraceSnapshot`, including under `Observation::Off` (`[INV-DIAG-01..02]`). One `TraceMeta` and one sink contract span egress and ingress (`[INV-DIAG-03..04]`, ADR-0042). Listener events are the control scope for facts no connection trace can describe (`[INV-DIAG-07]`).
 
 ---
 

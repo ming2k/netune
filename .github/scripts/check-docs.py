@@ -20,6 +20,9 @@ so this script is the enforcement mechanism behind those documents:
     DOC-013  every `INV-*` tag is ratified in an ADR, and the invariant
              index is complete in both directions
     DOC-014  the workspace version is stated consistently
+    DOC-015  every postmortem has the required frontmatter, sections and
+             verifiable action item
+    DOC-016  every runbook has the required operational sections
 
 Usage:
     python3 .github/scripts/check-docs.py [--root DIR]
@@ -63,6 +66,8 @@ INDEXED_QUADRANTS = {
     "docs/reference": "docs/reference/index.md",
     "docs/explanation": "docs/explanation/index.md",
     "docs/dev/standards": "docs/dev/standards/README.md",
+    "docs/dev/postmortems": "docs/dev/postmortems/index.md",
+    "docs/dev/runbooks": "docs/dev/runbooks/index.md",
 }
 
 FENCE_LANGUAGES = {
@@ -78,6 +83,30 @@ FENCE_LANGUAGES = {
 
 ADR_STATUSES = {"draft", "accepted", "superseded", "rejected"}
 ADR_REQUIRED_FRONTMATTER = ("id", "title", "status", "date", "scope", "superseded_by")
+POSTMORTEM_REQUIRED_FRONTMATTER = (
+    "id",
+    "severity",
+    "status",
+    "detected_by",
+    "affected_versions",
+    "invariants",
+    "adrs",
+    "trace_ids",
+)
+POSTMORTEM_REQUIRED_HEADINGS = (
+    "Executive Summary",
+    "Timeline of Events (UTC)",
+    "Evidence",
+    "Detection Gaps",
+    "Trigger & Underlying Root Cause",
+    "Action Items & Defense-in-Depth",
+)
+RUNBOOK_REQUIRED_HEADINGS = (
+    "Target Subsystem & Reference Environment",
+    "Core Protocol Rules & Invariants",
+    "Diagnostic Playbook",
+    "Do-Not-Regress Checklist",
+)
 
 INLINE_LINK = re.compile(r"(?<!\!)\[(?P<text>[^\]]*)\]\((?P<target>[^)\s]+)(?:\s+\"[^\"]*\")?\)")
 IMAGE_LINK = re.compile(r"!\[(?P<text>[^\]]*)\]\((?P<target>[^)\s]+)\)")
@@ -607,6 +636,51 @@ class Checker:
                             f"README shows tag v{stated}, workspace is {version}",
                         )
 
+    # -- DOC-015: postmortem structure ------------------------------------
+
+    def check_postmortems(self) -> None:
+        for path, doc in self.markdown.items():
+            if Path(path).parent.as_posix() != "docs/dev/postmortems":
+                continue
+            if Path(path).name in {"index.md", "TEMPLATE.md"}:
+                continue
+            fields, consumed = split_frontmatter(doc.lines)
+            if consumed == 0:
+                self.report("DOC-015", path, 1, "postmortem has no YAML frontmatter")
+                continue
+            for key in POSTMORTEM_REQUIRED_FRONTMATTER:
+                if key not in fields:
+                    self.report("DOC-015", path, 1, f"frontmatter is missing `{key}`")
+            headings = {text for _, level, text in doc.headings if level == 2}
+            for required in POSTMORTEM_REQUIRED_HEADINGS:
+                if required not in headings:
+                    self.report("DOC-015", path, 1, f"missing H2 section: {required}")
+            status = fields.get("status", "").lower()
+            if status not in {"open", "closed"}:
+                self.report("DOC-015", path, 1, "status must be `open` or `closed`")
+            if status == "closed":
+                text = doc.text().lower()
+                if not any(token in text for token in ("test:", "gate:", "invariant:")):
+                    self.report(
+                        "DOC-015",
+                        path,
+                        1,
+                        "a closed postmortem needs an action item verified by test:, gate:, or invariant:",
+                    )
+
+    # -- DOC-016: runbook structure ---------------------------------------
+
+    def check_runbooks(self) -> None:
+        for path, doc in self.markdown.items():
+            if Path(path).parent.as_posix() != "docs/dev/runbooks":
+                continue
+            if Path(path).name == "index.md":
+                continue
+            headings = {text for _, level, text in doc.headings if level == 2}
+            for required in RUNBOOK_REQUIRED_HEADINGS:
+                if required not in headings:
+                    self.report("DOC-016", path, 1, f"missing H2 section: {required}")
+
     # -- driver -----------------------------------------------------------
 
     def run(self) -> list[Violation]:
@@ -619,6 +693,8 @@ class Checker:
         self.check_adr_references()
         self.check_invariants()
         self.check_versions()
+        self.check_postmortems()
+        self.check_runbooks()
         return sorted(set(self.violations))
 
 

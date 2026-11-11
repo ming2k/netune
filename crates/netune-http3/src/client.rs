@@ -9,7 +9,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use netune_trace::{
     AttemptRef, ConnectionIdentity, ConnectionInfo, EndpointRef, EventKind, Fidelity, RequestTrace,
-    TRACE_SCHEMA_VERSION, TraceCollector, TraceId,
+    TRACE_SCHEMA_VERSION, TraceCollector,
 };
 
 use crate::connection::{Connection, H3Stream, Role};
@@ -314,8 +314,9 @@ impl H3ResponseStream {
         }
         let recorder = self.recorder.as_ref()?;
         let context = self.context.as_ref()?;
+        let snapshot = recorder.snapshot(Fidelity::l0());
         Some(RequestTrace {
-            id: TraceId::new("h3"),
+            meta: snapshot.meta,
             attempt: AttemptRef {
                 round: 0,
                 turn: 0,
@@ -330,7 +331,8 @@ impl H3ResponseStream {
             identity: context.identity.clone(),
             schema_version: TRACE_SCHEMA_VERSION,
             fidelity: Fidelity::l0(),
-            log: recorder.log().for_exchange(self.exchange),
+            log: snapshot.log.for_exchange(self.exchange),
+            diagnostics: snapshot.diagnostics,
         })
     }
 }
@@ -436,7 +438,7 @@ impl H3Client {
         target: SocketAddr,
         server_name: &str,
         recorder: Option<TraceCollector>,
-    ) -> Result<Self, H3Error> {
+    ) -> Result<Self, crate::error::H3AttemptError> {
         Self::connect_with_config(
             connector,
             target,
@@ -454,7 +456,7 @@ impl H3Client {
         server_name: &str,
         recorder: Option<TraceCollector>,
         config: H3ClientConfig,
-    ) -> Result<Self, H3Error> {
+    ) -> Result<Self, crate::error::H3AttemptError> {
         Self::connect_with_settings_and_config(
             connector,
             target,
@@ -473,7 +475,7 @@ impl H3Client {
         server_name: &str,
         recorder: Option<TraceCollector>,
         settings: H3SettingsProfile,
-    ) -> Result<Self, H3Error> {
+    ) -> Result<Self, crate::error::H3AttemptError> {
         Self::connect_with_settings_and_config(
             connector,
             target,
@@ -493,31 +495,43 @@ impl H3Client {
         recorder: Option<TraceCollector>,
         settings: H3SettingsProfile,
         config: H3ClientConfig,
-    ) -> Result<Self, H3Error> {
-        settings
-            .validate()
-            .map_err(|reason| H3Error::Profile(reason.to_string()))?;
-        let profile = connector.profile_name();
-        let quic = connector
-            .connect(target, server_name, recorder.clone())
-            .await?;
-        let settings_name = settings.name.clone();
-        let mut client =
-            Self::new_with_settings_and_config(quic.connection(), recorder, settings, config)
-                .await?;
-        client.quic = Some(quic);
-        client.quic_profile = Some(profile);
-        client.trace_context = Some(H3TraceContext {
-            authority: target.to_string(),
-            server_name: server_name.to_string(),
-            identity: ConnectionIdentity {
-                tls_server_name: Some(server_name.to_string()),
-                h3_profile: Some(profile.to_string()),
-                h3_settings_profile: Some(settings_name),
-                ..ConnectionIdentity::default()
-            },
-        });
-        Ok(client)
+    ) -> Result<Self, crate::error::H3AttemptError> {
+        let evidence = recorder.clone().unwrap_or_else(TraceCollector::disabled);
+        let result: Result<Self, H3Error> = async {
+            settings
+                .validate()
+                .map_err(|reason| H3Error::Profile(reason.to_string()))?;
+            let profile = connector.profile_name();
+            let quic = connector
+                .connect(target, server_name, recorder.clone())
+                .await
+                .map_err(H3Error::from)?;
+            let settings_name = settings.name.clone();
+            let mut client =
+                Self::new_with_settings_and_config(quic.connection(), recorder, settings, config)
+                    .await?;
+            client.quic = Some(quic);
+            client.quic_profile = Some(profile);
+            client.trace_context = Some(H3TraceContext {
+                authority: target.to_string(),
+                server_name: server_name.to_string(),
+                identity: ConnectionIdentity {
+                    tls_server_name: Some(server_name.to_string()),
+                    h3_profile: Some(profile.to_string()),
+                    h3_settings_profile: Some(settings_name),
+                    ..ConnectionIdentity::default()
+                },
+            });
+            Ok(client)
+        }
+        .await;
+        match result {
+            Ok(client) => Ok(client),
+            Err(error) => Err(crate::error::H3AttemptError::new(
+                error,
+                evidence.snapshot(Fidelity::l0()),
+            )),
+        }
     }
 
     /// Connect without waiting for the QUIC handshake.
@@ -532,7 +546,7 @@ impl H3Client {
         target: SocketAddr,
         server_name: &str,
         recorder: Option<TraceCollector>,
-    ) -> Result<Self, H3Error> {
+    ) -> Result<Self, crate::error::H3AttemptError> {
         Self::connect_early_with_settings_and_config(
             connector,
             target,
@@ -551,7 +565,7 @@ impl H3Client {
         server_name: &str,
         recorder: Option<TraceCollector>,
         settings: H3SettingsProfile,
-    ) -> Result<Self, H3Error> {
+    ) -> Result<Self, crate::error::H3AttemptError> {
         Self::connect_early_with_settings_and_config(
             connector,
             target,
@@ -571,34 +585,49 @@ impl H3Client {
         recorder: Option<TraceCollector>,
         settings: H3SettingsProfile,
         config: H3ClientConfig,
-    ) -> Result<Self, H3Error> {
-        settings
-            .validate()
-            .map_err(|reason| H3Error::Profile(reason.to_string()))?;
-        let profile = connector.profile_name();
-        let quic = connector
-            .connect_early(target, server_name, recorder.clone())
-            .await?;
-        if !quic.connection().early_data_available() {
-            quic.connection().wait_established().await?;
+    ) -> Result<Self, crate::error::H3AttemptError> {
+        let evidence = recorder.clone().unwrap_or_else(TraceCollector::disabled);
+        let result: Result<Self, H3Error> = async {
+            settings
+                .validate()
+                .map_err(|reason| H3Error::Profile(reason.to_string()))?;
+            let profile = connector.profile_name();
+            let quic = connector
+                .connect_early(target, server_name, recorder.clone())
+                .await
+                .map_err(H3Error::from)?;
+            if !quic.connection().early_data_available() {
+                quic.connection()
+                    .wait_established()
+                    .await
+                    .map_err(H3Error::from)?;
+            }
+            let settings_name = settings.name.clone();
+            let mut client =
+                Self::new_with_settings_and_config(quic.connection(), recorder, settings, config)
+                    .await?;
+            client.quic = Some(quic);
+            client.quic_profile = Some(profile);
+            client.trace_context = Some(H3TraceContext {
+                authority: target.to_string(),
+                server_name: server_name.to_string(),
+                identity: ConnectionIdentity {
+                    tls_server_name: Some(server_name.to_string()),
+                    h3_profile: Some(profile.to_string()),
+                    h3_settings_profile: Some(settings_name),
+                    ..ConnectionIdentity::default()
+                },
+            });
+            Ok(client)
         }
-        let settings_name = settings.name.clone();
-        let mut client =
-            Self::new_with_settings_and_config(quic.connection(), recorder, settings, config)
-                .await?;
-        client.quic = Some(quic);
-        client.quic_profile = Some(profile);
-        client.trace_context = Some(H3TraceContext {
-            authority: target.to_string(),
-            server_name: server_name.to_string(),
-            identity: ConnectionIdentity {
-                tls_server_name: Some(server_name.to_string()),
-                h3_profile: Some(profile.to_string()),
-                h3_settings_profile: Some(settings_name),
-                ..ConnectionIdentity::default()
-            },
-        });
-        Ok(client)
+        .await;
+        match result {
+            Ok(client) => Ok(client),
+            Err(error) => Err(crate::error::H3AttemptError::new(
+                error,
+                evidence.snapshot(Fidelity::l0()),
+            )),
+        }
     }
 
     /// The underlying QUIC connection, when this client owns one.
@@ -799,16 +828,35 @@ impl H3Client {
 
     /// Execute an HTTP/3 request to completion, buffering the response body.
     ///
-    /// Use [`H3Client::send`] when the body must be streamed.
-    pub async fn execute(&mut self, request: http::Request<Bytes>) -> Result<H3Response, H3Error> {
-        let mut stream = self.send(request).await?;
-        let body = stream.read_to_end().await?;
-        let trace = stream.trace();
-        Ok(H3Response {
-            head: stream.head().clone(),
-            body,
-            trace,
-        })
+    /// Use [`H3Client::send`] when the body must be streamed. A failure carries
+    /// the H3 trace snapshot, including the QUIC and QPACK diagnostics recorded
+    /// before the request returned.
+    pub async fn execute(
+        &mut self,
+        request: http::Request<Bytes>,
+    ) -> Result<H3Response, crate::error::H3AttemptError> {
+        let evidence = self
+            .recorder
+            .clone()
+            .unwrap_or_else(TraceCollector::disabled);
+        let result = async {
+            let mut stream = self.send(request).await?;
+            let body = stream.read_to_end().await?;
+            let trace = stream.trace();
+            Ok(H3Response {
+                head: stream.head().clone(),
+                body,
+                trace,
+            })
+        }
+        .await;
+        match result {
+            Ok(response) => Ok(response),
+            Err(error) => Err(crate::error::H3AttemptError::new(
+                error,
+                evidence.snapshot(Fidelity::l0()),
+            )),
+        }
     }
 }
 

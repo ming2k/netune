@@ -16,9 +16,9 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector};
+use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TraceConfig};
 use netune_server::{Server, ServerConfig};
-use netune_trace::{TraceCollector, derive, derive_ingress};
+use netune_trace::{TraceCollector, TracePropagation, derive, derive_ingress};
 
 /// Serve `server` in the background, returning its address, a shutdown trigger and the
 /// serving task.
@@ -82,6 +82,47 @@ async fn our_client_and_our_server_complete_a_request() {
         .await
         .expect("drained")
         .expect("no panic");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_propagated_trace_id_joins_the_client_and_server_records() {
+    let observer = Arc::new(netune_server::CollectingObserver::default());
+    let config = ServerConfig::for_tests()
+        .with_trace_sink(Arc::clone(&observer) as _)
+        .with_trace_propagation(TracePropagation::Header("x-netune-request-id"));
+    let server = support::server_with(config, Arc::new(support::Echo)).await;
+    let (address, shutdown, handle) = spawn(server);
+
+    let target = Target::plain(format!("127.0.0.1:{}", address.port()));
+    let head = RequestHead::new(http::Method::GET, "/joined");
+    let mut response = client()
+        .request_traced(
+            &target,
+            head,
+            None,
+            TraceConfig::new(1024)
+                .with_propagation(TracePropagation::Header("x-netune-request-id")),
+        )
+        .await
+        .expect("request");
+    let body = response.body.read_to_end().await.expect("body");
+    assert!(body.is_empty());
+    let client_trace = response.body.trace().expect("client trace");
+    drop(response);
+
+    let _ = shutdown.send(());
+    tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .expect("drained")
+        .expect("no panic");
+
+    let traces = observer.take();
+    assert_eq!(traces.len(), 1, "the listener traced the connection");
+    assert_eq!(
+        client_trace.meta.id, traces[0].meta.id,
+        "the propagated id is the same on both ends"
+    );
+    assert_eq!(traces[0].diagnostics.len(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -196,7 +237,10 @@ async fn an_ingress_trace_from_a_real_exchange_derives_every_phase() {
     let log = ingress.log;
 
     let trace = netune_trace::RequestTrace {
-        id: netune_trace::TraceId::new("ingress"),
+        meta: netune_trace::TraceMeta::new(
+            netune_trace::TraceId::new("ingress"),
+            netune_trace::Direction::Ingress,
+        ),
         attempt: netune_trace::AttemptRef {
             round: 0,
             turn: 0,
@@ -212,6 +256,7 @@ async fn an_ingress_trace_from_a_real_exchange_derives_every_phase() {
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: netune_trace::Fidelity::l1(),
         log,
+        diagnostics: netune_trace::DiagnosticTable::default(),
     };
 
     let derived = derive_ingress(&trace);

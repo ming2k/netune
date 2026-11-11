@@ -133,12 +133,24 @@ impl QuicConnector {
             .await?;
         if let Err(error) = connection.connection().wait_established().await {
             if let Some(rec) = &recorder {
+                rec.record_error(error.diagnostic());
                 rec.mark(EventKind::QuicEnd, 0, 0);
             }
             return Err(error);
         }
         if let Some(rec) = &recorder {
             rec.mark(EventKind::QuicEnd, 1, 0);
+            rec.record_note(
+                netune_trace::DiagnosticRecord::new(
+                    netune_trace::DiagnosticCode::EGRESS_QUIC_PATH_MTU,
+                )
+                .with_phase(netune_trace::DiagnosticPhase::Quic)
+                .with_message("validated QUIC path MTU at handshake completion")
+                .with_field(
+                    "validated_mtu",
+                    connection.connection().path_mtu().to_string(),
+                ),
+            );
         }
         Ok(connection)
     }
@@ -161,9 +173,10 @@ impl QuicConnector {
         let result = self
             .connect_early_inner(target_addr, server_name, recorder.clone())
             .await;
-        if result.is_err()
+        if let Err(error) = &result
             && let Some(rec) = &recorder
         {
+            rec.record_error(error.diagnostic());
             rec.mark(EventKind::QuicEnd, 0, 0);
         }
         result
@@ -342,5 +355,25 @@ impl QuicConnection {
     /// chain before sending sensitive application data.
     pub fn peer_certificates(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
         self.connection.peer_certificates()
+    }
+
+    /// Close the connection and record the reason in the attempt trace.
+    ///
+    /// The underlying [`Connection::close`] remains available for a caller
+    /// that deliberately wants to close without a diagnostic; the transport's
+    /// own shutdown paths use this method.
+    pub fn close(&self, code: u64, reason: &str) {
+        if let Some(rec) = &self.recorder {
+            rec.record_note(
+                netune_trace::DiagnosticRecord::new(
+                    netune_trace::DiagnosticCode::EGRESS_QUIC_CLOSED,
+                )
+                .with_phase(netune_trace::DiagnosticPhase::Quic)
+                .with_message("QUIC connection closed")
+                .with_field("close_code", format!("{code:#x}"))
+                .with_field("reason", reason),
+            );
+        }
+        self.connection.close(code, reason);
     }
 }

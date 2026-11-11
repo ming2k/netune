@@ -21,13 +21,14 @@ use netune_http1::{BodyKind, Http1Reader, IncomingResponse, Limits, RequestHead,
 #[cfg(feature = "http2")]
 use netune_http2::{H2ClientConnection, H2Fingerprint, H2ResponseEvent, H2ResponseStream};
 use netune_trace::{
-    Alpn, ConnectionIdentity, Counters, EventKind, Fidelity, NoTap, Ring, TRACE_SCHEMA_VERSION,
-    Tap, TraceCollector, TraceSink,
+    Alpn, ConnectionIdentity, Counters, DiagnosticCode, DiagnosticPhase, DiagnosticRecord,
+    EventKind, Fidelity, NoTap, Ring, TRACE_SCHEMA_VERSION, Tap, TraceCollector, TraceMeta,
+    TracePropagation, TraceSink,
 };
 
 use crate::connect::{Connector, Target};
 use crate::decompress::Decoder;
-use crate::error::NetError;
+use crate::error::{AttemptError, NetError};
 use crate::pool::{IdleConnection, Pool, PoolKey, Protocol};
 use crate::profile::{ConnectionPlan, H1Registry, H1WireProfile};
 #[cfg(feature = "http2")]
@@ -122,6 +123,45 @@ fn h2_error(context: &str, error: netune_http2::H2Error) -> NetError {
     }
 }
 
+/// Record the H2 failure content that the narrow error string drops.
+///
+/// GOAWAY debug data and a stream reset code are the first facts an operator
+/// needs; they are cold-path fields, not event payload.
+#[cfg(feature = "http2")]
+fn h2_error_traced(
+    context: &str,
+    error: netune_http2::H2Error,
+    recorder: &TraceCollector,
+) -> NetError {
+    let mut record = DiagnosticRecord::new(DiagnosticCode::EGRESS_HTTP2_PROTOCOL)
+        .with_phase(DiagnosticPhase::Http2)
+        .with_message(format!("HTTP/2 {context}: {error}"));
+    match &error {
+        netune_http2::H2Error::GoAway {
+            error_code,
+            debug_data,
+        } => {
+            record = record
+                .with_field("goaway_code", error_code.to_string())
+                .with_field(
+                    "debug_data",
+                    String::from_utf8_lossy(debug_data).into_owned(),
+                );
+        }
+        netune_http2::H2Error::StreamReset {
+            stream_id,
+            error_code,
+        } => {
+            record = record
+                .with_field("stream_id", stream_id.to_string())
+                .with_field("reset_code", error_code.to_string());
+        }
+        _ => {}
+    }
+    recorder.record_error(record);
+    h2_error(context, error)
+}
+
 /// How the next attempt observes its byte path.
 ///
 /// The value selects one of three monomorphized taps; the byte path itself never
@@ -143,6 +183,8 @@ pub enum Observation {
 pub struct TraceConfig {
     pub capacity: usize,
     pub sink: Option<Arc<dyn TraceSink>>,
+    /// Whether this attempt's trace id travels on the wire.
+    pub propagation: TracePropagation,
 }
 
 impl Default for TraceConfig {
@@ -150,6 +192,7 @@ impl Default for TraceConfig {
         Self {
             capacity: crate::DEFAULT_TRACE_CAPACITY,
             sink: None,
+            propagation: TracePropagation::Off,
         }
     }
 }
@@ -159,12 +202,19 @@ impl TraceConfig {
         Self {
             capacity,
             sink: None,
+            propagation: TracePropagation::Off,
         }
     }
 
     #[must_use]
     pub fn with_sink(mut self, sink: Arc<dyn TraceSink>) -> Self {
         self.sink = Some(sink);
+        self
+    }
+
+    #[must_use]
+    pub fn with_propagation(mut self, propagation: TracePropagation) -> Self {
+        self.propagation = propagation;
         self
     }
 }
@@ -178,6 +228,15 @@ impl Observation {
     /// A traced attempt with an explicit capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self::Traced(TraceConfig::new(capacity))
+    }
+
+    /// What fidelity the selected tap can truthfully claim.
+    pub const fn fidelity(&self) -> Fidelity {
+        match self {
+            Self::Off => Fidelity::none(),
+            Self::Counters => Fidelity::l0(),
+            Self::Traced(_) => Fidelity::l1(),
+        }
     }
 }
 
@@ -248,13 +307,13 @@ enum BodyObservation {
 /// compiler monomorphizes one of three implementations. There is no public
 /// `Box<dyn Tap>` seam.
 trait ClientTap: Tap + Sized {
-    fn create(observation: &Observation, origin: Instant) -> Self;
+    fn create(observation: &Observation, origin: Instant, meta: TraceMeta) -> Self;
     fn wrap(reader: Http1Reader<TimedIo<Box<dyn crate::connect::Transport>, Self>>) -> Http1Body;
     fn initial() -> BodyObservation;
 }
 
 impl ClientTap for NoTap {
-    fn create(_observation: &Observation, _origin: Instant) -> Self {
+    fn create(_observation: &Observation, _origin: Instant, _meta: TraceMeta) -> Self {
         NoTap
     }
 
@@ -268,7 +327,7 @@ impl ClientTap for NoTap {
 }
 
 impl ClientTap for Counters {
-    fn create(_observation: &Observation, _origin: Instant) -> Self {
+    fn create(_observation: &Observation, _origin: Instant, _meta: TraceMeta) -> Self {
         Counters::default()
     }
 
@@ -282,10 +341,12 @@ impl ClientTap for Counters {
 }
 
 impl ClientTap for Ring {
-    fn create(observation: &Observation, origin: Instant) -> Self {
+    fn create(observation: &Observation, origin: Instant, meta: TraceMeta) -> Self {
         match observation {
-            Observation::Traced(config) => Ring::new(origin, config.capacity, config.sink.clone()),
-            _ => Ring::new(origin, crate::DEFAULT_TRACE_CAPACITY, None),
+            Observation::Traced(config) => {
+                Ring::new_with_meta(origin, config.capacity, meta, config.sink.clone())
+            }
+            _ => Ring::new_with_meta(origin, crate::DEFAULT_TRACE_CAPACITY, meta, None),
         }
     }
 
@@ -356,6 +417,7 @@ impl<C: Connector> Client<C> {
         stream: Box<dyn crate::connect::Transport>,
         fingerprint: H2Fingerprint,
         authority: &str,
+        recorder: &TraceCollector,
     ) -> Result<H2ClientConnection<Box<dyn crate::connect::Transport>>, NetError> {
         crate::handshake::bound(
             self.config.h2_handshake_timeout,
@@ -364,7 +426,7 @@ impl<C: Connector> Client<C> {
             H2ClientConnection::handshake(stream, fingerprint),
         )
         .await?
-        .map_err(|error| h2_error("handshake", error))
+        .map_err(|error| h2_error_traced("handshake", error, recorder))
     }
 
     /// Register or replace an HTTP/1 request-header wire profile.
@@ -509,7 +571,7 @@ impl<C: Connector> Client<C> {
                 NetError::Protocol("HTTP/2 prewarm has no resolved H2 profile".into())
             })?;
             let h2 = self
-                .http2_handshake(established.stream, fp, &target.authority)
+                .http2_handshake(established.stream, fp, &target.authority, &recorder)
                 .await?;
             self.pool
                 .put_http2(&key, h2, established.local_port, established.socket);
@@ -547,7 +609,7 @@ impl<C: Connector> Client<C> {
         target: &Target,
         head: RequestHead,
         body: Option<Bytes>,
-    ) -> Result<Response, NetError> {
+    ) -> Result<Response, AttemptError> {
         self.send(target, head, body, self.config.observation.clone())
             .await
     }
@@ -558,7 +620,7 @@ impl<C: Connector> Client<C> {
         target: &Target,
         head: RequestHead,
         body: Option<Bytes>,
-    ) -> Result<Response, NetError> {
+    ) -> Result<Response, AttemptError> {
         self.send(target, head, body, Observation::Off).await
     }
 
@@ -569,7 +631,7 @@ impl<C: Connector> Client<C> {
         head: RequestHead,
         body: Option<Bytes>,
         config: TraceConfig,
-    ) -> Result<Response, NetError> {
+    ) -> Result<Response, AttemptError> {
         self.send(target, head, body, Observation::Traced(config))
             .await
     }
@@ -583,18 +645,27 @@ impl<C: Connector> Client<C> {
         &self,
         target: &Target,
         path: &str,
-    ) -> Result<crate::ws::WsStream<TimedIo<Box<dyn crate::connect::Transport>, NoTap>>, NetError>
+    ) -> Result<crate::ws::WsStream<TimedIo<Box<dyn crate::connect::Transport>, NoTap>>, AttemptError>
     {
         let recorder = TraceCollector::disabled();
-        self.connect_ws_with(
-            target,
-            path,
-            recorder,
-            |stream| TimedIo::new(stream, NoTap),
-            None,
-            crate::ws::WsHandshake::default(),
-        )
-        .await
+        let evidence = recorder.clone();
+        match self
+            .connect_ws_with(
+                target,
+                path,
+                recorder,
+                |stream| TimedIo::new(stream, NoTap),
+                None,
+                crate::ws::WsHandshake::default(),
+            )
+            .await
+        {
+            Ok(stream) => Ok(stream),
+            Err(error) => Err(AttemptError::new(
+                error,
+                evidence.snapshot(Fidelity::none()),
+            )),
+        }
     }
 
     /// WebSocket support was compiled out.
@@ -603,10 +674,10 @@ impl<C: Connector> Client<C> {
     /// an upgraded stream must be told the capability is absent, not handed a
     /// plain HTTP response it will misread.
     #[cfg(not(feature = "ws"))]
-    pub async fn connect_ws(&self, _target: &Target, _path: &str) -> Result<(), NetError> {
-        Err(NetError::Protocol(
+    pub async fn connect_ws(&self, _target: &Target, _path: &str) -> Result<(), AttemptError> {
+        Err(AttemptError::without_evidence(NetError::Protocol(
             "WebSocket support was not compiled in: enable the `ws` feature".into(),
-        ))
+        )))
     }
 
     /// Establish an upgraded client WebSocket stream with explicit trace recorder and limits.
@@ -620,19 +691,30 @@ impl<C: Connector> Client<C> {
         path: &str,
         recorder: TraceCollector,
         handshake: crate::ws::WsHandshake,
-    ) -> Result<crate::ws::WsStream<RingIo<Box<dyn crate::connect::Transport>>>, NetError> {
-        let (origin, capacity, sink) = (recorder.origin(), recorder.capacity(), recorder.sink());
-        let ring = Ring::new(origin, capacity, sink);
+    ) -> Result<crate::ws::WsStream<RingIo<Box<dyn crate::connect::Transport>>>, AttemptError> {
+        let (origin, capacity, sink, meta) = (
+            recorder.origin(),
+            recorder.capacity(),
+            recorder.sink(),
+            recorder.meta(),
+        );
+        let ring = Ring::new_with_meta(origin, capacity, meta, sink);
         let recorder_for_io = recorder.clone();
-        self.connect_ws_with(
-            target,
-            path,
-            recorder.clone(),
-            move |stream| RingIo::new(stream, ring, recorder_for_io),
-            Some(recorder),
-            handshake,
-        )
-        .await
+        let evidence = recorder.clone();
+        match self
+            .connect_ws_with(
+                target,
+                path,
+                recorder.clone(),
+                move |stream| RingIo::new(stream, ring, recorder_for_io),
+                Some(recorder),
+                handshake,
+            )
+            .await
+        {
+            Ok(stream) => Ok(stream),
+            Err(error) => Err(AttemptError::new(error, evidence.snapshot(Fidelity::l1()))),
+        }
     }
 
     #[cfg(feature = "ws")]
@@ -654,14 +736,18 @@ impl<C: Connector> Client<C> {
         // attempt's trace with an `Error` event: the trace must never end as
         // an unexplained headless corpse.
         let fail = |recorder: &TraceCollector, message: String| -> NetError {
-            recorder.mark(EventKind::Error, 0, 0);
+            recorder.record_error(
+                DiagnosticRecord::new(DiagnosticCode::EGRESS_WS_FAILED)
+                    .with_phase(DiagnosticPhase::WebSocket)
+                    .with_message(message.clone()),
+            );
             NetError::Protocol(message)
         };
 
         let established = match self.connector.connect(target, &recorder).await {
             Ok(established) => established,
             Err(error) => {
-                recorder.mark(EventKind::Error, 0, 0);
+                recorder.record_error(error.diagnostic());
                 return Err(error);
             }
         };
@@ -739,7 +825,7 @@ impl<C: Connector> Client<C> {
                 ));
             }
             Err(error) => {
-                recorder.mark(EventKind::Error, 0, 0);
+                recorder.record_error(error.diagnostic());
                 return Err(error);
             }
         };
@@ -818,10 +904,10 @@ impl<C: Connector> Client<C> {
         _path: &str,
         _recorder: TraceCollector,
         _handshake: (),
-    ) -> Result<(), NetError> {
-        Err(NetError::Protocol(
+    ) -> Result<(), AttemptError> {
+        Err(AttemptError::without_evidence(NetError::Protocol(
             "WebSocket support was not compiled in: enable the `ws` feature".into(),
-        ))
+        )))
     }
 
     /// Send one request, following redirects, and return the final response.
@@ -834,7 +920,7 @@ impl<C: Connector> Client<C> {
         head: RequestHead,
         body: Option<Bytes>,
         observation: Observation,
-    ) -> Result<Response, NetError> {
+    ) -> Result<Response, AttemptError> {
         let recorder = match &observation {
             Observation::Traced(config) => {
                 let mut recorder = TraceCollector::start(config.capacity);
@@ -845,8 +931,53 @@ impl<C: Connector> Client<C> {
             }
             Observation::Off | Observation::Counters => TraceCollector::disabled(),
         };
+        let evidence = recorder.clone();
+        let fidelity = observation.fidelity();
+        let mut head = head;
 
-        match &observation {
+        // Propagation changes the wire, so it is opt-in. The header is inserted
+        // before any request bytes are written and after the trace id exists.
+        let propagation = match &observation {
+            Observation::Traced(config) => config.propagation.header(),
+            _ => None,
+        };
+        if let Some(name) = propagation {
+            let header = match http::HeaderName::from_bytes(name.as_bytes()) {
+                Ok(header) => header,
+                Err(error) => {
+                    let message = format!("invalid trace propagation header {name:?}: {error}");
+                    evidence.record_error(
+                        DiagnosticRecord::new(DiagnosticCode::EGRESS_CONFIG)
+                            .with_phase(DiagnosticPhase::Request)
+                            .with_message(message.clone()),
+                    );
+                    return Err(AttemptError::new(
+                        NetError::Protocol(message),
+                        evidence.snapshot(fidelity),
+                    ));
+                }
+            };
+            if !head.headers.contains_key(&header) {
+                let value = match http::HeaderValue::from_str(evidence.meta().id.as_str()) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let message = format!("invalid trace id header value: {error}");
+                        evidence.record_error(
+                            DiagnosticRecord::new(DiagnosticCode::EGRESS_CONFIG)
+                                .with_phase(DiagnosticPhase::Request)
+                                .with_message(message.clone()),
+                        );
+                        return Err(AttemptError::new(
+                            NetError::Protocol(message),
+                            evidence.snapshot(fidelity),
+                        ));
+                    }
+                };
+                head.headers.insert(header, value);
+            }
+        }
+
+        let result = match &observation {
             Observation::Off => {
                 self.send_with::<NoTap>(target, recorder, head, body, &observation)
                     .await
@@ -859,6 +990,10 @@ impl<C: Connector> Client<C> {
                 self.send_with::<Ring>(target, recorder, head, body, &observation)
                     .await
             }
+        };
+        match result {
+            Ok(response) => Ok(response),
+            Err(error) => Err(AttemptError::new(error, evidence.snapshot(fidelity))),
         }
     }
 
@@ -874,13 +1009,20 @@ impl<C: Connector> Client<C> {
         recorder: TraceCollector,
         head: RequestHead,
         body: Option<Bytes>,
-    ) -> Result<Response, NetError> {
+    ) -> Result<Response, AttemptError> {
         let observation = Observation::Traced(TraceConfig {
             capacity: recorder.capacity(),
             sink: recorder.sink(),
+            propagation: TracePropagation::Off,
         });
-        self.send_with::<Ring>(target, recorder, head, body, &observation)
+        let evidence = recorder.clone();
+        match self
+            .send_with::<Ring>(target, recorder, head, body, &observation)
             .await
+        {
+            Ok(response) => Ok(response),
+            Err(error) => Err(AttemptError::new(error, evidence.snapshot(Fidelity::l1()))),
+        }
     }
 
     async fn send_with<T: ClientTap>(
@@ -1004,6 +1146,14 @@ impl<C: Connector> Client<C> {
                     // cost: the reuse claim is withdrawn and the handshake this
                     // attempt is about to pay is measured rather than reported
                     // as `ConnectionReused`.
+                    recorder.record_note(
+                        DiagnosticRecord::new(DiagnosticCode::EGRESS_POOL_STALE)
+                            .with_phase(DiagnosticPhase::Pool)
+                            .with_message(
+                                "pooled socket died before a response head; the attempt reconnected",
+                            )
+                            .with_field("error_class", error.class()),
+                    );
                     recorder.mark(EventKind::ConnectStaleDiscarded, 0, 0);
                     continue;
                 }
@@ -1099,7 +1249,7 @@ impl<C: Connector> Client<C> {
                 NetError::Protocol("HTTP/2 was selected but no H2 profile was resolved".into())
             })?;
             let h2 = self
-                .http2_handshake(established.stream, fp, &target.authority)
+                .http2_handshake(established.stream, fp, &target.authority, &recorder)
                 .await?;
             return self
                 .send_http2(
@@ -1169,7 +1319,7 @@ impl<C: Connector> Client<C> {
                 .map(|clone| start_sampler(clone, recorder.clone(), SAMPLE_INTERVAL))
         });
 
-        let tap = T::create(observation, recorder.origin());
+        let tap = T::create(observation, recorder.origin(), recorder.meta());
         let mut io = TimedIo::new(stream, tap);
         recorder.mark(EventKind::RequestWriteStart, 0, 0);
         write_request(&mut io, &head, body.as_deref()).await?;
@@ -1262,14 +1412,14 @@ impl<C: Connector> Client<C> {
                 &request_profile,
             )
             .await
-            .map_err(|error| h2_error("request", error))?;
+            .map_err(|error| h2_error_traced("request", error, &recorder))?;
         let written = body.as_ref().map_or(0, |body| body.len()) as u32;
         recorder.mark(EventKind::RequestWriteEnd, written, 0);
 
         let response = h2
             .read_response_head(stream_id)
             .await
-            .map_err(|error| h2_error("request", error))?;
+            .map_err(|error| h2_error_traced("request", error, &recorder))?;
         let stream = h2.into_response_stream(stream_id, &response);
 
         let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK);
@@ -1566,7 +1716,7 @@ impl BodyStream {
                 match h2
                     .next_event()
                     .await
-                    .map_err(|error| h2_error("body", error))?
+                    .map_err(|error| h2_error_traced("body", error, &self.recorder))?
                 {
                     H2ResponseEvent::Data { payload, .. } => {
                         if payload.is_empty() {
@@ -1624,9 +1774,9 @@ impl BodyStream {
         if !self.recorder.is_enabled() {
             return None;
         }
-        let log = self.recorder.log();
+        let snapshot = self.recorder.snapshot(fidelity);
         Some(netune_trace::RequestTrace {
-            id: netune_trace::TraceId::new("egress"),
+            meta: snapshot.meta,
             attempt: netune_trace::AttemptRef {
                 round: 0,
                 turn: 0,
@@ -1641,7 +1791,8 @@ impl BodyStream {
             identity: self.identity.clone(),
             schema_version: TRACE_SCHEMA_VERSION,
             fidelity,
-            log,
+            log: snapshot.log,
+            diagnostics: snapshot.diagnostics,
         })
     }
 
@@ -1719,6 +1870,38 @@ mod h2_tests {
         let (authority, headers) = h2_request_parts(&head, "target.example");
         assert_eq!(authority, "target.example");
         assert!(headers.iter().all(|(name, _)| name != "host"));
+    }
+
+    #[test]
+    fn goaway_debug_data_is_recorded_in_the_diagnostic() {
+        let recorder = TraceCollector::start(8);
+        let mapped = h2_error_traced(
+            "request",
+            netune_http2::H2Error::GoAway {
+                error_code: 7,
+                debug_data: b"busy".to_vec(),
+            },
+            &recorder,
+        );
+        assert!(mapped.is_stale_connection());
+        let record = recorder
+            .diagnostics()
+            .last_error()
+            .cloned()
+            .expect("GOAWAY diagnostic");
+        assert_eq!(record.code, DiagnosticCode::EGRESS_HTTP2_PROTOCOL);
+        assert!(
+            record
+                .fields
+                .iter()
+                .any(|field| { field.key == "goaway_code" && field.value == "7" })
+        );
+        assert!(
+            record
+                .fields
+                .iter()
+                .any(|field| { field.key == "debug_data" && field.value == "busy" })
+        );
     }
 
     #[test]

@@ -17,7 +17,10 @@ const MS: u64 = 1_000_000;
 
 fn trace_with(log: EventLog) -> RequestTrace {
     RequestTrace {
-        id: TraceId::new("01924f4e-0000-7000-8000-000000000001"),
+        meta: netune_trace::TraceMeta::new(
+            TraceId::new("01924f4e-0000-7000-8000-000000000001"),
+            netune_trace::Direction::Egress,
+        ),
         attempt: AttemptRef {
             round: 7,
             turn: 2,
@@ -37,6 +40,7 @@ fn trace_with(log: EventLog) -> RequestTrace {
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: Fidelity::l2(),
         log,
+        diagnostics: netune_trace::DiagnosticTable::default(),
     }
 }
 

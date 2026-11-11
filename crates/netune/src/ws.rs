@@ -7,7 +7,9 @@
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use netune_trace::{EventKind, FrameClass, TraceCollector};
+use netune_trace::{
+    DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EventKind, FrameClass, TraceCollector,
+};
 use netune_ws::{
     CloseCode, CloseReason, Frame, FrameDecoder, FrameEncoder, Limits, Message, MessageAssembler,
     Opcode, Role, generate_mask,
@@ -144,6 +146,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                     Some(r) => (Some(r.code), r.description),
                     None => (None, String::new()),
                 };
+                if let Some(rec) = &self.recorder {
+                    let mut record = DiagnosticRecord::new(DiagnosticCode::EGRESS_WS_CLOSED)
+                        .with_phase(DiagnosticPhase::WebSocket)
+                        .with_message("local close handshake");
+                    if let Some(code) = code {
+                        record = record.with_field("close_code", code.0.to_string());
+                    }
+                    if !desc.is_empty() {
+                        record = record.with_field("reason", desc.clone());
+                    }
+                    rec.record_note(record);
+                }
                 Frame::close(code, &desc)
             }
         };
@@ -232,6 +246,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                         // (RFC 6455 §5.5.1), else 1000.
                         let echo = FrameDecoder::parse_close_code(&frame.payload)
                             .unwrap_or(CloseCode::NORMAL);
+                        if let Some(rec) = &self.recorder {
+                            rec.record_note(
+                                DiagnosticRecord::new(DiagnosticCode::EGRESS_WS_CLOSED)
+                                    .with_phase(DiagnosticPhase::WebSocket)
+                                    .with_message("peer requested close")
+                                    .with_field("close_code", echo.0.to_string()),
+                            );
+                        }
                         let close_reply = Frame::close(Some(echo), "");
                         let _ = self.write_frame(&close_reply).await;
                         self.closed = true;
@@ -291,6 +313,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
             if bytes_read == 0 {
                 if self.closed {
                     return Ok(None);
+                }
+                if let Some(rec) = &self.recorder {
+                    rec.record_error(
+                        DiagnosticRecord::new(DiagnosticCode::EGRESS_WS_FAILED)
+                            .with_phase(DiagnosticPhase::WebSocket)
+                            .with_message("WebSocket connection closed prematurely by peer"),
+                    );
                 }
                 return Err(NetError::Protocol(
                     "WebSocket connection closed prematurely by peer".to_string(),

@@ -41,6 +41,10 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-TRACE-03]` | An event reaches a configured `TraceSink` before the operation that recorded it returns, and the ring buffer remains an independent bounded record of the attempt (a slow sink may drop; the ring may not lose its window silently). | ADR-0010 |
 | `[INV-TRACE-04..06]` | Observation cost is type-level (`NoTap`/`Counters`/`Ring` owned by `TimedIo`); fidelity is produced by the tap, not asserted; a Cargo feature never changes a default observation or identity policy. | ADR-0017 |
 | `[INV-TRACE-07..09]` | `TraceCollector` is the only public cold-path handle and `Tap` the only byte-event producer; H2/H3 are connection-level L0; no public `Recorder` and no public `read`/`wrote` on the collector. | ADR-0018 |
+| `[INV-DIAG-01..02]` | Every terminal failure carries a registered diagnostic with phase and retry verdict; a failed public attempt exposes its evidence even when observation is `Off`. | ADR-0041 |
+| `[INV-DIAG-03..04]` | One real trace identity spans egress and ingress when propagation is enabled; every sink event carries the envelope and preserves multiplexed stream identity. | ADR-0042 |
+| `[INV-DIAG-05..06]` | Diagnostics are bounded, cold-path and redacted; every Sev 1/Sev 2 postmortem action item names a verifiable test, gate, or invariant before release. | ADR-0041 |
+| `[INV-DIAG-07]` | Accept failure, admission shed, drain expiry, H3 handshake failure and sink lag are observable on the listener/control scope. | ADR-0042 |
 | `[INV-CUSTOM-04..06]` | Connection identity is one typed, hashable value in the pool key and trace envelope; redirects preserve it; wire-shape decisions are named policies, never booleans on `Target`. | ADR-0017 |
 | `[INV-CUSTOM-07]` | Every protocol client and connector uses the same `TraceCollector`; no protocol owns a parallel recorder abstraction. | ADR-0018 |
 | `[INV-CUSTOM-08..11]` | Every profile resolves before connect; connection-fixed identity and request-only wire profiles are separate; built-in and custom profiles share one registry path; explicit raw HTTP/1 bytes win over a profile. | ADR-0019 |

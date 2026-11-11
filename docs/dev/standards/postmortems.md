@@ -37,15 +37,28 @@ Every postmortem recorded under `docs/dev/postmortems/` must follow this structu
    - $T_{\text{detect}}$: Detection by an automated test, error alert, or user report.
    - $T_{\text{mitigate}}$: Mitigation or rollback applied.
    - $T_{\text{resolve}}$: Permanent fix verified.
-3. **Detection Gaps**: Why did unit tests, differential oracle parity, `FaultIo`
+3. **Evidence**: The `TraceId`, terminal `DiagnosticCode`, trace bundle (or a
+   link to it), fidelity level, and ring/diagnostic drop counts. If the evidence
+   is incomplete, say which part is missing rather than reconstructing it.
+4. **Detection Gaps**: Why did unit tests, differential oracle parity, `FaultIo`
    chaos injection, loopback e2e, or CI fail to detect this before release? Name the
    verification layer that should have caught it (see [Testing Standards](../testing.md)).
-4. **Trigger & Underlying Root Cause**: Detailed technical analysis of the
+5. **Trigger & Underlying Root Cause**: Detailed technical analysis of the
    state-machine failure, framing desynchronization, missing timeout, or boundary leak.
-5. **Action Items & Defense-in-Depth**:
+6. **Action Items & Defense-in-Depth**:
    - Preventative actions (add a type-level invariant, tighten an egress policy).
    - Detection actions (add a specific regression test, expand a differential test suite).
-   - Each action item must name a verifiable completion criterion.
+   - Each action item must name a verifiable completion criterion: a test name,
+     a documentation/architecture gate, or an invariant tag.
+
+### Frontmatter
+
+Every postmortem carries the schema in
+[`TEMPLATE.md`](../postmortems/TEMPLATE.md): `id`, `severity`, `status`,
+`detected_by`, `affected_versions`, `invariants`, `adrs`, and `trace_ids`.
+`status` is `open` or `closed`. A `closed` record must have at least one action
+item whose verification references a test, gate, or invariant. The docs gate
+enforces the structure; the release checklist enforces closure.
 
 ---
 

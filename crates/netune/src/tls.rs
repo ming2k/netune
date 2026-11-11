@@ -19,7 +19,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use netune_trace::{Alpn, EventKind, TraceCollector};
+use netune_trace::{
+    Alpn, DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EventKind, TraceCollector,
+};
 use rustls::pki_types::ServerName;
 use rustls_platform_verifier::BuilderVerifierExt;
 use tokio_rustls::TlsConnector as RustlsConnector;
@@ -100,13 +102,36 @@ async fn handshake(
     };
 
     recorder.mark(EventKind::TlsStart, 0, 0);
-    let name = ServerName::try_from(server_name.clone())
-        .map_err(|error| NetError::Connect(format!("invalid TLS server name: {error}")))?;
+    let name = match ServerName::try_from(server_name.clone()) {
+        Ok(name) => name,
+        Err(error) => {
+            let message = format!("invalid TLS server name: {error}");
+            recorder.record_error(
+                DiagnosticRecord::new(DiagnosticCode::EGRESS_TLS_FAILED)
+                    .with_phase(DiagnosticPhase::Tls)
+                    .with_message(message.clone()),
+            );
+            return Err(NetError::Connect(message));
+        }
+    };
     let connector = RustlsConnector::from(Arc::clone(config));
     let connecting = connector.connect(name, established.stream);
-    let stream = bound(timeout, "TLS handshake", &server_name, connecting)
-        .await?
-        .map_err(|error| NetError::Connect(format!("TLS handshake with {server_name}: {error}")))?;
+    let stream = match bound(timeout, "TLS handshake", &server_name, connecting).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            let message = format!("TLS handshake with {server_name}: {error}");
+            recorder.record_error(
+                DiagnosticRecord::new(DiagnosticCode::EGRESS_TLS_FAILED)
+                    .with_phase(DiagnosticPhase::Tls)
+                    .with_message(message.clone()),
+            );
+            return Err(NetError::Connect(message));
+        }
+        Err(error) => {
+            recorder.record_error(error.diagnostic());
+            return Err(error);
+        }
+    };
 
     let (alpn, version) = {
         let (_, connection) = stream.get_ref();

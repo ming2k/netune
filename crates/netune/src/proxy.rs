@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use netune_http1::{Http1Reader, Limits};
-use netune_trace::{EventKind, TraceCollector};
+use netune_trace::{DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EventKind, TraceCollector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::connect::{Connector, Established, Target, Transport};
@@ -156,13 +156,32 @@ impl<C: Connector> Connector for ProxyConnector<C> {
                 }
             }
         };
-        crate::handshake::bound(
+        match crate::handshake::bound(
             self.handshake_timeout,
             "proxy handshake",
             self.proxy.authority(),
             handshake,
         )
-        .await??;
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                recorder.record_error(
+                    DiagnosticRecord::new(DiagnosticCode::EGRESS_PROXY_FAILED)
+                        .with_phase(DiagnosticPhase::Proxy)
+                        .with_message(error.to_string()),
+                );
+                return Err(error);
+            }
+            Err(error) => {
+                recorder.record_error(
+                    DiagnosticRecord::new(DiagnosticCode::EGRESS_PROXY_FAILED)
+                        .with_phase(DiagnosticPhase::Proxy)
+                        .with_message(error.to_string()),
+                );
+                return Err(error);
+            }
+        }
         recorder.mark(EventKind::ProxyTunnel, 0, 0);
 
         Ok(Established {

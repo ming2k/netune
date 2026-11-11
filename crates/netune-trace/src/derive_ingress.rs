@@ -380,7 +380,10 @@ mod tests {
 
     fn trace(log: EventLog) -> RequestTrace {
         RequestTrace {
-            id: TraceId::new("ingress"),
+            meta: crate::trace::TraceMeta::new(
+                TraceId::new("ingress"),
+                crate::trace::Direction::Ingress,
+            ),
             attempt: AttemptRef {
                 round: 0,
                 turn: 0,
@@ -396,6 +399,7 @@ mod tests {
             schema_version: crate::TRACE_SCHEMA_VERSION,
             fidelity: Fidelity::l1(),
             log,
+            diagnostics: crate::DiagnosticTable::default(),
         }
     }
 

@@ -63,7 +63,10 @@ async fn serve_tls(listener: TcpListener, acceptor: TlsAcceptor, responses: usiz
 
 fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
     RequestTrace {
-        id: TraceId::new("tls-e2e"),
+        meta: netune_trace::TraceMeta::new(
+            TraceId::new("tls-e2e"),
+            netune_trace::Direction::Egress,
+        ),
         attempt: AttemptRef {
             round: 1,
             turn: 1,
@@ -79,6 +82,7 @@ fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: Fidelity::l1(),
         log,
+        diagnostics: netune_trace::DiagnosticTable::default(),
     }
 }
 

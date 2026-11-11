@@ -54,7 +54,9 @@ pub enum EventKind {
     OutputToken = 19,
     /// The response was validated by the harness; the attempt is complete.
     Validated = 20,
-    /// A failure observed at the transport or protocol layer. `a` = class code.
+    /// A terminal failure observed at the transport or protocol layer.
+    /// `a` = [`crate::DiagnosticCode`] raw value, `b` = diagnostic sequence in
+    /// the envelope's side table (`0` when no detail was captured).
     Error = 21,
     /// The attempt was retried. `a` = attempt ordinal that follows.
     Retry = 22,
@@ -141,6 +143,12 @@ pub enum EventKind {
     H3HeadComplete = 49,
     /// HTTP/3 response body fully received. `a` = body bytes received.
     H3Finished = 50,
+    /// A non-terminal diagnostic observed during the attempt. `a` =
+    /// [`crate::DiagnosticCode`] raw value, `b` = diagnostic sequence.
+    Note = 51,
+    /// The diagnostic side table evicted an entry. `a` = total diagnostics
+    /// dropped so far.
+    DiagnosticDropped = 52,
 }
 
 impl EventKind {
@@ -201,6 +209,8 @@ impl EventKind {
             48 => Self::H3StreamStart,
             49 => Self::H3HeadComplete,
             50 => Self::H3Finished,
+            51 => Self::Note,
+            52 => Self::DiagnosticDropped,
             _ => return None,
         })
     }
@@ -229,6 +239,11 @@ impl EventKind {
     /// Whether this kind is an encoding aid rather than a recorded fact.
     pub const fn is_synthetic(self) -> bool {
         matches!(self, Self::TimeJump)
+    }
+
+    /// Whether this kind carries a diagnostic code in `a`.
+    pub const fn is_diagnostic(self) -> bool {
+        matches!(self, Self::Error | Self::Note)
     }
 
     /// Whether this kind may only be produced by a byte-path [`crate::Tap`].
@@ -360,6 +375,7 @@ impl Alpn {
 
 /// One decoded event, positioned by its offset from the trace origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Event {
     /// Nanoseconds since dispatch (the trace origin).
     pub at_ns: u64,
@@ -396,6 +412,24 @@ impl Event {
             | EventKind::RequestBodyEnd
             | EventKind::ResponseChunkSent
             | EventKind::ResponseEnd => Some(self.a),
+            _ => None,
+        }
+    }
+
+    /// The diagnostic code, for [`EventKind::Error`] and [`EventKind::Note`].
+    pub const fn diagnostic_code(self) -> Option<crate::diagnostic::DiagnosticCode> {
+        match self.kind {
+            EventKind::Error | EventKind::Note => {
+                Some(crate::diagnostic::DiagnosticCode::from_raw(self.a))
+            }
+            _ => None,
+        }
+    }
+
+    /// The diagnostic side-table sequence, for diagnostics with detail.
+    pub const fn diagnostic_sequence(self) -> Option<u32> {
+        match self.kind {
+            EventKind::Error | EventKind::Note if self.b != 0 => Some(self.b),
             _ => None,
         }
     }

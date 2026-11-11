@@ -29,7 +29,7 @@ use netune_http2::server::{
     H2Handler, H2Request, H2Response, H2ResponseBody, ResponseFuture as H2ResponseFuture,
     ServerSession, ServerSessionConfig, SessionEnd, SessionObserver, StreamEvent,
 };
-use netune_trace::{EventKind, TraceCollector};
+use netune_trace::{DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EventKind, TraceCollector};
 use tokio::sync::mpsc;
 
 use crate::body::{BodySource, RequestBody};
@@ -101,6 +101,7 @@ impl HandlerAdapter {
     ) -> H2Response {
         let stream_id = request.stream_id;
         let incoming = incoming_request(&request);
+        crate::config::adopt_trace_id(&config, &recorder, &incoming.headers);
 
         // The same host rule the HTTP/1.1 path enforces, applied to the field HTTP/2 spells
         // differently. `decode_request` already refused a request with no `:authority`; what is left is
@@ -144,22 +145,24 @@ impl HandlerAdapter {
             Ok(Err(payload)) => {
                 // Recorded on *this* stream: `split_multiplexed` copies connection-level events into
                 // every sub-log, so a stream-0 `Error` would make one stream's panic appear in every
-                // other stream's derivation on the same connection.
-                let _described = crate::panic::describe(payload.as_ref());
-                recorder.mark_stream(
+                // other stream's derivation on the same connection. The payload lives in the
+                // diagnostic side table, not in the fixed-size event.
+                crate::h1::record_error_stream(
+                    &recorder,
                     stream_id,
-                    EventKind::Error,
-                    crate::h1::ERROR_HANDLER_PANIC,
-                    0,
+                    DiagnosticCode::SERVER_HANDLER_PANIC,
+                    DiagnosticPhase::Server,
+                    crate::panic::describe(payload.as_ref()),
                 );
                 Response::internal_error()
             }
             Err(_) => {
-                recorder.mark_stream(
+                crate::h1::record_error_stream(
+                    &recorder,
                     stream_id,
-                    EventKind::Error,
-                    crate::h1::ERROR_HANDLER_TIMEOUT,
-                    0,
+                    DiagnosticCode::SERVER_HANDLER_TIMEOUT,
+                    DiagnosticPhase::Server,
+                    "handler did not return within the configured bound",
                 );
                 Response::internal_error()
             }
@@ -303,7 +306,16 @@ impl SessionObserver for TraceObserver {
             StreamEvent::ResponseHeadSent => (EventKind::ResponseHeadSent, 0),
             StreamEvent::ResponseBodyChunk { payload } => (EventKind::ResponseChunkSent, payload),
             StreamEvent::ResponseEnd => (EventKind::ResponseEnd, 0),
-            StreamEvent::Failed { code } => (EventKind::Error, code),
+            StreamEvent::Failed { code } => {
+                self.recorder.record_error_stream(
+                    stream_id,
+                    DiagnosticRecord::new(DiagnosticCode::SERVER_H2_STREAM)
+                        .with_phase(DiagnosticPhase::Http2)
+                        .with_message("HTTP/2 stream failed")
+                        .with_field("h2_code", code.to_string()),
+                );
+                return;
+            }
         };
         self.recorder.mark_stream(stream_id, kind, a, 0);
     }

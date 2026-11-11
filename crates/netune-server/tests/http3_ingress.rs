@@ -197,7 +197,10 @@ async fn h3_ingress_serves_streaming_request_and_records_trace() {
     assert_eq!(traces[0].fidelity, netune_trace::Fidelity::l0());
     assert_eq!(traces[0].exchanges, 3);
     let derived = netune_trace::derive_ingress_exchanges(&netune_trace::RequestTrace {
-        id: netune_trace::TraceId::new("h3-ingress"),
+        meta: netune_trace::TraceMeta::new(
+            netune_trace::TraceId::new("h3-ingress"),
+            netune_trace::Direction::Ingress,
+        ),
         attempt: netune_trace::AttemptRef {
             round: 1,
             turn: 1,
@@ -213,6 +216,7 @@ async fn h3_ingress_serves_streaming_request_and_records_trace() {
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: traces[0].fidelity,
         log: traces[0].log.clone(),
+        diagnostics: traces[0].diagnostics.clone(),
     });
     assert_eq!(derived.len(), 3, "each request is its own exchange");
 }

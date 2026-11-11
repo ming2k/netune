@@ -51,6 +51,9 @@
 mod derive;
 mod derive_ingress;
 mod derive_transport;
+mod diagnose;
+mod diagnostic;
+mod diff;
 mod event;
 #[cfg(feature = "ja4")]
 mod forge;
@@ -67,17 +70,25 @@ pub use derive_ingress::{
     DerivedIngress, derive_ingress, derive_ingress_exchanges, exchange_count,
 };
 pub use derive_transport::{DerivedH3, DerivedQuic, derive_h3, derive_h3_exchanges, derive_quic};
+pub use diagnose::{Diagnosis, Outcome, diagnose};
+pub use diagnostic::{
+    DEFAULT_DIAGNOSTIC_CAPACITY, Diagnose, DiagnosticCode, DiagnosticField, DiagnosticLevel,
+    DiagnosticPhase, DiagnosticRecord, DiagnosticTable, MAX_DIAGNOSTIC_FIELD,
+    MAX_DIAGNOSTIC_FIELDS, MAX_DIAGNOSTIC_MESSAGE, RetryVerdict, Sensitivity,
+};
+pub use diff::{Divergence, EventView, TraceDiff, diff};
 pub use event::{Alpn, Event, EventKind, FrameClass, TimeSource};
 #[cfg(feature = "ja4")]
 pub use forge::{ClientHelloForge, RawExtension};
 pub use log::{EncodedEvent, EventLog, MAX_DELTA_NS};
-pub use record::{Flow, TraceCollector, TraceSink};
+pub use record::{Flow, TraceCollector, TraceSink, TraceSummary};
 pub use tap::{Counters, NoTap, Ring, Tap, TapLog};
 #[cfg(feature = "ja4")]
 pub use tlsfp::{ClientHello, Ja3, Ja4, is_grease, ja3, ja4};
 pub use trace::{
-    AttemptRef, ConnectionIdentity, ConnectionInfo, EndpointRef, EvasionPolicy, Fidelity,
-    RequestTrace, TRACE_SCHEMA_VERSION, TraceId,
+    AttemptRef, ConnectionIdentity, ConnectionInfo, Direction, EndpointRef, EvasionPolicy,
+    Fidelity, RequestTrace, TRACE_SCHEMA_VERSION, TraceId, TraceMeta, TracePropagation,
+    TraceSnapshot,
 };
 pub use verdict::{Reading, Reason, Validity};
 

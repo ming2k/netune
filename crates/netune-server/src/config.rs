@@ -21,16 +21,17 @@
 //! attack. Collapsing them into one number makes the transport unable to tell an operator
 //! which of the four happened.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use netune_http1::Limits;
-use netune_trace::{Event, EventLog, TraceSink};
+use netune_trace::{Event, EventLog, Flow, TracePropagation, TraceSink, TraceSummary};
 
 #[cfg(feature = "tls")]
 use tokio_rustls::rustls as netune_rustls;
 
-use crate::service::IngressTrace;
+use crate::service::{IngressTrace, ServedProtocol};
 
 /// Which application protocols the listener speaks.
 ///
@@ -177,6 +178,17 @@ pub struct ServerConfig {
     /// `None` by default, so a server nobody observes pays nothing. Install one and every
     /// finished connection arrives as a complete [`IngressTrace`].
     pub trace_sink: Option<Arc<dyn TraceObserver>>,
+    /// Where listener-scoped events are delivered.
+    ///
+    /// A connection trace cannot describe a connection that was shed before it
+    /// got one, an accept failure, or a drain expiry. Those facts belong to the
+    /// listener scope (`[INV-DIAG-07]`).
+    pub listener_sink: Option<Arc<dyn ListenerObserver>>,
+    /// Whether an ingress trace adopts a peer's propagated trace id.
+    ///
+    /// Off by default: reading a header is harmless, but the policy is named so
+    /// a deployment can state whether it joins traces across hops.
+    pub trace_propagation: TracePropagation,
 }
 
 /// HTTP/2-specific ingress bounds.
@@ -299,6 +311,8 @@ impl Default for ServerConfig {
             http2: H2Ingress::for_ingress(),
             trace_capacity: 1024,
             trace_sink: None,
+            listener_sink: None,
+            trace_propagation: TracePropagation::Off,
         }
     }
 }
@@ -328,6 +342,8 @@ impl ServerConfig {
             http2: H2Ingress::for_ingress(),
             trace_capacity: 128,
             trace_sink: None,
+            listener_sink: None,
+            trace_propagation: TracePropagation::Off,
         }
     }
 
@@ -335,6 +351,20 @@ impl ServerConfig {
     #[must_use]
     pub fn with_trace_sink(mut self, observer: Arc<dyn TraceObserver>) -> Self {
         self.trace_sink = Some(observer);
+        self
+    }
+
+    /// Deliver listener-scoped events to `observer`.
+    #[must_use]
+    pub fn with_listener_sink(mut self, observer: Arc<dyn ListenerObserver>) -> Self {
+        self.listener_sink = Some(observer);
+        self
+    }
+
+    /// Adopt a trace id from the configured request header.
+    #[must_use]
+    pub fn with_trace_propagation(mut self, propagation: TracePropagation) -> Self {
+        self.trace_propagation = propagation;
         self
     }
 
@@ -514,6 +544,13 @@ impl ServerConfig {
                 "protocols.http2 is enabled but this build omits the `http2` feature",
             ));
         }
+        if let Some(name) = self.trace_propagation.header() {
+            http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                crate::service::BindError::Invalid(
+                    "trace propagation header is not a valid HTTP field name",
+                )
+            })?;
+        }
         Ok(())
     }
 }
@@ -628,6 +665,130 @@ pub trait TraceObserver: Send + Sync + std::fmt::Debug {
     fn connection_finished(&self, trace: IngressTrace);
 }
 
+/// How a connection's protocol was selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolVia {
+    /// The first bytes were a prior-knowledge HTTP/2 preface.
+    Preface,
+    /// The TLS handshake's ALPN result.
+    Alpn,
+    /// The H3 listener's QUIC handshake.
+    Quic,
+}
+
+/// A listener-scoped fact that is not part of any one connection trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListenerEvent {
+    /// The listener bound successfully.
+    Bound {
+        local: SocketAddr,
+        protocols: Protocols,
+        max_connections: usize,
+    },
+    /// `accept(2)` failed and the listener continued.
+    AcceptFailed { error: String },
+    /// Admission control refused a connection.
+    Shed {
+        peer: SocketAddr,
+        active: usize,
+        max: usize,
+    },
+    /// A connection's protocol was selected.
+    ProtocolSelected {
+        peer: SocketAddr,
+        protocol: ServedProtocol,
+        via: ProtocolVia,
+    },
+    /// The listener stopped accepting and began draining.
+    DrainStarted { inflight: usize },
+    /// The drain deadline expired with connections still running.
+    DrainExpired { aborted: usize },
+    /// A connection task ended in a panic or join failure.
+    TaskFailed { error: String },
+    /// An incoming QUIC/H3 handshake failed; the listener continues.
+    H3HandshakeFailed { error: String },
+    /// The H3 listener bound successfully.
+    H3Bound {
+        local: SocketAddr,
+        max_connections: usize,
+    },
+}
+
+/// Receives listener-scoped events.
+///
+/// Implemented by the transport's consumer, never by the transport. It must not
+/// block: it runs on the accept loop or a connection task.
+pub trait ListenerObserver: Send + Sync + std::fmt::Debug {
+    fn event(&self, event: ListenerEvent);
+}
+
+/// A listener observer that keeps the last `capacity` events for tests or a
+/// bounded operator endpoint.
+#[derive(Debug)]
+pub struct CollectingListenerObserver {
+    capacity: usize,
+    events: std::sync::Mutex<std::collections::VecDeque<ListenerEvent>>,
+}
+
+impl CollectingListenerObserver {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            events: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    pub fn take(&self) -> Vec<ListenerEvent> {
+        let mut events = self
+            .events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        events.drain(..).collect()
+    }
+}
+
+impl ListenerObserver for CollectingListenerObserver {
+    fn event(&self, event: ListenerEvent) {
+        let mut events = self
+            .events
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if events.len() == self.capacity {
+            events.pop_front();
+        }
+        events.push_back(event);
+    }
+}
+
+pub(crate) fn emit_listener(observer: &Option<Arc<dyn ListenerObserver>>, event: ListenerEvent) {
+    if let Some(observer) = observer {
+        observer.event(event);
+    }
+}
+
+/// Adopt a propagated trace id from an ingress request head.
+///
+/// This only changes the envelope identity; it never changes a timing or an
+/// event. A malformed header is ignored rather than rejecting the request: the
+/// trace id is diagnostic metadata, not a protocol requirement.
+pub(crate) fn adopt_trace_id(
+    config: &ServerConfig,
+    recorder: &netune_trace::TraceCollector,
+    headers: &http::HeaderMap,
+) {
+    let Some(name) = config.trace_propagation.header() else {
+        return;
+    };
+    let Ok(name) = http::HeaderName::from_bytes(name.as_bytes()) else {
+        return;
+    };
+    if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok())
+        && !value.is_empty()
+    {
+        recorder.set_trace_id(netune_trace::TraceId::new(value));
+    }
+}
+
 /// A [`TraceObserver`] that forwards a connection's events to a [`TraceSink`].
 ///
 /// The bridge for a consumer that already has one sink collecting both directions: it
@@ -647,9 +808,21 @@ impl SinkObserver {
 
 impl TraceObserver for SinkObserver {
     fn connection_finished(&self, trace: IngressTrace) {
+        self.sink.trace_started(&trace.meta);
+        let mut sink_dropped = 0;
         for event in trace.log.iter() {
-            let _ = self.sink.event(event);
+            if self.sink.event(&trace.meta, event) == Flow::Drop {
+                sink_dropped += 1;
+            }
         }
+        let summary = TraceSummary {
+            events: trace.log.len(),
+            dropped_events: trace.log.dropped(),
+            diagnostics: trace.diagnostics.len(),
+            dropped_diagnostics: trace.diagnostics.dropped(),
+            sink_dropped,
+        };
+        self.sink.trace_finished(&trace.meta, &summary);
     }
 }
 
@@ -684,15 +857,17 @@ impl CollectingObserver {
     }
 }
 
-/// Rebuild an [`EventLog`] from a streamed event, for an observer that buffers events itself.
+/// Rebuild an [`EventLog`] from streamed events, for an observer that buffers events itself.
 ///
 /// Exposed because a consumer writing its own observer needs exactly this and nothing else;
-/// leaving it to each consumer invites them to get `push_at` wrong.
+/// leaving it to each consumer invites them to get `push_at` wrong. The stream identity is
+/// part of the event contract: a multiplexed log rebuilt without it attributes one stream's
+/// bytes to another.
 pub fn log_from_events(events: impl IntoIterator<Item = Event>) -> EventLog {
     let events: Vec<Event> = events.into_iter().collect();
     let mut log = EventLog::with_capacity(events.len().max(1));
     for event in events {
-        log.push_at(event.at_ns, event.kind, event.a, event.b);
+        log.push_at_stream(event.at_ns, event.stream, event.kind, event.a, event.b);
     }
     log
 }

@@ -7,7 +7,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use netune_trace::{ConnectionIdentity, EvasionPolicy, EventKind, TraceCollector};
+use netune_trace::{
+    ConnectionIdentity, DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EvasionPolicy,
+    EventKind, TraceCollector,
+};
 
 use crate::dns::{DnsResolver, SystemResolver};
 use crate::error::NetError;
@@ -337,35 +340,73 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
         target: &Target,
         recorder: &TraceCollector,
     ) -> Result<Established, NetError> {
-        let (host, port) = split_target_authority(&target.authority)?;
+        let (host, port) = match split_target_authority(&target.authority) {
+            Ok(parts) => parts,
+            Err(error) => {
+                recorder.record_error(
+                    DiagnosticRecord::new(DiagnosticCode::EGRESS_DNS_FAILED)
+                        .with_phase(DiagnosticPhase::Dns)
+                        .with_message(error.to_string()),
+                );
+                return Err(error);
+            }
+        };
 
         recorder.mark(EventKind::DnsStart, 0, 0);
         let resolve = self.resolver.resolve(host, port);
         let addresses = match self.connect_timeout {
-            Some(timeout) => tokio::time::timeout(timeout, resolve).await.map_err(|_| {
-                NetError::Resolve(format!(
-                    "DNS resolution for {host} exceeded the {}s connect timeout",
-                    timeout.as_secs()
-                ))
-            })?,
+            Some(timeout) => match tokio::time::timeout(timeout, resolve).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let message = format!(
+                        "DNS resolution for {host} exceeded the {}s connect timeout",
+                        timeout.as_secs()
+                    );
+                    recorder.record_error(
+                        DiagnosticRecord::new(DiagnosticCode::EGRESS_DNS_FAILED)
+                            .with_phase(DiagnosticPhase::Dns)
+                            .with_message(message.clone())
+                            .with_public_field("host", host),
+                    );
+                    return Err(NetError::Resolve(message));
+                }
+            },
             None => resolve.await,
-        }?;
+        };
+        let addresses = match addresses {
+            Ok(addresses) => addresses,
+            Err(error) => {
+                recorder.record_error(error.diagnostic());
+                return Err(error);
+            }
+        };
         recorder.mark(EventKind::DnsEnd, addresses.len() as u32, 0);
         let Some(address) = addresses.first().copied() else {
-            return Err(NetError::Resolve(format!(
-                "no addresses for {}",
-                target.authority
-            )));
+            let message = format!("no addresses for {}", target.authority);
+            recorder.record_error(
+                DiagnosticRecord::new(DiagnosticCode::EGRESS_DNS_FAILED)
+                    .with_phase(DiagnosticPhase::Dns)
+                    .with_message(message.clone())
+                    .with_public_field("authority", &target.authority),
+            );
+            return Err(NetError::Resolve(message));
         };
 
         if self.confinement == EgressConfinement::StrictPublic {
             for addr in &addresses {
                 if !is_public_ip(addr.ip()) {
-                    return Err(NetError::Security(format!(
+                    let message = format!(
                         "refusing to connect to non-public address {} for '{}'",
                         addr.ip(),
                         target.authority
-                    )));
+                    );
+                    recorder.record_error(
+                        DiagnosticRecord::new(DiagnosticCode::EGRESS_SECURITY)
+                            .with_phase(DiagnosticPhase::Tcp)
+                            .with_message(message.clone())
+                            .with_public_field("address", addr.ip().to_string()),
+                    );
+                    return Err(NetError::Security(message));
                 }
             }
         }
@@ -373,18 +414,47 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
         recorder.mark(EventKind::TcpStart, 0, 0);
         let dial = crate::socket::connect(address, &self.socket_config);
         let stream = match self.connect_timeout {
-            Some(timeout) => tokio::time::timeout(timeout, dial).await.map_err(|_| {
-                NetError::Connect(format!(
-                    "TCP connect to {address} exceeded the {}s connect timeout",
-                    timeout.as_secs()
-                ))
-            })?,
+            Some(timeout) => match tokio::time::timeout(timeout, dial).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let message = format!(
+                        "TCP connect to {address} exceeded the {}s connect timeout",
+                        timeout.as_secs()
+                    );
+                    recorder.record_error(
+                        DiagnosticRecord::new(DiagnosticCode::EGRESS_TIMEOUT)
+                            .with_phase(DiagnosticPhase::Tcp)
+                            .with_message(message.clone())
+                            .with_public_field("address", address.to_string()),
+                    );
+                    return Err(NetError::Connect(message));
+                }
+            },
             None => dial.await,
+        };
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                let message = error.to_string();
+                recorder.record_error(
+                    DiagnosticRecord::new(DiagnosticCode::EGRESS_TCP_FAILED)
+                        .with_phase(DiagnosticPhase::Tcp)
+                        .with_message(message.clone())
+                        .with_public_field("address", address.to_string())
+                        .with_field("kind", format!("{:?}", error.kind())),
+                );
+                return Err(NetError::Connect(message));
+            }
+        };
+        if let Err(error) = self.socket_config.apply(&stream) {
+            let message = error.to_string();
+            recorder.record_error(
+                DiagnosticRecord::new(DiagnosticCode::EGRESS_CONFIG)
+                    .with_phase(DiagnosticPhase::Tcp)
+                    .with_message(message.clone()),
+            );
+            return Err(NetError::Connect(message));
         }
-        .map_err(|error| NetError::Connect(error.to_string()))?;
-        self.socket_config
-            .apply(&stream)
-            .map_err(|error| NetError::Connect(error.to_string()))?;
         let local_port = stream.local_addr().ok().map(|address| address.port());
         recorder.mark(EventKind::TcpEnd, 0, 0);
 

@@ -331,7 +331,7 @@ async fn a_client_that_stalls_mid_handshake_is_cut_off_at_the_bound() {
         .collect();
     assert_eq!(
         codes,
-        vec![netune_server::ERROR_TLS_HANDSHAKE],
+        vec![netune_trace::DiagnosticCode::SERVER_TLS_HANDSHAKE.raw()],
         "a stalled handshake is classified as one"
     );
 }

@@ -14,12 +14,14 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::diagnostic::{DEFAULT_DIAGNOSTIC_CAPACITY, DiagnosticRecord, DiagnosticTable};
 #[cfg(test)]
 use crate::event::TimeSource;
 use crate::event::{Event, EventKind, FrameClass};
 use crate::log::EventLog;
+use crate::trace::{Fidelity, TraceMeta, TraceSnapshot};
 
-/// A destination for events as they are recorded (ADR-0010).
+/// A destination for events as they are recorded (ADR-0010, ADR-0042).
 ///
 /// # Why the ring buffer is not enough
 ///
@@ -39,12 +41,32 @@ use crate::log::EventLog;
 /// * **May drop.** A sink that cannot keep up is expected to drop; the ring buffer remains the
 ///   record of truth for the attempt.
 pub trait TraceSink: Send + Sync + std::fmt::Debug {
-    /// Receives one event. `at_ns` is relative to the recorder's origin.
+    /// Called once when the attempt is bound to this sink.
+    ///
+    /// The default is deliberately empty so a sink that only wants events does
+    /// not have to implement lifecycle noise.
+    fn trace_started(&self, _meta: &TraceMeta) {}
+
+    /// Receives one event with the envelope that produced it.
     ///
     /// Returning [`Flow::Drop`] is advisory: the sink may have discarded the
     /// event, but the ring remains the record of truth and the recorder does not
-    /// stop delivering later events.
-    fn event(&self, event: Event) -> Flow;
+    /// stop delivering later events. The drop is counted in [`TraceSummary`].
+    fn event(&self, meta: &TraceMeta, event: Event) -> Flow;
+
+    /// Called once when the attempt is finished and its record is complete.
+    fn trace_finished(&self, _meta: &TraceMeta, _summary: &TraceSummary) {}
+}
+
+/// What a sink saw when an attempt ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TraceSummary {
+    pub events: usize,
+    pub dropped_events: u32,
+    pub diagnostics: usize,
+    pub dropped_diagnostics: u32,
+    pub sink_dropped: u32,
 }
 
 /// What a sink wants done with an event.
@@ -63,69 +85,97 @@ pub enum Flow {
 #[derive(Debug)]
 pub(crate) struct Recorder {
     origin: Instant,
+    meta: TraceMeta,
     log: EventLog,
+    /// Bounded failure narration. It is recorded even when `enabled` is false:
+    /// a failure must remain explainable under `Observation::Off`.
+    diagnostics: DiagnosticTable,
     /// Where events go besides the ring, when a consumer asked for a stream.
     sink: Option<Arc<dyn TraceSink>>,
-    /// A disabled recorder keeps the origin but records nothing. It is the
-    /// cold-path handle for `Observation::Off` and `Observation::Counters`,
-    /// whose byte evidence lives in a tap, not in this ring.
+    /// Events the sink asked us to drop. Reported in the summary; never silent.
+    sink_dropped: u32,
+    /// A disabled recorder keeps the origin and diagnostics but records no
+    /// event timeline. It is the cold-path handle for `Observation::Off` and
+    /// `Observation::Counters`, whose byte evidence lives in a tap, not in this
+    /// ring.
     enabled: bool,
+    /// The sink is told the attempt finished exactly once, no matter how many
+    /// times a caller asks for a snapshot.
+    finished: bool,
 }
 
 impl Recorder {
     /// Begin an egress trace at "now", emitting [`EventKind::Dispatch`] at offset 0.
+    #[cfg(test)]
     pub(crate) fn start(capacity: usize) -> Self {
-        Self::start_at(Instant::now(), capacity)
+        Self::start_with_meta_at(TraceMeta::egress(), Instant::now(), capacity)
     }
 
-    /// Begin an ingress trace at "now", emitting
-    /// [`EventKind::IngressDispatch`] at offset 0.
-    ///
-    /// A separate constructor rather than a flag because the origin event *is* the
-    /// definition of what the trace measures from, and the two directions measure
-    /// from different facts: an egress attempt begins when the harness decides to
-    /// send, an ingress attempt when the kernel hands over a socket.
-    pub(crate) fn start_ingress(capacity: usize) -> Self {
-        Self::start_ingress_at(Instant::now(), capacity)
+    /// Begin an egress trace with an explicit identity.
+    pub(crate) fn start_with_meta(meta: TraceMeta, capacity: usize) -> Self {
+        Self::start_with_meta_at(meta, Instant::now(), capacity)
+    }
+
+    /// Begin an ingress trace with an explicit identity.
+    pub(crate) fn start_ingress_with_meta(meta: TraceMeta, capacity: usize) -> Self {
+        Self::start_ingress_with_meta_at(meta, Instant::now(), capacity)
     }
 
     /// Begin an ingress trace at an explicit origin (tests, and a capture with its
     /// own clock).
-    pub(crate) fn start_ingress_at(origin: Instant, capacity: usize) -> Self {
+    pub(crate) fn start_ingress_with_meta_at(
+        meta: TraceMeta,
+        origin: Instant,
+        capacity: usize,
+    ) -> Self {
         let mut log = EventLog::with_capacity(capacity);
         log.push_at(0, EventKind::IngressDispatch, 0, 0);
         Self {
             origin,
+            meta,
             log,
+            diagnostics: DiagnosticTable::default(),
             sink: None,
+            sink_dropped: 0,
             enabled: true,
+            finished: false,
         }
     }
 
     /// Begin an egress trace at an explicit origin (tests, and the L2 probe, which
     /// timestamps against its own capture clock).
-    pub(crate) fn start_at(origin: Instant, capacity: usize) -> Self {
+    pub(crate) fn start_with_meta_at(meta: TraceMeta, origin: Instant, capacity: usize) -> Self {
         let mut log = EventLog::with_capacity(capacity);
         log.push_at(0, EventKind::Dispatch, 0, 0);
         Self {
             origin,
+            meta,
             log,
+            diagnostics: DiagnosticTable::default(),
             sink: None,
+            sink_dropped: 0,
             enabled: true,
+            finished: false,
         }
     }
 
-    /// A recorder that keeps the origin but records nothing.
+    /// A recorder that keeps the origin and diagnostics but records no event
+    /// timeline.
     ///
     /// The origin is still available so a caller can create a tap in the same
     /// time domain; the ring and the sink are not touched. This is how `Off`
-    /// and `Counters` attempts avoid allocating an event ring.
-    pub(crate) fn disabled() -> Self {
+    /// and `Counters` attempts avoid allocating an event ring without becoming
+    /// undebuggable. Failure diagnostics are recorded on the cold path.
+    pub(crate) fn disabled_with_meta(meta: TraceMeta) -> Self {
         Self {
             origin: Instant::now(),
+            meta,
             log: EventLog::with_capacity(1),
+            diagnostics: DiagnosticTable::new(DEFAULT_DIAGNOSTIC_CAPACITY),
             sink: None,
+            sink_dropped: 0,
             enabled: false,
+            finished: false,
         }
     }
 
@@ -149,8 +199,11 @@ impl Recorder {
         if !self.enabled {
             return;
         }
-        if let Some(event) = self.log.first() {
-            let _ = sink.event(event);
+        sink.trace_started(&self.meta);
+        if let Some(event) = self.log.first()
+            && sink.event(&self.meta, event) == Flow::Drop
+        {
+            self.sink_dropped = self.sink_dropped.saturating_add(1);
         }
         self.sink = Some(sink);
     }
@@ -170,13 +223,75 @@ impl Recorder {
         }
         self.log.push_at_stream(at_ns, stream, kind, a, b);
         if let Some(sink) = &self.sink {
-            let _ = sink.event(Event {
+            let event = Event {
                 at_ns,
                 stream,
                 kind,
                 a,
                 b,
-            });
+            };
+            if sink.event(&self.meta, event) == Flow::Drop {
+                self.sink_dropped = self.sink_dropped.saturating_add(1);
+            }
+        }
+    }
+
+    /// Record a terminal diagnostic and, when the event timeline is enabled, the
+    /// corresponding `Error` event.
+    fn error(&mut self, record: DiagnosticRecord) -> u32 {
+        self.error_stream(0, record)
+    }
+
+    /// Record a terminal diagnostic for one multiplexed exchange.
+    fn error_stream(&mut self, stream: u32, record: DiagnosticRecord) -> u32 {
+        let code = record.code;
+        let before = self.diagnostics.dropped();
+        let sequence = self.diagnostics.push(record);
+        self.after_diagnostic_push(before);
+        if self.enabled {
+            self.push_stream(
+                self.now_ns(),
+                stream,
+                EventKind::Error,
+                code.raw(),
+                sequence,
+            );
+        }
+        sequence
+    }
+
+    /// Record a non-terminal diagnostic and, when the event timeline is enabled,
+    /// the corresponding `Note` event.
+    fn note(&mut self, record: DiagnosticRecord) -> u32 {
+        self.note_stream(0, record)
+    }
+
+    /// Record a non-terminal diagnostic for one multiplexed exchange.
+    fn note_stream(&mut self, stream: u32, record: DiagnosticRecord) -> u32 {
+        let code = record.code;
+        let before = self.diagnostics.dropped();
+        let sequence = self.diagnostics.push(record);
+        self.after_diagnostic_push(before);
+        if self.enabled {
+            self.push_stream(self.now_ns(), stream, EventKind::Note, code.raw(), sequence);
+        }
+        sequence
+    }
+
+    fn after_diagnostic_push(&mut self, before: u32) {
+        let after = self.diagnostics.dropped();
+        if after > before && self.enabled {
+            self.push(self.now_ns(), EventKind::DiagnosticDropped, after, 0);
+        }
+    }
+
+    fn summary(&self) -> TraceSummary {
+        TraceSummary {
+            events: self.log.len(),
+            dropped_events: self.log.dropped(),
+            diagnostics: self.diagnostics.len(),
+            dropped_diagnostics: self.diagnostics.dropped(),
+            sink_dropped: self.sink_dropped,
         }
     }
 
@@ -197,6 +312,31 @@ impl Recorder {
     /// `Write` events.
     pub fn sink(&self) -> Option<Arc<dyn TraceSink>> {
         self.sink.clone()
+    }
+
+    /// The identity and provenance of this trace.
+    pub fn meta(&self) -> &TraceMeta {
+        &self.meta
+    }
+
+    pub(crate) fn set_trace_id(&mut self, id: crate::TraceId) {
+        self.meta.id = id;
+    }
+
+    /// The bounded diagnostic side table.
+    pub fn diagnostics(&self) -> &DiagnosticTable {
+        &self.diagnostics
+    }
+
+    /// Finish the attempt and notify the sink once, when one is installed.
+    pub fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        if let Some(sink) = &self.sink {
+            sink.trace_finished(&self.meta, &self.summary());
+        }
     }
 
     /// Merge a byte-path tap log produced against the same origin.
@@ -327,22 +467,39 @@ pub struct TraceCollector {
 
 impl TraceCollector {
     pub fn start(capacity: usize) -> Self {
+        Self::start_with_meta(TraceMeta::egress(), capacity)
+    }
+
+    /// Begin an egress trace with an explicit identity.
+    pub fn start_with_meta(meta: TraceMeta, capacity: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Recorder::start(capacity))),
+            inner: Arc::new(Mutex::new(Recorder::start_with_meta(meta, capacity))),
             enabled: true,
         }
     }
 
     pub fn start_ingress(capacity: usize) -> Self {
+        Self::start_ingress_with_meta(TraceMeta::ingress(), capacity)
+    }
+
+    /// Begin an ingress trace with an explicit identity.
+    pub fn start_ingress_with_meta(meta: TraceMeta, capacity: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Recorder::start_ingress(capacity))),
+            inner: Arc::new(Mutex::new(Recorder::start_ingress_with_meta(
+                meta, capacity,
+            ))),
             enabled: true,
         }
     }
 
     pub fn disabled() -> Self {
+        Self::disabled_with_meta(TraceMeta::egress())
+    }
+
+    /// A disabled timeline that still records failure diagnostics.
+    pub fn disabled_with_meta(meta: TraceMeta) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Recorder::disabled())),
+            inner: Arc::new(Mutex::new(Recorder::disabled_with_meta(meta))),
             enabled: false,
         }
     }
@@ -390,19 +547,113 @@ impl TraceCollector {
             .now_ns()
     }
 
+    /// The identity and provenance of this trace.
+    pub fn meta(&self) -> TraceMeta {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .meta()
+            .clone()
+    }
+
+    /// Adopt a trace id received from a peer.
+    ///
+    /// The ingress recorder starts at accept with a generated id; a propagated
+    /// request header lets it join an egress attempt. The sink is not installed
+    /// on an ingress recorder until the connection finishes, so there is no
+    /// already-emitted `trace_started` to contradict.
+    pub fn set_trace_id(&self, id: crate::TraceId) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .set_trace_id(id);
+    }
+
+    /// Record one terminal diagnostic.
+    ///
+    /// This is the only supported way to create an `Error` event. It works even
+    /// when the collector is disabled: failure evidence survives
+    /// `Observation::Off`.
+    pub fn record_error(&self, record: DiagnosticRecord) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .error(record)
+    }
+
+    /// Record one terminal diagnostic for a multiplexed exchange.
+    pub fn record_error_stream(&self, stream: u32, record: DiagnosticRecord) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .error_stream(stream, record)
+    }
+
+    /// Record one non-terminal diagnostic.
+    pub fn record_note(&self, record: DiagnosticRecord) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .note(record)
+    }
+
+    /// Record one non-terminal diagnostic for a multiplexed exchange.
+    pub fn record_note_stream(&self, stream: u32, record: DiagnosticRecord) -> u32 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .note_stream(stream, record)
+    }
+
+    /// The diagnostic side table recorded so far.
+    pub fn diagnostics(&self) -> DiagnosticTable {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .diagnostics()
+            .clone()
+    }
+
+    /// A snapshot of the envelope, event log and diagnostic table.
+    pub fn snapshot(&self, fidelity: Fidelity) -> TraceSnapshot {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        inner.finish();
+        TraceSnapshot::new(
+            inner.meta().clone(),
+            fidelity,
+            inner.log().clone(),
+            inner.diagnostics().clone(),
+        )
+    }
+
+    /// The summary a sink receives when the attempt ends.
+    pub fn summary(&self) -> TraceSummary {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .summary()
+    }
+
     /// Record a control/protocol mark at "now".
     ///
     /// # Panics
     ///
     /// In debug builds, `Read`, `Write` or `Segment` panic: those kinds are
-    /// byte-path facts and must come from a [`crate::Tap`]. Release builds drop
-    /// such a mark rather than manufacturing a syscall timeline.
+    /// byte-path facts and must come from a [`crate::Tap`]. `Error` and `Note`
+    /// also panic: a diagnostic must travel through
+    /// [`TraceCollector::record_error`] or [`TraceCollector::record_note`] so it
+    /// cannot be contentless. Release builds drop such a mark rather than
+    /// manufacturing a timeline or an unexplained failure.
     pub fn mark(&self, kind: EventKind, a: u32, b: u32) {
         debug_assert!(
             !kind.is_byte_path(),
             "byte events must come from a Tap, not TraceCollector::mark"
         );
-        if !self.enabled || kind.is_byte_path() {
+        debug_assert!(
+            !kind.is_diagnostic(),
+            "diagnostics must use record_error/record_note, not TraceCollector::mark"
+        );
+        if !self.enabled || kind.is_byte_path() || kind.is_diagnostic() {
             return;
         }
         self.inner
@@ -413,13 +664,18 @@ impl TraceCollector {
 
     /// Record a control/protocol mark for a multiplexed exchange.
     ///
-    /// Byte-path kinds are rejected exactly as in [`TraceCollector::mark`].
+    /// Byte-path and diagnostic kinds are rejected exactly as in
+    /// [`TraceCollector::mark`].
     pub fn mark_stream(&self, stream: u32, kind: EventKind, a: u32, b: u32) {
         debug_assert!(
             !kind.is_byte_path(),
             "byte events must come from a Tap, not TraceCollector::mark_stream"
         );
-        if !self.enabled || kind.is_byte_path() {
+        debug_assert!(
+            !kind.is_diagnostic(),
+            "diagnostics must use record_error/record_note, not TraceCollector::mark_stream"
+        );
+        if !self.enabled || kind.is_byte_path() || kind.is_diagnostic() {
             return;
         }
         self.inner
@@ -573,7 +829,7 @@ mod tests {
     struct CollectingSink(std::sync::Mutex<Vec<Event>>);
 
     impl TraceSink for CollectingSink {
-        fn event(&self, event: Event) -> Flow {
+        fn event(&self, _meta: &TraceMeta, event: Event) -> Flow {
             self.0.lock().unwrap_or_else(|e| e.into_inner()).push(event);
             Flow::Continue
         }
@@ -643,5 +899,59 @@ mod tests {
         recorder.read(1, TimeSource::Syscall);
         recorder.wrote(1);
         assert_eq!(recorder.log().len(), 3);
+    }
+
+    #[test]
+    fn a_disabled_collector_still_records_failure_evidence() {
+        let collector = TraceCollector::disabled();
+        collector.record_error(
+            DiagnosticRecord::new(crate::DiagnosticCode::EGRESS_TLS_FAILED)
+                .with_message("verify failed"),
+        );
+        let snapshot = collector.snapshot(Fidelity::none());
+        assert!(snapshot.log.is_empty());
+        assert_eq!(snapshot.diagnostics.len(), 1);
+        assert_eq!(
+            snapshot.diagnostic_code(),
+            Some(crate::DiagnosticCode::EGRESS_TLS_FAILED)
+        );
+    }
+
+    #[test]
+    fn a_sink_receives_the_envelope_and_stream_identity() {
+        #[derive(Debug, Default)]
+        struct EnvelopeSink(std::sync::Mutex<Vec<(TraceMeta, Event)>>);
+
+        impl TraceSink for EnvelopeSink {
+            fn event(&self, meta: &TraceMeta, event: Event) -> Flow {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((meta.clone(), event));
+                Flow::Continue
+            }
+        }
+
+        let sink = Arc::new(EnvelopeSink::default());
+        let collector = TraceCollector::start(8).with_sink(Arc::clone(&sink) as Arc<dyn TraceSink>);
+        collector.mark_stream(7, EventKind::HeadComplete, 0, 0);
+        let seen = sink.0.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(seen.iter().all(|(meta, _)| meta.id == collector.meta().id));
+        assert!(seen.iter().any(|(_, event)| event.stream == 7));
+    }
+
+    #[test]
+    fn a_sink_drop_is_counted_in_the_summary() {
+        #[derive(Debug)]
+        struct DroppingSink;
+        impl TraceSink for DroppingSink {
+            fn event(&self, _meta: &TraceMeta, _event: Event) -> Flow {
+                Flow::Drop
+            }
+        }
+
+        let collector = TraceCollector::start(8).with_sink(Arc::new(DroppingSink));
+        collector.mark(EventKind::HeadComplete, 0, 0);
+        assert!(collector.summary().sink_dropped >= 2);
     }
 }

@@ -91,6 +91,30 @@ BASE = {
     """,
     "docs/dev/standards/taxonomy.md": "# Taxonomy\n",
     "docs/dev/standards/style.md": "# Style\n",
+    "docs/dev/postmortems/index.md": """
+        # Postmortems
+
+        | [Template](TEMPLATE.md) |
+        | :--- |
+    """,
+    "docs/dev/postmortems/TEMPLATE.md": "# Template\n",
+    "docs/dev/runbooks/index.md": """
+        # Runbooks
+
+        | [First](first-response.md) |
+        | :--- |
+    """,
+    "docs/dev/runbooks/first-response.md": """
+        # First Response
+
+        ## Target Subsystem & Reference Environment
+
+        ## Core Protocol Rules & Invariants
+
+        ## Diagnostic Playbook
+
+        ## Do-Not-Regress Checklist
+    """,
     "docs/adr/index.md": """
         # ADRs
 
@@ -617,6 +641,100 @@ def test_workspace_pin_drift_is_reported() -> None:
             }
         ),
         message="internal path dependency pinned off the workspace version",
+    )
+
+
+# --- DOC-015: postmortem structure ---------------------------------------
+
+
+VALID_POSTMORTEM = """
+---
+id: PM-0001
+severity: 2
+status: closed
+detected_by: user-report
+affected_versions: [0.0.25]
+invariants: [INV-DIAG-01]
+adrs: [ADR-0041]
+trace_ids: [01924f4e-0000-7000-8000-000000000001]
+---
+
+# PM-0001: Example
+
+## Executive Summary
+
+## Timeline of Events (UTC)
+
+## Evidence
+
+## Detection Gaps
+
+## Trigger & Underlying Root Cause
+
+## Action Items & Defense-in-Depth
+
+| A1 | Add a test | test: diag_example |
+"""
+
+
+def test_closed_postmortem_with_verified_action_is_clean() -> None:
+    expect_clean(
+        "DOC-015",
+        merged(
+            **{
+                "docs/dev/postmortems/index.md": (
+                    "# Postmortems\n\n| [Template](TEMPLATE.md) | [PM-0001](0001-example.md) |\n| :--- |\n"
+                ),
+                "docs/dev/postmortems/0001-example.md": VALID_POSTMORTEM,
+            }
+        ),
+        message="complete postmortem",
+    )
+
+
+def test_postmortem_without_evidence_and_verification_is_reported() -> None:
+    broken = VALID_POSTMORTEM.replace("## Evidence\n", "").replace(
+        "| A1 | Add a test | test: diag_example |", "| A1 | Add a test | later |"
+    )
+    expect(
+        "DOC-015",
+        merged(
+            **{
+                "docs/dev/postmortems/index.md": (
+                    "# Postmortems\n\n| [Template](TEMPLATE.md) | [PM-0001](0001-example.md) |\n| :--- |\n"
+                ),
+                "docs/dev/postmortems/0001-example.md": broken,
+            }
+        ),
+        message="postmortem missing evidence and verified action item",
+    )
+
+
+# --- DOC-016: runbook structure ------------------------------------------
+
+
+def test_runbook_without_a_diagnostic_playbook_is_reported() -> None:
+    expect(
+        "DOC-016",
+        merged(
+            **{
+                "docs/dev/runbooks/first-response.md": (
+                    "# First Response\n\n"
+                    "## Target Subsystem & Reference Environment\n\n"
+                    "## Core Protocol Rules & Invariants\n\n"
+                    "## Do-Not-Regress Checklist\n"
+                )
+            }
+        ),
+        message="runbook missing the diagnostic playbook",
+    )
+
+
+def test_complete_runbook_is_clean() -> None:
+    expect_clean(
+        "DOC-016",
+        merged(),
+        message="complete runbook",
     )
 
 

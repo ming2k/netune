@@ -16,8 +16,10 @@ use bytes::Bytes;
 #[cfg(feature = "http2")]
 use netune_server::ServedProtocol;
 use netune_server::{
-    Handler, HandlerFuture, IncomingRequest, RequestBody, Response, Server, ServerConfig,
+    CollectingObserver, Handler, HandlerFuture, IncomingRequest, RequestBody, Response, Server,
+    ServerConfig,
 };
+use netune_trace::DiagnosticCode;
 use tokio::io::AsyncReadExt;
 
 use support::{read_until, response_complete, server_with};
@@ -197,7 +199,9 @@ async fn a_streaming_response_to_head_carries_no_body_and_no_chunks() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panicking_handler_answers_500_and_keeps_the_listener_serving() {
-    let server = server_with(ServerConfig::for_tests(), Arc::new(SometimesPanics)).await;
+    let observer = Arc::new(CollectingObserver::default());
+    let config = ServerConfig::for_tests().with_trace_sink(Arc::clone(&observer) as _);
+    let server = server_with(config, Arc::new(SometimesPanics)).await;
     with_server(server, |address| async move {
         use tokio::io::AsyncWriteExt;
         let mut stream = tokio::net::TcpStream::connect(address)
@@ -239,6 +243,18 @@ async fn a_panicking_handler_answers_500_and_keeps_the_listener_serving() {
         assert!(response.ends_with(b"answered"));
     })
     .await;
+
+    let traces = observer.take();
+    assert!(!traces.is_empty(), "the connections were traced");
+    let panic = traces
+        .iter()
+        .flat_map(|trace| trace.diagnostics.iter())
+        .find(|record| record.code == DiagnosticCode::SERVER_HANDLER_PANIC)
+        .expect("the panic is classified in the diagnostic table");
+    assert!(
+        panic.message.contains("a handler bug"),
+        "the panic message is evidence: {panic:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -579,7 +595,7 @@ async fn a_rejected_request_is_recorded_with_a_real_error_code() {
         .collect();
     assert_eq!(
         codes,
-        vec![netune_server::ERROR_PROTOCOL],
+        vec![netune_trace::DiagnosticCode::SERVER_PROTOCOL.raw()],
         "a malformed request line is a protocol refusal, and it is classified"
     );
 }
@@ -616,7 +632,10 @@ async fn a_duplicate_host_is_answered_and_recorded_as_an_invalid_request() {
         .filter(|event| event.kind == netune_trace::EventKind::Error)
         .map(|event| event.a)
         .collect();
-    assert_eq!(codes, vec![netune_server::ERROR_INVALID_REQUEST]);
+    assert_eq!(
+        codes,
+        vec![netune_trace::DiagnosticCode::SERVER_INVALID_REQUEST.raw()]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -826,9 +845,9 @@ async fn an_http2_handler_timeout_is_recorded_on_its_own_stream() {
         "a per-stream failure must never be recorded at stream 0: {timeouts:?}"
     );
     assert!(
-        timeouts
-            .iter()
-            .any(|(_, code)| *code == netune_server::ERROR_HANDLER_TIMEOUT),
+        timeouts.iter().any(|(_, code)| {
+            *code == netune_trace::DiagnosticCode::SERVER_HANDLER_TIMEOUT.raw()
+        }),
         "the timeout is classified: {timeouts:?}"
     );
 }

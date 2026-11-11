@@ -160,7 +160,7 @@ async fn guide_trace_what_happened() {
 
     let log = recorder.log();
     let trace = RequestTrace {
-        id: TraceId::new("guide"),
+        meta: netune_trace::TraceMeta::new(TraceId::new("guide"), netune_trace::Direction::Egress),
         attempt: AttemptRef {
             round: 1,
             turn: 1,
@@ -176,6 +176,7 @@ async fn guide_trace_what_happened() {
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
         fidelity: Fidelity::l1(),
         log,
+        diagnostics: netune_trace::DiagnosticTable::default(),
     };
     let timings = derive(&trace);
     // TTFB: the upgrade round-trip anchor. Measured or not-applicable, it must

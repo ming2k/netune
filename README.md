@@ -16,6 +16,7 @@ object you can inspect, fingerprint, and change:
 | [`netune-quic`] | First-class QUIC (RFC 9000/9221) with named handshake profiles, pre-connect confinement, datagrams, streams and `aws-lc-rs` crypto. Consumer seams: per-connection socket and congestion factories, DPLPMTUD policy, keep-alive/idle policy and verified peer-certificate access (ADR-0034, ADR-0036). |
 | [`netune-http3`] | HTTP/3 client and server adapter (RFC 9114): streaming uploads and trailers, typed SETTINGS, controlled dynamic QPACK (encoder/decoder/ACKs/blocked streams), and request-header order. |
 | [`netune-io`] | The byte path both directions share: `TimedIo` records every syscall boundary, `FaultIo` injects chaos. No socket, no policy. |
+| [`netune-diagnostics`] | Native diagnostic sinks and review bundles: stderr/JSONL output, redaction, manifest + trace + diagnosis artifacts. No socket, no orchestrator. |
 | [`netune-egress`] | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the one predicate every outbound transport (TCP, UDP, QUIC) checks before opening a socket. No I/O. |
 | [`netune`] | **Egress**: DNS, TCP, TLS (rustls), connection pool (`Pool`), TLS fingerprint presets and routing (`TlsProfile`, `Preset`), proxies (HTTP CONNECT & SOCKS5), egress confinement, redirects, decompression, client WebSocket upgrade (`connect_ws`), stale-socket absorption. |
 | [`netune-server`] | **Ingress**: an observable listener serving **HTTP/1.1, HTTP/2 and optional HTTP/3** behind one handler — accept loop, admission control that sheds instead of queueing, separate phase bounds, streaming responses, request validation before dispatch, per-connection ingress traces, graceful drain. HTTP/3 is a peer QUIC listener, not a mode of the TCP server. A transport, not a framework. |
@@ -86,8 +87,8 @@ The crates are consumed from this repository by tag:
 
 ```toml
 [dependencies]
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.25" }
-netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.25" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.26" }
+netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.26" }
 ```
 
 Pin a `tag` (or a `rev` for the strictest reproducibility) and upgrade
@@ -163,7 +164,7 @@ stages as if they had not happened.
 
 ## Status
 
-Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.25`.
+Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.26`.
 
 MSRV: 1.95. License: MIT.
 
@@ -174,6 +175,7 @@ MSRV: 1.95. License: MIT.
 [`netune-quic`]: crates/netune-quic
 [`netune-http3`]: crates/netune-http3
 [`netune-io`]: crates/netune-io
+[`netune-diagnostics`]: crates/netune-diagnostics
 [`netune-egress`]: crates/netune-egress
 [`netune-webtransport`]: crates/netune-webtransport
 [`netune`]: crates/netune

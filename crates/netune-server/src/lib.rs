@@ -153,8 +153,8 @@ mod write_deadline;
 
 pub use body::RequestBody;
 pub use config::{
-    CollectingObserver, H2Ingress, Protocols, ServerConfig, SinkObserver, TraceObserver,
-    log_from_events,
+    CollectingListenerObserver, CollectingObserver, H2Ingress, ListenerEvent, ListenerObserver,
+    ProtocolVia, Protocols, ServerConfig, SinkObserver, TraceObserver, log_from_events,
 };
 #[cfg(feature = "tls")]
 pub use config::{ConfigSelector, TlsTermination};
@@ -166,17 +166,6 @@ pub use handler::{
 #[cfg(feature = "http3")]
 pub use netune_http3::H3SettingsProfile;
 pub use service::{BindError, DiscardingObserver, IngressTrace, ServedProtocol, Server};
-
-/// The stable numeric codes an ingress trace carries for a terminal failure.
-///
-/// Codes, not strings: an aggregate filters on them without parsing English, and they survive a trace
-/// being serialized and read elsewhere. Exposed because a consumer that counts failures has to know
-/// what it is counting.
-pub use h1::{
-    ERROR_BODY_TIMEOUT, ERROR_HANDLER_PANIC, ERROR_HANDLER_TIMEOUT, ERROR_HEAD_TIMEOUT,
-    ERROR_INCOMPLETE, ERROR_INVALID_REQUEST, ERROR_IO, ERROR_LIMIT, ERROR_PROTOCOL,
-    ERROR_TLS_HANDSHAKE,
-};
 
 /// The HTTP/1.1 request type this crate serves.
 ///

@@ -161,7 +161,10 @@ mod tests {
 
     fn trace(log: EventLog) -> RequestTrace {
         RequestTrace {
-            id: TraceId::new("test"),
+            meta: crate::trace::TraceMeta::new(
+                TraceId::new("test"),
+                crate::trace::Direction::Egress,
+            ),
             attempt: AttemptRef {
                 round: 1,
                 turn: 1,
@@ -177,6 +180,7 @@ mod tests {
             schema_version: crate::TRACE_SCHEMA_VERSION,
             fidelity: Fidelity::l0(),
             log,
+            diagnostics: crate::DiagnosticTable::default(),
         }
     }
 

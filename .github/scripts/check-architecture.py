@@ -18,6 +18,7 @@ Rules, each mapped to the standard that states it:
     ARCH-008  the transmit path is not reachable without `inject`
     ARCH-009  production dependencies carry an explicit `version` with their `path`
     ARCH-010  H3/QPACK is owned; no vendored protocol runtime tree
+    ARCH-011  production code never emits a contentless diagnostic event
 
 The distinction that matters is production vs. dev: an oracle (`hyper`,
 `tungstenite`, `h3`) is allowed as a `dev-dependency`, because a differential
@@ -56,6 +57,9 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     "netune-trace": set(),
     # byte-path wrappers: record into the trace model, nothing else.
     "netune-io": {"netune-trace"},
+    # native diagnostic sinks and review bundles: presentation/file I/O only,
+    # never a socket or an orchestrator.
+    "netune-diagnostics": {"netune-trace"},
     # pure egress address policy: no dependencies at all, so every outbound
     # transport (netune TCP/UDP, netune-quic) shares one definition of
     # `is_public_ip` rather than maintaining copies that drift.
@@ -80,6 +84,7 @@ ALLOWED_EDGES: dict[str, set[str]] = {
         "netune-trace",
         "netune-ws",
         "netune-io",
+        "netune-diagnostics",
     },
     # ingress orchestrator: the peer of `netune`, never its dependency.
     "netune-server": {
@@ -89,6 +94,7 @@ ALLOWED_EDGES: dict[str, set[str]] = {
         "netune-io",
         "netune-quic",
         "netune-trace",
+        "netune-diagnostics",
     },
 }
 
@@ -297,6 +303,30 @@ class Workspace:
                         f"workspace dependency {dep} pinned to {stated}, workspace is {self.workspace_version}",
                     )
 
+    # -- ARCH-011: one diagnostic producer path ---------------------------
+
+    def check_diagnostic_producers(self) -> None:
+        """`EventKind::Error` may only be emitted through the trace recorder.
+
+        A crate that writes the event directly can bypass the side table and
+        recreate the `Error(0, 0)` failure this ADR exists to remove. The trace
+        crate owns the one producer; every other crate uses `record_error` /
+        `record_error_stream`.
+        """
+        for source in sorted(self.root.glob("crates/*/src/**/*.rs")):
+            relative = source.relative_to(self.root).as_posix()
+            if relative.startswith(("crates/netune-trace/", "crates/netune-diagnostics/")):
+                continue
+            text = source.read_text(encoding="utf-8", errors="replace")
+            for index, line in enumerate(text.split("\n"), start=1):
+                if "EventKind::Error" in line:
+                    self.report(
+                        "ARCH-011",
+                        relative,
+                        f"line {index} emits EventKind::Error directly; use "
+                        "TraceCollector::record_error or record_error_stream",
+                    )
+
     # -- ARCH-008: the transmit path --------------------------------------
 
     def check_transmit_path(self) -> None:
@@ -380,6 +410,7 @@ class Workspace:
         self.check_versions()
         self.check_transmit_path()
         self.check_vendor_tree()
+        self.check_diagnostic_producers()
         return sorted(set(self.violations))
 
 

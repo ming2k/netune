@@ -1,6 +1,15 @@
 //! Typed transport failures with an explicit retry verdict.
+//!
+//! The enum is the narrow error vocabulary. The public attempt boundary wraps it
+//! in [`AttemptError`], which carries the trace snapshot that proves what the
+//! transport recorded. A failure without evidence is not a reviewable failure.
+
+use std::ops::Deref;
 
 use netune_http1::HttpError;
+use netune_trace::{
+    Diagnose, DiagnosticCode, DiagnosticPhase, DiagnosticRecord, RetryVerdict, TraceSnapshot,
+};
 
 /// Why a request could not be completed at the transport layer.
 #[derive(Debug)]
@@ -148,6 +157,151 @@ impl std::error::Error for NetError {
             Self::Io(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl Diagnose for NetError {
+    fn diagnostic(&self) -> DiagnosticRecord {
+        let (code, phase) = match self {
+            Self::Resolve(_) => (DiagnosticCode::EGRESS_DNS_FAILED, DiagnosticPhase::Dns),
+            Self::Connect(_) => (DiagnosticCode::EGRESS_TCP_FAILED, DiagnosticPhase::Tcp),
+            Self::Http(error) => match error.class() {
+                "protocol" => (
+                    DiagnosticCode::EGRESS_HTTP1_PROTOCOL,
+                    DiagnosticPhase::Http1,
+                ),
+                "limit" => (DiagnosticCode::EGRESS_HTTP1_LIMIT, DiagnosticPhase::Http1),
+                "incomplete" => (
+                    DiagnosticCode::EGRESS_HTTP1_INCOMPLETE,
+                    DiagnosticPhase::Http1,
+                ),
+                _ => (DiagnosticCode::EGRESS_HTTP1_IO, DiagnosticPhase::Http1),
+            },
+            Self::Io(error) => {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    (DiagnosticCode::EGRESS_TIMEOUT, DiagnosticPhase::Unknown)
+                } else {
+                    (DiagnosticCode::EGRESS_IO, DiagnosticPhase::Unknown)
+                }
+            }
+            Self::UnsupportedEncoding(_) => (
+                DiagnosticCode::EGRESS_UNSUPPORTED_ENCODING,
+                DiagnosticPhase::Response,
+            ),
+            Self::Decode(_) => (DiagnosticCode::EGRESS_DECODE, DiagnosticPhase::Response),
+            Self::TooManyRedirects(_) => (
+                DiagnosticCode::EGRESS_REDIRECT_LIMIT,
+                DiagnosticPhase::Response,
+            ),
+            Self::Security(_) => (DiagnosticCode::EGRESS_SECURITY, DiagnosticPhase::Tcp),
+            Self::Protocol(_) => (DiagnosticCode::EGRESS_PROTOCOL, DiagnosticPhase::Unknown),
+            Self::RetryableProtocol(_) => {
+                (DiagnosticCode::EGRESS_HTTP2_REFUSED, DiagnosticPhase::Http2)
+            }
+        };
+        DiagnosticRecord::new(code)
+            .with_phase(phase)
+            .with_retry(if self.is_retryable() {
+                RetryVerdict::Retryable
+            } else {
+                RetryVerdict::Terminal
+            })
+            .with_message(self.to_string())
+            .with_field("class", self.class())
+    }
+}
+
+impl NetError {
+    /// The registered diagnostic for this failure.
+    pub fn diagnostic(&self) -> DiagnosticRecord {
+        <Self as Diagnose>::diagnostic(self)
+    }
+}
+
+/// A failed public attempt: the narrow error plus the evidence it produced.
+///
+/// The snapshot is captured at the orchestrator boundary, after every internal
+/// producer has finished. It is populated even when the caller selected
+/// `Observation::Off`, because failure narration is independent of byte-path
+/// measurement cost.
+#[derive(Debug)]
+pub struct AttemptError {
+    error: NetError,
+    trace: TraceSnapshot,
+    report: DiagnosticRecord,
+}
+
+impl AttemptError {
+    /// Wrap `error` with the attempt's evidence.
+    ///
+    /// If no error-level diagnostic was recorded internally, the error's own
+    /// classification is appended. If one was recorded, it wins: it is the
+    /// producer's more specific account.
+    pub fn new(error: NetError, mut trace: TraceSnapshot) -> Self {
+        if trace.diagnostics.last_error().is_none() {
+            trace.diagnostics.push(error.diagnostic());
+        }
+        let report = trace
+            .diagnostics
+            .last_error()
+            .cloned()
+            .unwrap_or_else(|| error.diagnostic());
+        Self {
+            error,
+            trace,
+            report,
+        }
+    }
+
+    pub fn error(&self) -> &NetError {
+        &self.error
+    }
+
+    pub fn trace(&self) -> &TraceSnapshot {
+        &self.trace
+    }
+
+    pub fn diagnostic(&self) -> &DiagnosticRecord {
+        &self.report
+    }
+
+    pub fn diagnosis(&self) -> netune_trace::Diagnosis {
+        self.trace.diagnose()
+    }
+
+    pub fn into_parts(self) -> (NetError, TraceSnapshot) {
+        (self.error, self.trace)
+    }
+
+    /// Wrap an error that happened before any attempt recorder existed.
+    ///
+    /// The snapshot is still real: it carries the error's diagnostic and a
+    /// generated trace id, so a caller never has to treat a configuration
+    /// failure as an evidence-free special case.
+    pub fn without_evidence(error: NetError) -> Self {
+        let snapshot =
+            netune_trace::TraceCollector::disabled().snapshot(netune_trace::Fidelity::none());
+        Self::new(error, snapshot)
+    }
+}
+
+impl Deref for AttemptError {
+    type Target = NetError;
+
+    fn deref(&self) -> &Self::Target {
+        &self.error
+    }
+}
+
+impl std::fmt::Display for AttemptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for AttemptError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }
 

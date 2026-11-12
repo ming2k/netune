@@ -5,13 +5,19 @@
 //! [`crate::response::ResponseWriter`] exists because a *response* has framing obligations
 //! (streaming, `HEAD`, `204`, chunk termination) that a request simply does not.
 //!
-//! # Why a request is always self-delimiting
+//! # Why a request is usually self-delimiting
 //!
-//! A request must say where its body ends even when the body is empty: only a request that
-//! declares its length can traverse a proxy that does not buffer, be replayed by a
-//! redirect-follower, or be answered by a server that reuses the connection. So a
-//! `Content-Length` is always written (0 when there is no body), and if the caller already
-//! supplied one it is not duplicated.
+//! A request that carries a body must say where it ends: only a request that declares its
+//! length can traverse a proxy that does not buffer, be replayed by a
+//! redirect-follower, or be answered by a server that reuses the connection. So
+//! [`write_request`] writes a `Content-Length` (0 when there is no body), and if the caller
+//! already supplied one it is not duplicated.
+//!
+//! [`write_request_head`] is the deliberately non-synthetic variant. A protocol whose
+//! request *is* the whole message — a WebSocket upgrade is the case here — must be able to
+//! control the exact header set and order, including sending no `Content-Length` and no
+//! `User-Agent`. The codec still owns the request-line/header grammar; the caller owns the
+//! fingerprint.
 //!
 //! # Header fidelity
 //!
@@ -38,6 +44,37 @@ pub async fn write_request<W: AsyncWrite + Unpin>(
     head: &RequestHead,
     body: Option<&[u8]>,
 ) -> Result<(), HttpError> {
+    let out = encode_head(head, body, true)?;
+    writer.write_all(&out).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Serialize exactly `head`, with no synthetic body-framing headers.
+///
+/// This is the WebSocket-upgrade seam: the caller supplies the complete header set and
+/// order (including `Host`, `Upgrade`, `Connection`, `Sec-WebSocket-*` and any product
+/// headers), and the codec writes it byte-for-byte. No `Content-Length`, `User-Agent` or
+/// other default is inserted; adding one would change the fingerprint the peer sees.
+///
+/// # Errors
+///
+/// An I/O failure from the transport, or a target that is not a valid request-target.
+pub async fn write_request_head<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    head: &RequestHead,
+) -> Result<(), HttpError> {
+    let out = encode_head(head, None, false)?;
+    writer.write_all(&out).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+fn encode_head(
+    head: &RequestHead,
+    body: Option<&[u8]>,
+    synthesize_length: bool,
+) -> Result<BytesMut, HttpError> {
     crate::target::classify(&head.method, head.target.as_bytes())
         .map_err(|error| HttpError::Protocol(error.reason()))?;
 
@@ -70,7 +107,7 @@ pub async fn write_request<W: AsyncWrite + Unpin>(
             out.put_slice(b"\r\n");
         }
     }
-    if !wrote_length {
+    if synthesize_length && !wrote_length {
         let length = body.map_or(0, <[u8]>::len);
         let cl_name = if head.raw_headers.is_some() {
             b"Content-Length: ".as_slice()
@@ -85,10 +122,7 @@ pub async fn write_request<W: AsyncWrite + Unpin>(
     if let Some(body) = body {
         out.put_slice(body);
     }
-
-    writer.write_all(&out).await?;
-    writer.flush().await?;
-    Ok(())
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -148,5 +182,26 @@ mod tests {
             .await
             .expect_err("must refuse");
         assert_eq!(error.class(), "protocol");
+    }
+
+    #[tokio::test]
+    async fn a_head_only_request_has_no_synthetic_framing_headers() {
+        let head = RequestHead::new(Method::GET, "/ray")
+            .with_raw_header("Host", "lab.example.com")
+            .with_raw_header("Upgrade", "websocket")
+            .with_raw_header("Connection", "Upgrade");
+        let mut out = Vec::new();
+        write_request_head(&mut out, &head)
+            .await
+            .expect("write head");
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(text.starts_with("GET /ray HTTP/1.1\r\n"), "{text}");
+        assert!(text.contains("Host: lab.example.com\r\n"), "{text}");
+        assert!(
+            !text.to_ascii_lowercase().contains("content-length"),
+            "{text}"
+        );
+        assert!(!text.to_ascii_lowercase().contains("user-agent"), "{text}");
+        assert!(text.ends_with("\r\n\r\n"), "{text}");
     }
 }

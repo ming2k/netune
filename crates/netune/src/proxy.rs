@@ -189,6 +189,7 @@ impl<C: Connector> Connector for ProxyConnector<C> {
             local_port: established.local_port,
             socket: established.socket,
             alpn: None,
+            alpn_protocol: None,
         })
     }
 }

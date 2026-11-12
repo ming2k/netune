@@ -255,3 +255,48 @@ async fn a_pooled_tls_reuse_has_no_handshake_to_charge() {
 
     let _ = server.await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_established_tls_connection_carries_the_raw_alpn_name() {
+    let certified = generate_simple_self_signed(vec!["localhost".to_string()]).expect("cert");
+    let cert_der: CertificateDer<'static> = certified.cert.der().clone();
+    let key_der = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(
+        certified.signing_key.serialize_der(),
+    ));
+    let mut server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der.clone()], key_der)
+        .expect("server config");
+    server_config.alpn_protocols = vec![b"daer-probe".to_vec()];
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept");
+        let _ = acceptor.accept(socket).await;
+    });
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert_der).expect("root");
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"daer-probe".to_vec()];
+    let connector = TlsConnector::new(TcpConnector::new(), Arc::new(config));
+    let target = Target::tls(address.to_string(), "localhost");
+    let established = connector
+        .connect(&target, &TraceCollector::disabled())
+        .await
+        .expect("handshake");
+    assert_eq!(
+        established.alpn_protocol.as_deref(),
+        Some(b"daer-probe".as_slice())
+    );
+    assert_eq!(
+        established.alpn,
+        Some(Alpn::Unknown),
+        "the trace enum does not classify a private name"
+    );
+    let _ = server.await;
+}

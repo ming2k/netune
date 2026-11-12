@@ -18,7 +18,7 @@ name = "netune-diagnose"
 path = "src/bin/netune-diagnose.rs"
 
 [dependencies]
-netune-trace = { path = "../netune-trace", version = "0.0.27" }
+netune-trace = { path = "../netune-trace", version = "0.0.28" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

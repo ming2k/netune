@@ -2,7 +2,9 @@
 
 //! QUIC connector and established connection management.
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +18,79 @@ use crate::profile::{QuicProfile, QuicProfileRegistry};
 use crate::socket::{QuicSocketConfig, QuicUdpSocketFactory, TokioUdpSocketFactory};
 use crate::wire::transport_parameters::TransportParameters;
 
+/// Resolves the QUIC peer's authority before the connector opens a socket.
+///
+/// QUIC's connector historically took a `SocketAddr`, which forced every consumer to resolve
+/// outside the connector and therefore outside its DNS trace. The trait keeps resolution
+/// injectable without making `netune-quic` depend on the egress orchestrator.
+pub trait QuicResolver: Send + Sync + std::fmt::Debug {
+    /// Resolve `host` to one or more addresses at `port`.
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SocketAddr>, QuicError>> + Send + 'a>>;
+}
+
+/// Splits an authority into a host and port, accepting bracketed IPv6 literals.
+fn split_authority(authority: &str) -> Result<(&str, u16), QuicError> {
+    let parsed = if let Some(rest) = authority.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']').ok_or_else(|| {
+            QuicError::Config(format!(
+                "authority {authority:?} has an unclosed IPv6 literal"
+            ))
+        })?;
+        let port = tail
+            .strip_prefix(':')
+            .ok_or_else(|| QuicError::Config(format!("authority {authority:?} has no port")))?;
+        (host, port)
+    } else {
+        authority
+            .rsplit_once(':')
+            .ok_or_else(|| QuicError::Config(format!("authority {authority:?} has no port")))?
+    };
+    let port = parsed
+        .1
+        .parse::<u16>()
+        .map_err(|error| QuicError::Config(format!("invalid port in {authority:?}: {error}")))?;
+    Ok((parsed.0, port))
+}
+
+/// The platform resolver used when no caller supplies one.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemQuicResolver;
+
+impl QuicResolver for SystemQuicResolver {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SocketAddr>, QuicError>> + Send + 'a>> {
+        Box::pin(async move {
+            let authority = if host.contains(':') && !host.starts_with('[') {
+                format!("[{host}]:{port}")
+            } else {
+                format!("{host}:{port}")
+            };
+            let addresses: Vec<SocketAddr> = tokio::net::lookup_host(&authority)
+                .await
+                .map_err(|error| QuicError::Dns {
+                    host: host.to_owned(),
+                    detail: error.to_string(),
+                })?
+                .collect();
+            if addresses.is_empty() {
+                Err(QuicError::Dns {
+                    host: host.to_owned(),
+                    detail: "no addresses returned".to_owned(),
+                })
+            } else {
+                Ok(addresses)
+            }
+        })
+    }
+}
+
 /// Establishes and shapes QUIC connections.
 #[derive(Clone)]
 pub struct QuicConnector {
@@ -27,6 +102,7 @@ pub struct QuicConnector {
     congestion_factory: Option<Arc<dyn crate::CongestionControllerFactory>>,
     session_cache: SessionCache,
     client_tls: Arc<std::sync::Mutex<Option<Arc<rustls::ClientConfig>>>>,
+    resolver: Arc<dyn QuicResolver>,
 }
 
 impl std::fmt::Debug for QuicConnector {
@@ -56,6 +132,7 @@ impl QuicConnector {
             congestion_factory: None,
             session_cache: SessionCache::new(),
             client_tls: Arc::new(std::sync::Mutex::new(None)),
+            resolver: Arc::new(SystemQuicResolver),
         }
     }
 
@@ -95,6 +172,12 @@ impl QuicConnector {
         self
     }
 
+    /// Uses a caller-supplied resolver for [`Self::connect_authority`].
+    pub fn with_resolver(mut self, resolver: Arc<dyn QuicResolver>) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
     /// Uses a caller-supplied factory for the UDP socket stack.
     ///
     /// This is the seam for protocol-specific datagram transforms such as
@@ -116,6 +199,42 @@ impl QuicConnector {
     ) -> Self {
         self.congestion_factory = Some(factory);
         self
+    }
+
+    /// Resolves `authority` and establishes a QUIC connection to it.
+    ///
+    /// The DNS phase is part of this connector's trace: `DnsStart`/`DnsEnd` bracket the
+    /// resolver call, and the resolved addresses pass the same [`EgressConfinement`] check
+    /// as [`Self::connect`] before any socket is created. Use this instead of resolving in
+    /// the caller when the resolution must be observable in one attempt.
+    pub async fn connect_authority(
+        &self,
+        authority: &str,
+        server_name: &str,
+        recorder: Option<TraceCollector>,
+    ) -> Result<QuicConnection, QuicError> {
+        let (host, port) = split_authority(authority)?;
+        if let Some(rec) = &recorder {
+            rec.mark(EventKind::DnsStart, 0, 0);
+        }
+        let addresses = self.resolver.resolve(host, port).await?;
+        if let Some(rec) = &recorder {
+            rec.mark(
+                EventKind::DnsEnd,
+                u32::try_from(addresses.len()).unwrap_or(u32::MAX),
+                0,
+            );
+        }
+        for address in &addresses {
+            self.confinement
+                .check(address.ip())
+                .map_err(|refused| QuicError::Connect(refused.to_string()))?;
+        }
+        let target_addr = addresses.first().copied().ok_or_else(|| QuicError::Dns {
+            host: host.to_owned(),
+            detail: "no addresses returned".to_owned(),
+        })?;
+        self.connect(target_addr, server_name, recorder).await
     }
 
     /// Establishes a QUIC connection to the target address and server name.

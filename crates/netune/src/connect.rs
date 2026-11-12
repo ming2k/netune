@@ -201,7 +201,16 @@ pub struct Established {
     /// duplicate, which only costs the RTT/retransmit scopes.
     pub socket: Option<std::net::TcpStream>,
     /// Negotiated ALPN protocol (e.g. `Alpn::H2` or `Alpn::Http11`), if TLS was established.
+    ///
+    /// This is the trace vocabulary; [`Self::alpn_protocol`] carries the exact wire name for
+    /// callers whose protocol uses a name the enum does not know.
     pub alpn: Option<netune_trace::Alpn>,
+    /// Raw negotiated ALPN protocol name, exactly as TLS selected it.
+    ///
+    /// `None` means the peer selected no ALPN, or no TLS handshake happened. A proxy protocol
+    /// may negotiate a private name (or none at all); the enum above cannot represent that, so
+    /// this field is the authoritative value for protocol code.
+    pub alpn_protocol: Option<Vec<u8>>,
 }
 
 /// Opens connections. Implemented by `TcpConnector` today; the TLS layer wraps
@@ -486,6 +495,7 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
             local_port,
             socket,
             alpn: None,
+            alpn_protocol: None,
         })
     }
 }

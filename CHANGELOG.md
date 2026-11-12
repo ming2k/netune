@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.28] - 2026-11-12
+
+### Added
+
+- **Raw negotiated ALPN.** `Established` gains `alpn_protocol: Option<Vec<u8>>`, carrying
+  the exact name rustls selected. The existing `alpn` trace enum is unchanged, so a
+  consumer whose protocol uses a private ALPN name no longer has to infer it from
+  `Unknown`.
+- **QUIC authority resolution inside the connector.** `netune-quic` gains
+  `QuicResolver`/`SystemQuicResolver` and `QuicConnector::with_resolver`. The new
+  `connect_authority` brackets `DnsStart`/`DnsEnd`, applies `EgressConfinement` to every
+  resolved address, and then enters the existing socket path. The `SocketAddr` entry point
+  remains for callers that already hold a checked address.
+- **Head-only HTTP/1.1 serialization.** `netune-http1::write_request_head` writes the
+  request line and the caller's exact headers with no synthetic `Content-Length`,
+  `User-Agent` or other field. `write_request` keeps its self-delimiting body behavior.
+
+### Changed
+
+- **Breaking:** external `Established` struct literals must set `alpn_protocol` (the
+  `0.0.x` line is already patch-breaking by policy).
+- `QuicConnector` carries a resolver; the default is `SystemQuicResolver`, so existing
+  `connect` callers are unchanged.
+
 ## [0.0.27] - 2026-11-11
 
 ### Fixed

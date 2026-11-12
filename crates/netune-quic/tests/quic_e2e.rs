@@ -166,6 +166,29 @@ async fn test_quic_stream_and_trace_lifecycle() {
     );
 }
 
+#[tokio::test]
+async fn connect_authority_records_dns_and_the_quic_phases() {
+    let (server, addr) = make_server_endpoint().await;
+    tokio::spawn(async move {
+        let _ = server.accept().await;
+    });
+
+    let connector = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto());
+    let recorder = TraceCollector::start(64);
+    let authority = format!("127.0.0.1:{}", addr.port());
+    let connection = connector
+        .connect_authority(&authority, "localhost", Some(recorder.clone()))
+        .await
+        .expect("connect by authority");
+    connection.close(0, "done");
+
+    let kinds: Vec<EventKind> = recorder.log().iter().map(|event| event.kind).collect();
+    assert!(kinds.contains(&EventKind::DnsStart), "{kinds:?}");
+    assert!(kinds.contains(&EventKind::DnsEnd), "{kinds:?}");
+    assert!(kinds.contains(&EventKind::QuicStart), "{kinds:?}");
+    assert!(kinds.contains(&EventKind::QuicEnd), "{kinds:?}");
+}
+
 /// `[INV-EGRESS-01]` / `[INV-QUIC-02]`: a `StrictPublic` connector refuses a
 /// non-public target *before* any socket is created, so no QUIC packet can be
 /// sent to loopback or a metadata endpoint.

@@ -20,7 +20,7 @@ pub mod crypto;
 pub mod owned;
 pub mod wire;
 
-pub use connector::{QuicConnection, QuicConnector};
+pub use connector::{QuicConnection, QuicConnector, QuicResolver, SystemQuicResolver};
 pub use datagram::QuicDatagramSession;
 pub use error::QuicError;
 pub use netune_egress::EgressConfinement;

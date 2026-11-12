@@ -87,4 +87,4 @@ pub use stream::Limits;
 pub use target::{
     TargetError, TargetForm, classify as classify_target, validate_host_bytes, validate_host_field,
 };
-pub use writer::write_request;
+pub use writer::{write_request, write_request_head};

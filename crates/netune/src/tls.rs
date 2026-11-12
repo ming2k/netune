@@ -133,10 +133,11 @@ async fn handshake(
         }
     };
 
-    let (alpn, version) = {
+    let (alpn, alpn_protocol, version) = {
         let (_, connection) = stream.get_ref();
         (
             Alpn::from_name(connection.alpn_protocol()),
+            connection.alpn_protocol().map(<[u8]>::to_vec),
             connection.protocol_version(),
         )
     };
@@ -153,6 +154,7 @@ async fn handshake(
         local_port: established.local_port,
         socket: established.socket,
         alpn: Some(alpn),
+        alpn_protocol,
     })
 }
 

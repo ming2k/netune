@@ -40,6 +40,8 @@ pub const LEGACY_VERSION_TLS12: u16 = 0x0301;
 
 /// The fixed record header length: content type, version, 16-bit length.
 pub const RECORD_HEADER_LEN: usize = 5;
+/// The plaintext fragment ceiling: 2^14 bytes (RFC 8446 §5.1, RFC 5246 §6.2.1).
+pub const MAX_PLAINTEXT_LEN: usize = 0x4000;
 /// The record length ceiling: 2^14 + 256 (RFC 8446 §5.2).
 pub const MAX_CIPHERTEXT_LEN: usize = 0x4000 + 256;
 

@@ -27,7 +27,7 @@ use crate::key_exchange::ClientKeyShare;
 use crate::key_schedule::{Hash, Secret};
 use crate::record::{
     CONTENT_ALERT, CONTENT_APPLICATION_DATA, CONTENT_HANDSHAKE, MAX_CIPHERTEXT_LEN,
-    RECORD_HEADER_LEN,
+    MAX_PLAINTEXT_LEN, RECORD_HEADER_LEN,
 };
 use crate::session::{ResumptionTicket, SessionCache, SessionKey, parse_new_session_ticket};
 
@@ -208,6 +208,11 @@ pub struct OwnedTlsStream<S> {
     /// Optional TLS 1.3 session resumption context for caching incoming
     /// `NewSessionTicket` messages.
     resumption: Option<ResumptionContext>,
+    /// Encrypted record bytes queued for the underlying socket across partial
+    /// writes or `Poll::Pending`.
+    write_buf: Vec<u8>,
+    /// Offset into `write_buf` already accepted by `socket`.
+    write_offset: usize,
 }
 
 impl<S> OwnedTlsStream<S> {
@@ -239,6 +244,8 @@ impl<S> OwnedTlsStream<S> {
             payload_scratch: Vec::new(),
             state: ReadState::default(),
             resumption,
+            write_buf: Vec::new(),
+            write_offset: 0,
         }
     }
 
@@ -257,6 +264,39 @@ impl<S> OwnedTlsStream<S> {
         }
     }
 
+    /// Drain any buffered ciphertext from `write_buf` to the underlying socket.
+    fn poll_flush_write_buf(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        while self.write_offset < self.write_buf.len() {
+            let remaining = &self.write_buf[self.write_offset..];
+            match std::pin::Pin::new(&mut self.socket).poll_write(cx, remaining) {
+                std::task::Poll::Ready(Ok(0)) => {
+                    return std::task::Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "underlying transport wrote zero bytes",
+                    )));
+                }
+                std::task::Poll::Ready(Ok(n)) => {
+                    self.write_offset += n;
+                }
+                std::task::Poll::Ready(Err(error)) => {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                std::task::Poll::Pending => {
+                    return std::task::Poll::Pending;
+                }
+            }
+        }
+        self.write_buf.clear();
+        self.write_offset = 0;
+        std::task::Poll::Ready(Ok(()))
+    }
+
     /// Send a close_notify and shut the transport down.
     ///
     /// # Errors
@@ -265,6 +305,11 @@ impl<S> OwnedTlsStream<S> {
     where
         S: AsyncWrite + Unpin,
     {
+        std::future::poll_fn(|cx| self.poll_flush_write_buf(cx))
+            .await
+            .map_err(|error| OwnedTlsError::Transport {
+                reason: error.to_string(),
+            })?;
         let alert = [1u8, 0]; // warning-level close_notify
         let record = match &self.protectors {
             Protectors::Tls13 {
@@ -278,6 +323,11 @@ impl<S> OwnedTlsStream<S> {
                 .seal(*write_seq, CONTENT_ALERT, &alert)
                 .map_err(record_error)?,
         };
+        match &mut self.protectors {
+            Protectors::Tls13 { write_seq, .. } | Protectors::Tls12 { write_seq, .. } => {
+                *write_seq += 1;
+            }
+        }
         self.socket
             .write_all(&record)
             .await
@@ -300,40 +350,53 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for OwnedTlsStream<S> {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<Result<usize, std::io::Error>> {
-        if buf.len() > MAX_CIPHERTEXT_LEN {
-            return std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "fragment exceeds the record limit",
-            )));
-        }
         let this = self.get_mut();
+        // Drain any partially-written encrypted record from a prior poll before
+        // sealing new plaintext.
+        match this.poll_flush_write_buf(cx) {
+            std::task::Poll::Ready(Ok(())) => {}
+            std::task::Poll::Ready(Err(error)) => return std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+        }
+        if buf.is_empty() {
+            return std::task::Poll::Ready(Ok(0));
+        }
+
+        // Fragment at the RFC 8446 §5.1 / RFC 5246 §6.2.1 2^14-byte plaintext
+        // limit so callers (e.g. `write_all`) can pass arbitrarily large buffers.
+        let chunk = &buf[..buf.len().min(MAX_PLAINTEXT_LEN)];
         let record = match &this.protectors {
             Protectors::Tls13 {
                 write, write_seq, ..
             } => write
-                .seal(*write_seq, CONTENT_APPLICATION_DATA, buf)
+                .seal(*write_seq, CONTENT_APPLICATION_DATA, chunk)
                 .map_err(|error| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
                 })?,
             Protectors::Tls12 {
                 write, write_seq, ..
             } => write
-                .seal(*write_seq, CONTENT_APPLICATION_DATA, buf)
+                .seal(*write_seq, CONTENT_APPLICATION_DATA, chunk)
                 .map_err(|error| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
                 })?,
         };
-        match std::pin::Pin::new(&mut this.socket).poll_write(cx, &record) {
-            std::task::Poll::Ready(Ok(_)) => {
-                match &mut this.protectors {
-                    Protectors::Tls13 { write_seq, .. } | Protectors::Tls12 { write_seq, .. } => {
-                        *write_seq += 1;
-                    }
-                }
-                std::task::Poll::Ready(Ok(buf.len()))
+        match &mut this.protectors {
+            Protectors::Tls13 { write_seq, .. } | Protectors::Tls12 { write_seq, .. } => {
+                *write_seq += 1;
+            }
+        }
+        this.write_buf = record;
+        this.write_offset = 0;
+
+        // Best-effort immediate flush: if the socket accepts part of the record
+        // or returns Pending, the remainder stays buffered in `write_buf` and
+        // `chunk.len()` is already committed to the TLS stream.
+        match this.poll_flush_write_buf(cx) {
+            std::task::Poll::Ready(Ok(())) | std::task::Poll::Pending => {
+                std::task::Poll::Ready(Ok(chunk.len()))
             }
             std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
-            std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 
@@ -341,14 +404,26 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for OwnedTlsStream<S> {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), std::io::Error>> {
-        std::pin::Pin::new(&mut self.get_mut().socket).poll_flush(cx)
+        let this = self.get_mut();
+        match this.poll_flush_write_buf(cx) {
+            std::task::Poll::Ready(Ok(())) => std::pin::Pin::new(&mut this.socket).poll_flush(cx),
+            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
     }
 
     fn poll_shutdown(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), std::io::Error>> {
-        std::pin::Pin::new(&mut self.get_mut().socket).poll_shutdown(cx)
+        let this = self.get_mut();
+        match this.poll_flush_write_buf(cx) {
+            std::task::Poll::Ready(Ok(())) => {
+                std::pin::Pin::new(&mut this.socket).poll_shutdown(cx)
+            }
+            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
     }
 }
 
@@ -918,6 +993,185 @@ mod tests {
             assert!(resp.starts_with(b"HTTP/1.1 200 OK"));
         }
 
+        server.await.expect("server task");
+    }
+
+    /// A socket wrapper that forces small partial writes and periodic
+    /// `Poll::Pending` responses on `AsyncWrite` to exercise record buffering.
+    struct TrickleSocket<S> {
+        inner: S,
+        max_write: usize,
+        polls: usize,
+    }
+
+    impl<S: AsyncRead + Unpin> AsyncRead for TrickleSocket<S> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl<S: AsyncWrite + Unpin> AsyncWrite for TrickleSocket<S> {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<Result<usize, std::io::Error>> {
+            self.polls += 1;
+            if self.polls.is_multiple_of(3) {
+                cx.waker().wake_by_ref();
+                return std::task::Poll::Pending;
+            }
+            let cap = buf.len().min(self.max_write);
+            std::pin::Pin::new(&mut self.inner).poll_write(cx, &buf[..cap])
+        }
+
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), std::io::Error>> {
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), std::io::Error>> {
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_driver_fragments_large_writes_and_handles_partial_socket_writes() {
+        use crate::hello::{BlueprintBuildParams, ClientHelloBlueprint, KeyShareEntry};
+
+        let identity = netune_test_support::tls::identity(&["localhost"], &[b"http/1.1"]);
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let mut server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .expect("versions")
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![identity.certificate.clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(identity.key.clone()),
+                ),
+            )
+            .expect("server certificate");
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let server_config = Arc::new(server_config);
+
+        let payload_len = MAX_PLAINTEXT_LEN * 3 + 777;
+        let expected_payload: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
+        let expected_on_server = expected_payload.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut connection =
+                rustls::ServerConnection::new(Arc::clone(&server_config)).expect("server");
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 16_384];
+            loop {
+                while connection.wants_write() {
+                    let written = connection
+                        .write_tls(&mut &mut buffer[..])
+                        .expect("write_tls");
+                    if written == 0 {
+                        break;
+                    }
+                    socket.write_all(&buffer[..written]).await.expect("write");
+                }
+                if received.len() >= expected_on_server.len() {
+                    connection
+                        .writer()
+                        .write_all(b"OK")
+                        .expect("respond");
+                    while connection.wants_write() {
+                        let written = connection
+                            .write_tls(&mut &mut buffer[..])
+                            .expect("write_tls");
+                        if written == 0 {
+                            break;
+                        }
+                        socket.write_all(&buffer[..written]).await.expect("write");
+                    }
+                    break;
+                }
+                let read = socket.read(&mut buffer).await.expect("read");
+                if read == 0 {
+                    break;
+                }
+                let mut slice = &buffer[..read];
+                while !slice.is_empty() {
+                    let consumed = connection.read_tls(&mut slice).expect("read_tls");
+                    if consumed == 0 {
+                        break;
+                    }
+                    connection.process_new_packets().expect("process");
+                    let mut chunk = [0u8; 16_384];
+                    while let Ok(size) = connection.reader().read(&mut chunk) {
+                        if size == 0 {
+                            break;
+                        }
+                        received.extend_from_slice(&chunk[..size]);
+                    }
+                }
+            }
+            assert_eq!(received, expected_on_server);
+        });
+
+        let mut bp = ClientHelloBlueprint::go_standard();
+        bp.alpn = vec![b"http/1.1".to_vec()];
+        let shares = ClientKeyShare::generate(&bp.key_share_groups).expect("shares");
+        let entries = shares
+            .iter()
+            .map(|s| KeyShareEntry {
+                group: s.group,
+                share: s.share.clone(),
+            })
+            .collect();
+        let mut random = [0u8; 32];
+        aws_lc_rs::rand::fill(&mut random).expect("random");
+        let hello = bp
+            .build(BlueprintBuildParams {
+                server_name: "localhost",
+                random,
+                session_id: &[0x33; 32],
+                key_shares: entries,
+                grease_seed: [0; 8],
+                permutation_seed: [0; 32],
+            })
+            .expect("build");
+
+        let tcp = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        let trickle = TrickleSocket {
+            inner: tcp,
+            max_write: 137,
+            polls: 0,
+        };
+        let mut stream = OwnedTlsConnector
+            .connect(trickle, OwnedConnectParams { hello, shares }, AcceptAny)
+            .await
+            .expect("handshake");
+
+        stream
+            .write_all(&expected_payload)
+            .await
+            .expect("large write_all across records");
+        stream.flush().await.expect("flush");
+
+        let mut ack = [0u8; 2];
+        stream.read_exact(&mut ack).await.expect("read ack");
+        assert_eq!(&ack, b"OK");
         server.await.expect("server task");
     }
 }

@@ -6,61 +6,63 @@
 //! folded a DNS lookup, a TCP handshake, a TLS handshake, an OAuth token refresh
 //! and the request upload into one number labelled "Connect & Handshake".
 //!
-//! Trust roots come from the platform store ([`rustls_platform_verifier`]) so a
-//! corporate root or an OS trust change is honoured without shipping our own
-//! bundle; ALPN advertises HTTP/1.1 only, which is what this client speaks.
-//!
-//! The handshake itself is bounded (10 s by default). A peer that accepts the
-//! TCP connection and then stops answering is reported as a connection failure
-//! rather than holding the attempt open indefinitely; use
-//! [`TlsConnector::with_handshake_timeout`] to change the bound.
+//! The handshake is the owned engine's ([ADR-0045](../../adr/0045-owned-egress-tls-engine.md)):
+//! the [`TlsProfile`] description maps onto the Go-shaped hello, the engine
+//! drives the handshake over the transport, and the connection comes back as
+//! an `AsyncRead`/`AsyncWrite` whose record protection is the engine's
+//! ([`INV-TLS-08`]). The handshake itself is bounded (10 s by default); a peer
+//! that accepts the TCP connection and then stops answering is reported as a
+//! connection failure rather than holding the attempt open indefinitely; use
+//! [`TlsRouterConnector::with_handshake_timeout`] to change the bound.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use netune_trace::{
     Alpn, DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EventKind, TraceCollector,
 };
-use rustls::pki_types::ServerName;
-use rustls_platform_verifier::BuilderVerifierExt;
-use tokio_rustls::TlsConnector as RustlsConnector;
 
 use crate::connect::{Connector, Established, Target};
 use crate::error::NetError;
 use crate::handshake::{DEFAULT_HANDSHAKE_TIMEOUT, bound};
 use crate::tls_profile::{Preset, TlsProfile};
 
-/// Build the client TLS configuration: platform roots, HTTP/1.1 ALPN, and the
-/// process-wide aws-lc-rs provider.
+/// The certificate trust policy the owned engine verifies chains with: the
+/// verifier seam ([`INV-TLS-08`]), re-exported from [`netune_tls`]'s
+/// verifier module (`webpki` is the validator, not a TLS engine).
+pub use netune_tls::verifier::Verifier as OwnedVerifier;
+
+/// A connector that presents a *per-request* TLS identity: the target's
+/// [`Target::tls_profile`] name selects which preset handshakes, and the
+/// owned engine handshakes the transport.
 ///
-/// Session resumption uses rustls' default in-memory cache, so a resumed
-/// handshake stays fast across requests that share this config — which is why
-/// the config is built once and shared, not per request.
-pub fn platform_client_config() -> Result<Arc<rustls::ClientConfig>, NetError> {
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let mut config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|error| NetError::Connect(format!("TLS provider: {error}")))?
-        .with_platform_verifier()
-        .map_err(|error| NetError::Connect(format!("platform trust store: {error}")))?
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(Arc::new(config))
+/// An unknown profile or engine name is a [`NetError::Connect`] at connect
+/// time, not a silent fallback to a default: choosing a fingerprint is an
+/// assertion about what the peer will see, and a typo must not quietly
+/// downgrade it.
+///
+/// Targets without a selection present [`Preset::NetuneDefault`]; plaintext
+/// targets pass through untouched (there is no hello to shape).
+pub struct TlsRouterConnector<C: Connector> {
+    inner: C,
+    /// Custom profiles registered ahead of the built-in presets; a custom
+    /// name may override a preset name (drift experiments, CA-pinned tests).
+    custom: HashMap<String, TlsProfile>,
+    /// The trust policy the engine verifies chains with.
+    verifier: netune_tls::Verifier,
+    handshake_timeout: Option<Duration>,
+    /// Per-(server, profile, alpn) TLS 1.3 resumption ticket cache.
+    session_cache: netune_tls::session::SessionCache,
 }
 
-/// A connector that establishes TLS on top of an inner connector.
-pub struct TlsConnector<C: Connector> {
-    inner: C,
-    config: Arc<rustls::ClientConfig>,
-    handshake_timeout: Option<Duration>,
-}
-impl<C: Connector> TlsConnector<C> {
-    pub fn new(inner: C, config: Arc<rustls::ClientConfig>) -> Self {
+impl<C: Connector> TlsRouterConnector<C> {
+    pub fn new(inner: C) -> Self {
         Self {
             inner,
-            config,
+            custom: HashMap::new(),
+            verifier: netune_tls::Verifier::WebpkiRoots,
             handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
+            session_cache: netune_tls::session::SessionCache::new(),
         }
     }
 
@@ -72,156 +74,11 @@ impl<C: Connector> TlsConnector<C> {
         self
     }
 
-    /// Build a connector trusting the platform store.
-    pub fn platform(inner: C) -> Result<Self, NetError> {
-        Ok(Self::new(inner, platform_client_config()?))
-    }
-
-    /// Build a connector from a [`TlsProfile`] with the default
-    /// (aws-lc-rs) provider — the seam for fingerprint work: pick a preset,
-    /// tweak it, and this connector presents exactly that identity.
-    pub fn with_profile(inner: C, profile: &TlsProfile) -> Result<Self, NetError> {
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        Ok(Self::new(inner, profile.build(provider)?))
-    }
-}
-
-/// The shared TLS handshake, used by [`TlsConnector`] and
-/// [`TlsRouterConnector`]: bracket `TlsStart`/`TlsEnd`, record the negotiated
-/// ALPN and version, and hand the stream back as [`Established`].
-async fn handshake(
-    config: &Arc<rustls::ClientConfig>,
-    established: Established,
-    target: &Target,
-    recorder: &TraceCollector,
-    timeout: Option<Duration>,
-) -> Result<Established, NetError> {
-    let Some(server_name) = target.tls_server_name().map(str::to_owned) else {
-        // A plaintext target passes straight through.
-        return Ok(established);
-    };
-
-    recorder.mark(EventKind::TlsStart, 0, 0);
-    let name = match ServerName::try_from(server_name.clone()) {
-        Ok(name) => name,
-        Err(error) => {
-            let message = format!("invalid TLS server name: {error}");
-            recorder.record_error(
-                DiagnosticRecord::new(DiagnosticCode::EGRESS_TLS_FAILED)
-                    .with_phase(DiagnosticPhase::Tls)
-                    .with_message(message.clone()),
-            );
-            return Err(NetError::Connect(message));
-        }
-    };
-    let connector = RustlsConnector::from(Arc::clone(config));
-    let connecting = connector.connect(name, established.stream);
-    let stream = match bound(timeout, "TLS handshake", &server_name, connecting).await {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(error)) => {
-            let message = format!("TLS handshake with {server_name}: {error}");
-            recorder.record_error(
-                DiagnosticRecord::new(DiagnosticCode::EGRESS_TLS_FAILED)
-                    .with_phase(DiagnosticPhase::Tls)
-                    .with_message(message.clone()),
-            );
-            return Err(NetError::Connect(message));
-        }
-        Err(error) => {
-            recorder.record_error(error.diagnostic());
-            return Err(error);
-        }
-    };
-
-    let (alpn, alpn_protocol, version) = {
-        let (_, connection) = stream.get_ref();
-        (
-            Alpn::from_name(connection.alpn_protocol()),
-            connection.alpn_protocol().map(<[u8]>::to_vec),
-            connection.protocol_version(),
-        )
-    };
-    let version_code = match version {
-        Some(rustls::ProtocolVersion::TLSv1_3) => 13u32,
-        Some(rustls::ProtocolVersion::TLSv1_2) => 12u32,
-        _ => 0u32,
-    };
-    recorder.mark(EventKind::TlsEnd, 0, 0);
-    recorder.mark(EventKind::TlsInfo, u32::from(alpn.code()), version_code);
-
-    Ok(Established {
-        stream: Box::new(stream),
-        local_port: established.local_port,
-        socket: established.socket,
-        alpn: Some(alpn),
-        alpn_protocol,
-    })
-}
-
-impl<C: Connector> Connector for TlsConnector<C> {
-    fn socket_shape(&self) -> Option<String> {
-        self.inner.socket_shape()
-    }
-
-    fn route_shape(&self) -> Option<String> {
-        self.inner.route_shape()
-    }
-
-    async fn connect(
-        &self,
-        target: &Target,
-        recorder: &TraceCollector,
-    ) -> Result<Established, NetError> {
-        let established = self.inner.connect(target, recorder).await?;
-        handshake(
-            &self.config,
-            established,
-            target,
-            recorder,
-            self.handshake_timeout,
-        )
-        .await
-    }
-}
-
-/// A connector that presents a *per-request* TLS identity: the target's
-/// [`Target::tls_profile`] name selects which compiled profile handshakes.
-///
-/// Profiles are compiled lazily on first use and cached — a config is built
-/// once per identity and then shared by every connection that names it (which
-/// is also what lets rustls session resumption work across those connections).
-/// An unknown name is a [`NetError::Connect`] at connect time, not a silent
-/// fallback to the default: choosing a fingerprint is an assertion about what
-/// the peer will see, and a typo must not quietly downgrade it.
-///
-/// Targets without a selection present [`Preset::NetuneDefault`]; plaintext
-/// targets pass through untouched (there is no hello to shape).
-pub struct TlsRouterConnector<C: Connector> {
-    inner: C,
-    provider: Arc<rustls::crypto::CryptoProvider>,
-    /// Custom profiles registered ahead of the built-in presets; a custom
-    /// name may override a preset name (drift experiments, CA-pinned tests).
-    custom: HashMap<String, TlsProfile>,
-    configs: Mutex<HashMap<String, Arc<rustls::ClientConfig>>>,
-    handshake_timeout: Option<Duration>,
-}
-
-impl<C: Connector> TlsRouterConnector<C> {
-    pub fn new(inner: C) -> Self {
-        Self {
-            inner,
-            provider: Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
-            custom: HashMap::new(),
-            configs: Mutex::new(HashMap::new()),
-            handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
-        }
-    }
-
-    /// Replace the handshake bound. `None` removes it; only do that when an
-    /// outer deadline exists that reports the stall as a connection failure.
+    /// Set the trust policy the engine verifies chains with. The default is
+    /// the Mozilla root bundle via `webpki`.
     #[must_use]
-    pub fn with_handshake_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.handshake_timeout = timeout;
+    pub fn with_verifier(mut self, verifier: netune_tls::Verifier) -> Self {
+        self.verifier = verifier;
         self
     }
 
@@ -241,25 +98,6 @@ impl<C: Connector> TlsRouterConnector<C> {
         }
         Preset::by_name(name).map(|preset| preset.profile())
     }
-
-    /// The compiled config for a profile name, building it on first use.
-    fn config_for(&self, name: &str) -> Result<Arc<rustls::ClientConfig>, NetError> {
-        if let Some(config) = self
-            .configs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(name)
-        {
-            return Ok(Arc::clone(config));
-        }
-        let profile = self
-            .resolve(name)
-            .ok_or_else(|| unknown_profile_error(name))?;
-        let config = profile.build(Arc::clone(&self.provider))?;
-        let mut configs = self.configs.lock().unwrap_or_else(|e| e.into_inner());
-        // A racing caller may have compiled it first; either way, one entry.
-        Ok(configs.entry(name.to_string()).or_insert(config).clone())
-    }
 }
 
 fn unknown_profile_error(name: &str) -> NetError {
@@ -272,6 +110,108 @@ fn unknown_profile_error(name: &str) -> NetError {
         "unknown TLS profile {name:?} (not a built-in preset: {known}, nor registered with \
          with_profile_named)"
     ))
+}
+
+impl<C: Connector> TlsRouterConnector<C> {
+    /// The owned engine's handshake: bracket `TlsStart`/`TlsEnd`, drive
+    /// [`netune_tls`]'s machine over the transport, and hand back the
+    /// protected stream as [`Established`] — the same trace shape every
+    /// egress connection records ([`INV-TLS-08`]).
+    async fn owned_handshake(
+        &self,
+        profile: &TlsProfile,
+        established: Established,
+        target: &Target,
+        recorder: &TraceCollector,
+    ) -> Result<Established, NetError> {
+        let Some(server_name) = target.tls_server_name().map(str::to_owned) else {
+            // A plaintext target passes straight through.
+            return Ok(established);
+        };
+
+        recorder.mark(EventKind::TlsStart, 0, 0);
+        let (mut hello, shares) = profile.connect_params(&server_name)?;
+        let session_key = netune_tls::session::SessionKey {
+            server_name: server_name.clone(),
+            profile_name: profile.name.to_owned(),
+            alpn: profile.blueprint.alpn.clone(),
+        };
+        let offered_psk = if profile.blueprint.psk_key_exchange_modes.is_some()
+            && let Some(ticket) = self.session_cache.take(&session_key)
+        {
+            let age_ms = ticket.obfuscated_age_ms(std::time::Instant::now());
+            hello
+                .attach_psk_and_sign(
+                    netune_tls::hello::PskIdentity {
+                        identity: ticket.ticket,
+                        obfuscated_ticket_age: age_ms,
+                    },
+                    &ticket.psk,
+                    ticket.hash,
+                )
+                .map_err(|error| NetError::Connect(format!("TLS PSK binder: {error}")))?;
+            Some(ticket.psk)
+        } else {
+            None
+        };
+
+        let connector = netune_tls::OwnedTlsConnector;
+        let session_store = if profile.blueprint.psk_key_exchange_modes.is_some() {
+            Some((self.session_cache.clone(), session_key))
+        } else {
+            None
+        };
+        let connecting = async {
+            connector
+                .connect_with_session(
+                    established.stream,
+                    netune_tls::OwnedConnectParams { hello, shares },
+                    self.verifier.clone(),
+                    offered_psk,
+                    session_store,
+                )
+                .await
+        };
+        let stream = bound(
+            self.handshake_timeout,
+            "TLS handshake",
+            &server_name,
+            connecting,
+        )
+        .await?
+        .map_err(|error| {
+            let message = format!("TLS handshake with {server_name}: {error}");
+            recorder.record_error(
+                DiagnosticRecord::new(DiagnosticCode::EGRESS_TLS_FAILED)
+                    .with_phase(DiagnosticPhase::Tls)
+                    .with_message(message.clone()),
+            );
+            NetError::Connect(message)
+        })?;
+
+        let alpn = match stream.alpn() {
+            Some(b"http/1.1") => Alpn::Http11,
+            Some(b"h2") => Alpn::H2,
+            _ => Alpn::Unknown,
+        };
+        let alpn_protocol = stream.alpn().map(<[u8]>::to_vec);
+        // Which version's protectors the connection carries is the recorded
+        // version fact: 13 for a TLS 1.3 connection, 12 for a TLS 1.2 one.
+        let version_code = match stream.protectors_kind() {
+            netune_tls::ProtectorsKind::Tls13 => 13u32,
+            netune_tls::ProtectorsKind::Tls12 => 12u32,
+        };
+        recorder.mark(EventKind::TlsEnd, 0, 0);
+        recorder.mark(EventKind::TlsInfo, u32::from(alpn.code()), version_code);
+
+        Ok(Established {
+            stream: Box::new(stream),
+            local_port: established.local_port,
+            socket: established.socket,
+            alpn: Some(alpn),
+            alpn_protocol,
+        })
+    }
 }
 
 impl<C: Connector> Connector for TlsRouterConnector<C> {
@@ -291,16 +231,21 @@ impl<C: Connector> Connector for TlsRouterConnector<C> {
         if target.tls_server_name().is_none() {
             return self.inner.connect(target, recorder).await;
         }
+        // The engine name is a request-visible identity surface
+        // ([`INV-TLS-09`]); an unknown name is a refusal, never a fallback.
+        if let Some(engine) = target.tls_engine()
+            && engine != "netune-tls"
+        {
+            return Err(NetError::Connect(format!(
+                "unknown TLS engine {engine:?} (the owned engine is \"netune-tls\")"
+            )));
+        }
         let name = target.tls_profile().unwrap_or(Preset::NetuneDefault.name());
-        let config = self.config_for(name)?;
+        let profile = self
+            .resolve(name)
+            .ok_or_else(|| unknown_profile_error(name))?;
         let established = self.inner.connect(target, recorder).await?;
-        handshake(
-            &config,
-            established,
-            target,
-            recorder,
-            self.handshake_timeout,
-        )
-        .await
+        self.owned_handshake(&profile, established, target, recorder)
+            .await
     }
 }

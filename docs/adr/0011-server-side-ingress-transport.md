@@ -151,7 +151,7 @@ constraint already in this repository:
     client role), which is strictly stronger than the previous single-direction
     corpus.
   - `netune-server` is usable as a reference origin for this workspace's own
-    client tests, so the loopback scaffolding in `crates/netune/tests/` can be
+    client tests, so the loopback scaffolding in `tests/integration/` and `tests/e2e/` can be
     replaced by code under test rather than by ad-hoc byte literals.
 - **Negative & Trade-offs**:
   - The workspace now ships something that listens. The privilege argument that

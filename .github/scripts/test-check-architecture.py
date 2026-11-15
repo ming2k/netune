@@ -61,8 +61,26 @@ BASE_FILES: dict[str, str] = {
 
         [workspace.package]
         version = "1.2.3"
+
+        [package]
+        name = "netune-workspace-tests"
+        version.workspace = true
+        publish = false
+        autotests = false
+
+        [dev-dependencies]
+        netune-test-support = { path = "crates/netune-test-support", version = "1.2.3" }
+
+        [[test]]
+        name = "integration"
+        path = "tests/integration/main.rs"
+
+        [[test]]
+        name = "e2e"
+        path = "tests/e2e/main.rs"
     """,
     "crates/netune-trace/Cargo.toml": manifest(name="netune-trace"),
+    "crates/netune-test-support/Cargo.toml": manifest(name="netune-test-support"),
     "crates/netune-io/Cargo.toml": manifest(
         name="netune-io",
         dependencies="""
@@ -83,6 +101,7 @@ BASE_FILES: dict[str, str] = {
         """,
     ),
     "crates/netune-http2/Cargo.toml": manifest(name="netune-http2"),
+    "crates/netune-tls/Cargo.toml": manifest(name="netune-tls"),
     "crates/netune-ws/Cargo.toml": manifest(
         name="netune-ws",
         dev_dependencies="""
@@ -268,6 +287,91 @@ def test_ingress_drawing_on_the_websocket_leaf_is_still_an_error() -> None:
     )
 
 
+def test_test_support_is_a_dev_only_leaf() -> None:
+    # The shared test infrastructure may be named by any crate's
+    # `dev-dependencies`; its empty allowed edge set is what rejects a
+    # production dependency (ARCH-001 below).
+    expect_clean("ARCH-001", BASE_FILES, message="netune-test-support as dev infrastructure")
+
+
+def test_production_dependency_on_test_support_is_reported() -> None:
+    expect(
+        "ARCH-001",
+        merged(
+            **{
+                "crates/netune/Cargo.toml": manifest(
+                    name="netune",
+                    dependencies="""
+                        netune-test-support = { path = "../netune-test-support", version = "1.2.3" }
+                    """,
+                )
+            }
+        ),
+        message="test infrastructure linked into a shipping graph",
+    )
+
+
+def test_root_harness_with_production_dependencies_is_reported() -> None:
+    expect(
+        "ARCH-012",
+        merged(
+            **{
+                "Cargo.toml": """
+                    [workspace]
+                    members = ["crates/*"]
+
+                    [workspace.package]
+                    version = "1.2.3"
+
+                    [package]
+                    name = "netune-workspace-tests"
+                    version.workspace = true
+                    publish = false
+
+                    [dependencies]
+                    netune = { path = "crates/netune", version = "1.2.3" }
+
+                    [[test]]
+                    name = "integration"
+                    path = "tests/integration/main.rs"
+
+                    [[test]]
+                    name = "e2e"
+                    path = "tests/e2e/main.rs"
+                """
+            }
+        ),
+        message="root harness with a production dependency",
+    )
+
+
+def test_root_harness_without_an_e2e_entry_is_reported() -> None:
+    expect(
+        "ARCH-012",
+        merged(
+            **{
+                "Cargo.toml": """
+                    [workspace]
+                    members = ["crates/*"]
+
+                    [workspace.package]
+                    version = "1.2.3"
+
+                    [package]
+                    name = "netune-workspace-tests"
+                    version.workspace = true
+                    publish = false
+
+                    [[test]]
+                    name = "integration"
+                    path = "tests/integration/main.rs"
+                """
+            }
+        ),
+        message="root harness without the e2e entry point",
+    )
+
+
 def test_undeclared_crate_is_reported() -> None:
     expect(
         "ARCH-001",
@@ -448,6 +552,118 @@ def test_quic_runtime_in_production_is_reported() -> None:
             }
         ),
         message="QUIC runtime, which netune cannot shape (ADR-0010)",
+    )
+
+
+# --- ARCH-013: the egress TLS engine is owned (ADR-0045) ------------------
+
+
+def test_rustls_in_the_owned_tls_engine_is_reported() -> None:
+    expect(
+        "ARCH-013",
+        merged(
+            **{
+                "crates/netune-tls/Cargo.toml": manifest(
+                    name="netune-tls",
+                    dependencies="""
+                        netune-trace = { path = "../netune-trace", version = "1.2.3" }
+                        rustls = "0.23"
+                    """,
+                )
+            }
+        ),
+        message="rustls in netune-tls: the engine owns the handshake, not a dependency",
+    )
+
+
+def test_rustls_as_a_dev_oracle_in_the_tls_engine_is_allowed() -> None:
+    expect_clean(
+        "ARCH-013",
+        merged(
+            **{
+                "crates/netune-tls/Cargo.toml": manifest(
+                    name="netune-tls",
+                    dependencies="""
+                        netune-trace = { path = "../netune-trace", version = "1.2.3" }
+                    """,
+                    dev_dependencies="""
+                        rustls = "0.23"
+                    """,
+                )
+            }
+        ),
+        message="rustls as the dev-only differential oracle of netune-tls",
+    )
+
+
+def test_rustls_in_an_unratified_leaf_is_reported() -> None:
+    expect(
+        "ARCH-013",
+        merged(
+            **{
+                "crates/netune-http2/Cargo.toml": manifest(
+                    name="netune-http2",
+                    dependencies="""
+                        tokio-rustls = "0.26"
+                    """,
+                )
+            }
+        ),
+        message="a codec leaf has no ratification to link a TLS engine",
+    )
+
+
+def test_rustls_on_the_ratified_ingress_and_quic_paths_is_allowed() -> None:
+    expect_clean(
+        "ARCH-013",
+        merged(
+            **{
+                "crates/netune-server/Cargo.toml": manifest(
+                    name="netune-server",
+                    dependencies="""
+                        netune-http1 = { path = "../netune-http1", version = "1.2.3" }
+                        netune-http2 = { path = "../netune-http2", version = "1.2.3" }
+                        netune-trace = { path = "../netune-trace", version = "1.2.3" }
+                        netune-io = { path = "../netune-io", version = "1.2.3" }
+                        tokio-rustls = { version = "0.26", optional = true }
+                        rustls = { version = "0.23", optional = true }
+                    """,
+                ),
+                "crates/netune-quic/Cargo.toml": manifest(
+                    name="netune-quic",
+                    dependencies="""
+                        netune-egress = { path = "../netune-egress", version = "1.2.3" }
+                        netune-io = { path = "../netune-io", version = "1.2.3" }
+                        netune-trace = { path = "../netune-trace", version = "1.2.3" }
+                        rustls = "0.23"
+                    """,
+                ),
+            }
+        ),
+        message="ADR-0015 ingress termination and ADR-0028 QUIC handshake keep rustls",
+    )
+
+
+# --- ARCH-013: step 6 — the egress orchestrator carries no rustls ---------
+
+
+def test_rustls_in_the_egress_orchestrator_is_reported() -> None:
+    expect(
+        "ARCH-013",
+        merged(
+            **{
+                "crates/netune/Cargo.toml": manifest(
+                    name="netune",
+                    dependencies="""
+                        netune-http1 = { path = "../netune-http1", version = "1.2.3" }
+                        netune-trace = { path = "../netune-trace", version = "1.2.3" }
+                        netune-io = { path = "../netune-io", version = "1.2.3" }
+                        rustls = "0.23"
+                    """,
+                )
+            }
+        ),
+        message="ADR-0045 step 6: the egress orchestrator carries no rustls",
     )
 
 

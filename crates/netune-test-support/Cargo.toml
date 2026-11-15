@@ -1,0 +1,18 @@
+[package]
+name = "netune-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Test-only infrastructure shared by netune unit, integration and end-to-end suites"
+repository = "https://github.com/ming2k/netune"
+license.workspace = true
+readme = false
+publish = false
+
+[dependencies]
+rcgen = { workspace = true }
+rustls = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "time"] }
+
+[lints]
+workspace = true

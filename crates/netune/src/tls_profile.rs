@@ -1,64 +1,57 @@
-//! TLS fingerprint profiles: the ClientHello as a *configurable* surface.
+//! TLS fingerprint profiles: the ClientHello as *configurable* wire data.
 //!
-//! rustls fixes the ClientHello's shape; a profile decides what that shape
-//! says. Every knob here maps onto a field a passive observer can read:
+//! Under the owned engine ([ADR-0045](../../adr/0045-owned-egress-tls-engine.md)
+//! and [ADR-0048](../../adr/0048-declarative-clienthello-blueprints.md)), a
+//! profile is pure declarative data backed by [`ClientHelloBlueprint`]: cipher
+//! suites, key-exchange groups, independent `key_share` groups, signature
+//! schemes, extension order, seeded extension permutation, RFC 8701 GREASE,
+//! RFC 7685 dynamic padding, RFC 8879 `compress_certificate`, ALPS, and
+//! `session_ticket`.
 //!
-//! - `alpn_protocols` → JA4's `a`/`h`/`i` digit and the wire ALPN list
-//! - `protocol_versions` → JA4's `13`/`12` digit and `supported_versions`
-//! - `cipher_suites` → JA4's cipher count (`d`) and hash
-//! - `kx_groups` → JA3's groups field (JA4's extension hash via `key_share`)
-//! - verifier choice → which roots (and therefore cert-verification paths) we
-//!   present; not fingerprint-visible but part of the identity
+//! Built-in presets:
 //!
-//! What a profile *cannot* change: rustls always sends GREASE where it sends
-//! it, always randomizes extension order per connection
-//! (`extension_order_seed` — see `hs.rs` in rustls), and only offers cipher
-//! suites the installed crypto provider actually implements. So the honest
-//! target of a profile is *another rustls-shaped stack*, byte-for-byte where
-//! possible and JA4-equal otherwise. Impersonating a non-rustls stack (Chrome,
-//! Safari, Go) needs a different engine, not a different profile.
-//!
-//! Two independent copies of the same idea, precisely because it matters:
-//! `TlsProfile` is a *description* (pure data, snapshot-testable, no I/O);
-//! `ClientConfig` is the *executed* thing. Tests assert the description, the
-//! connector runs it, and `tls_baseline.rs` cross-checks that the executed
-//! hello still matches the description that produced it.
+//! - `netune-default` — Go-shaped hello, HTTP/1.1 ALPN only.
+//! - `antigravity-cli-stream` — Antigravity CLI streaming/telemetry path
+//!   (`h2, http/1.1` ALPN, Go 1.28 `boringcrypto` shape).
+//! - `antigravity-cli-unary` — Antigravity CLI unary Cloud Code path
+//!   (`http/1.1` ALPN only, Go 1.28 `boringcrypto` shape).
+//! - `go-standard` — upstream Go `crypto/tls` (without `boringcrypto`).
+//! - `chrome-current` — Chrome/BoringSSL (GREASE, `compress_certificate`,
+//!   ALPS, seeded extension permutation, BoringSSL 517-byte padding).
+//! - `firefox-current` — Firefox/NSS (`record_size_limit`,
+//!   `post_handshake_auth`, `compress_certificate`, `session_ticket`).
+//! - `safari-current` — Safari/SecureTransport (GREASE,
+//!   `compress_certificate(zlib)`, fixed extension order).
 
-use std::sync::Arc;
-
-use rustls::crypto::CryptoProvider;
-use rustls::version::TLS12;
-
-use crate::error::NetError;
-
-/// TLS 1.2 only, as a `'static` slice for [`TlsProfile::tls12_only`].
-static TLS12_ONLY: &[&rustls::SupportedProtocolVersion] = &[&TLS12];
+use netune_tls::hello::{
+    BlueprintBuildParams, ClientHello, ClientHelloBlueprint, ExtensionSlot, KeyShareEntry,
+    PaddingPolicy,
+};
+use netune_tls::key_exchange::ClientKeyShare;
 
 /// The built-in presets, selectable by name at request time
-/// ([`Target::with_tls_profile`](crate::Target::with_tls_profile),
-/// [`crate::TlsRouterConnector`]).
+/// ([`crate::Target::with_tls_profile`], [`crate::TlsRouterConnector`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
-    /// netune's stock identity: `http/1.1` ALPN, platform roots.
+    /// netune's shipped identity: the Go-shaped hello, HTTP/1.1 ALPN only.
     NetuneDefault,
-    /// The Codex CLI product-traffic identity (reqwest + hyper-rustls):
-    /// `h2,http/1.1`.
-    CodexReqwest,
-    /// The `codex-network-proxy` upstream identity (rama-tls-rustls):
-    /// wire-identical to [`Preset::CodexReqwest`] today, named separately so
-    /// the two call sites can drift visibly.
-    CodexNetworkProxy,
-    /// Modern Chromium baseline (Chrome ~130+).
-    ChromeCurrent,
-    /// Modern Safari baseline (macOS / iOS Safari 18+).
-    SafariCurrent,
-    /// Modern Firefox baseline (Gecko ESR / Firefox 132+).
-    FirefoxCurrent,
     /// The Google Antigravity CLI (`agy`) identity — a **Go `crypto/tls`**
-    /// client (Go 1.28, `boringcrypto` build tag). Offered as the closest
-    /// rustls-shaped approximation of a Go hello; see
-    /// [`TlsProfile::antigravity_cli`] for exactly where the two diverge.
-    AntigravityCli,
+    /// client (Go 1.28, `boringcrypto` build tag) on its **streaming** paths:
+    /// Clearcut telemetry and the model-streaming transport, ALPN
+    /// `h2, http/1.1`, paired with the `go-nethttp` H2 fingerprint.
+    AntigravityCliStream,
+    /// The Google Antigravity CLI (`agy`) identity on its **unary** Cloud
+    /// Code path: `/v1internal:*` JSON calls over `http/1.1` only
+    /// (`stripHTTP2NextProto`). ([`INV-TLS-10`])
+    AntigravityCliUnary,
+    /// Upstream Go `crypto/tls` (without `boringcrypto`).
+    GoStandard,
+    /// Modern Chrome/BoringSSL identity.
+    ChromeCurrent,
+    /// Modern Firefox/NSS identity.
+    FirefoxCurrent,
+    /// Modern Safari/SecureTransport identity.
+    SafariCurrent,
 }
 
 impl Preset {
@@ -66,12 +59,12 @@ impl Preset {
     pub fn all() -> &'static [Preset] {
         &[
             Preset::NetuneDefault,
-            Preset::CodexReqwest,
-            Preset::CodexNetworkProxy,
+            Preset::AntigravityCliStream,
+            Preset::AntigravityCliUnary,
+            Preset::GoStandard,
             Preset::ChromeCurrent,
-            Preset::SafariCurrent,
             Preset::FirefoxCurrent,
-            Preset::AntigravityCli,
+            Preset::SafariCurrent,
         ]
     }
 
@@ -79,12 +72,12 @@ impl Preset {
     pub const fn name(self) -> &'static str {
         match self {
             Preset::NetuneDefault => "netune-default",
-            Preset::CodexReqwest => "codex-reqwest",
-            Preset::CodexNetworkProxy => "codex-network-proxy",
+            Preset::AntigravityCliStream => "antigravity-cli-stream",
+            Preset::AntigravityCliUnary => "antigravity-cli-unary",
+            Preset::GoStandard => "go-standard",
             Preset::ChromeCurrent => "chrome-current",
-            Preset::SafariCurrent => "safari-current",
             Preset::FirefoxCurrent => "firefox-current",
-            Preset::AntigravityCli => "antigravity-cli",
+            Preset::SafariCurrent => "safari-current",
         }
     }
 
@@ -97,401 +90,167 @@ impl Preset {
     }
 
     /// The profile this preset presents.
+    #[must_use]
     pub fn profile(self) -> TlsProfile {
         match self {
-            Preset::NetuneDefault => TlsProfile::netune_default(),
-            Preset::CodexReqwest => TlsProfile::codex_reqwest(),
-            Preset::CodexNetworkProxy => TlsProfile::codex_network_proxy(),
-            Preset::ChromeCurrent => TlsProfile::chrome_current(),
-            Preset::SafariCurrent => TlsProfile::safari_current(),
-            Preset::FirefoxCurrent => TlsProfile::firefox_current(),
-            Preset::AntigravityCli => TlsProfile::antigravity_cli(),
+            Preset::NetuneDefault => TlsProfile {
+                name: "netune-default",
+                blueprint: ClientHelloBlueprint::go_boringcrypto(),
+            },
+            Preset::AntigravityCliStream => {
+                let mut blueprint = ClientHelloBlueprint::go_boringcrypto();
+                blueprint.alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+                TlsProfile {
+                    name: "antigravity-cli-stream",
+                    blueprint,
+                }
+            }
+            Preset::AntigravityCliUnary => TlsProfile {
+                name: "antigravity-cli-unary",
+                blueprint: ClientHelloBlueprint::go_boringcrypto(),
+            },
+            Preset::GoStandard => TlsProfile {
+                name: "go-standard",
+                blueprint: ClientHelloBlueprint::go_standard(),
+            },
+            Preset::ChromeCurrent => TlsProfile {
+                name: "chrome-current",
+                blueprint: ClientHelloBlueprint::chrome_current(),
+            },
+            Preset::FirefoxCurrent => TlsProfile {
+                name: "firefox-current",
+                blueprint: ClientHelloBlueprint::firefox_current(),
+            },
+            Preset::SafariCurrent => TlsProfile {
+                name: "safari-current",
+                blueprint: ClientHelloBlueprint::safari_current(),
+            },
         }
     }
 }
 
-/// The TLS identity a profile presents, before it is compiled into a
-/// [`rustls::ClientConfig`]. Clone, tweak, compare — a profile is data.
-#[derive(Debug, Clone)]
+/// A TLS identity as pure declarative wire data ([`INV-TLS-07`], [`INV-TLS-11`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsProfile {
     /// Human-facing name, reported in traces and test failures.
     pub name: &'static str,
-    /// ALPN protocol names in offer order. Empty = no ALPN extension at all
-    /// (JA4's `i`).
-    pub alpn_protocols: Vec<Vec<u8>>,
-    /// Offered protocol versions. Order is irrelevant to the wire hello
-    /// (`supported_versions` is sorted by rustls) but defines what we accept.
-    pub protocol_versions: &'static [&'static rustls::SupportedProtocolVersion],
-    /// Cipher suites to offer, restricted to suites the provider implements.
-    /// `None` = provider default order (what a stock rustls client sends).
-    pub cipher_suites: Option<Vec<rustls::CipherSuite>>,
-    /// Key-exchange groups to offer. `None` = provider default.
-    pub kx_groups: Option<Vec<rustls::NamedGroup>>,
-    /// Where trust comes from — platform store (netune) or an explicit root
-    /// store (a codex-style proxy with its own CA or a pinned set).
-    pub verifier: Verifier,
-    /// Desired TLS extension order on the wire (ADR-0006 declarative model).
-    pub extension_order: Option<Vec<u16>>,
-    /// Whether RFC 8701 GREASE injection is expected in the hello.
-    pub grease_enabled: bool,
-    /// Offered signature algorithms (extension 0x000D), in order.
-    pub signature_algorithms: Option<Vec<u16>>,
-    /// Application-Layer Protocol Settings (ALPS) tokens.
-    pub alps_protocols: Vec<Vec<u8>>,
-}
-
-/// Trust-root selection. Part of the profile because the same binary must be
-/// able to present "I trust the OS" and "I trust exactly this bundle".
-#[derive(Debug, Clone, Default)]
-pub enum Verifier {
-    /// The OS trust store via `rustls-platform-verifier` (netune's default).
-    #[default]
-    Platform,
-    /// An explicit root store: pinned CAs, a corporate MITM bundle, tests.
-    Roots(rustls::RootCertStore),
+    /// Full ClientHello blueprint fed to `netune-tls`.
+    pub blueprint: ClientHelloBlueprint,
 }
 
 impl TlsProfile {
-    /// netune's own stock identity: platform roots, HTTP/1.1 only, whatever
-    /// the installed provider offers by default. What `tls_baseline.rs`
-    /// snapshots as `t13d1011h1_61a7ad8aa9b6_0d308c48d2a3`.
-    pub fn netune_default() -> Self {
-        Self {
-            name: "netune-default",
-            alpn_protocols: vec![b"http/1.1".to_vec()],
-            protocol_versions: rustls::ALL_VERSIONS,
-            cipher_suites: None,
-            kx_groups: None,
-            verifier: Verifier::Platform,
-            extension_order: None,
-            grease_enabled: false,
-            signature_algorithms: None,
-            alps_protocols: Vec::new(),
-        }
+    /// The profile's name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.name
     }
 
-    /// The Codex CLI's product-traffic identity (reqwest + hyper-rustls):
-    /// rustls 0.23 with the aws-lc-rs provider, ALPN `h2,http/1.1` in that
-    /// order — hyper-rustls always lists h2 first when the caller asks for
-    /// "both" — and both TLS versions offered.
-    ///
-    /// JA4 target (rustls 0.23.x + aws-lc-rs, SNI present): the `h2` digit and
-    /// a 10-cipher offer identical to the default's except for the ALPN.
-    pub fn codex_reqwest() -> Self {
-        Self {
-            name: "codex-reqwest",
-            alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-            protocol_versions: rustls::ALL_VERSIONS,
-            cipher_suites: None,
-            kx_groups: None,
-            verifier: Verifier::Platform,
-            extension_order: None,
-            grease_enabled: false,
-            signature_algorithms: None,
-            alps_protocols: Vec::new(),
-        }
-    }
-
-    /// The identity `codex-network-proxy` presents on its upstream leg
-    /// (rama-tls-rustls): `builder_with_protocol_versions(ALL_VERSIONS)` with
-    /// `with_alpn_protocols_http_auto`, i.e. the same `h2,http/1.1` offer and
-    /// default suites. It is wire-identical to [`Self::codex_reqwest`] when
-    /// both ride the same rustls release; kept as a separate named profile so
-    /// the two call sites can drift *visibly* if codex upgrades one leg.
-    pub fn codex_network_proxy() -> Self {
-        Self {
-            name: "codex-network-proxy",
-            alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-            protocol_versions: rustls::ALL_VERSIONS,
-            cipher_suites: None,
-            kx_groups: None,
-            verifier: Verifier::Platform,
-            extension_order: None,
-            grease_enabled: false,
-            signature_algorithms: None,
-            alps_protocols: Vec::new(),
-        }
-    }
-
-    /// Modern Chromium client profile (Chrome 130+).
-    pub fn chrome_current() -> Self {
-        Self {
-            name: "chrome-current",
-            alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-            protocol_versions: rustls::ALL_VERSIONS,
-            cipher_suites: None,
-            kx_groups: None,
-            verifier: Verifier::Platform,
-            // Typical Chrome extension sequence: GREASE, server_name, extended_master_secret,
-            // renegotiation_info, supported_groups, ec_point_formats, session_ticket, alpn,
-            // status_request, signature_algorithms, sct, key_share, psk_key_exchange_modes,
-            // supported_versions, compress_certificate, application_settings (ALPS), GREASE
-            extension_order: Some(vec![
-                0x0000, 0x0017, 0xff01, 0x000a, 0x000b, 0x0023, 0x0010, 0x0005, 0x000d, 0x0012,
-                0x0033, 0x002d, 0x002b, 0x001b, 0x4469,
-            ]),
-            grease_enabled: true,
-            signature_algorithms: Some(vec![
-                0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
-            ]),
-            alps_protocols: vec![b"h2".to_vec()],
-        }
-    }
-
-    /// Modern Safari client profile (macOS / iOS Safari 18+).
-    pub fn safari_current() -> Self {
-        Self {
-            name: "safari-current",
-            alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-            protocol_versions: rustls::ALL_VERSIONS,
-            cipher_suites: None,
-            kx_groups: None,
-            verifier: Verifier::Platform,
-            extension_order: Some(vec![
-                0x0000, 0x000a, 0x000b, 0x000d, 0x0010, 0x0017, 0x0033, 0x002d, 0x002b,
-            ]),
-            grease_enabled: true,
-            signature_algorithms: Some(vec![0x0403, 0x0804, 0x0401, 0x0503, 0x0501, 0x0601]),
-            alps_protocols: Vec::new(),
-        }
-    }
-
-    /// Modern Firefox client profile (Firefox 132+).
-    pub fn firefox_current() -> Self {
-        Self {
-            name: "firefox-current",
-            alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-            protocol_versions: rustls::ALL_VERSIONS,
-            cipher_suites: None,
-            kx_groups: None,
-            verifier: Verifier::Platform,
-            extension_order: Some(vec![
-                0x0000, 0x000a, 0x000b, 0x0023, 0x0010, 0x000d, 0x002d, 0x002b, 0x001b, 0x0033,
-            ]),
-            grease_enabled: false,
-            signature_algorithms: Some(vec![0x0403, 0x0503, 0x0401, 0x0501, 0x0804, 0x0805]),
-            alps_protocols: Vec::new(),
-        }
-    }
-
-    /// The Google Antigravity CLI (`agy`) identity: **Go `crypto/tls`**,
-    /// captured live from `agy` 1.5.3 (Go 1.28, `boringcrypto` build tag).
-    ///
-    /// The capture (first ClientHello to `daily-cloudcode-pa.googleapis.com`)
-    /// is, in Go's fixed extension order:
-    ///
-    /// ```text
-    /// legacy_version 0x0301, record_version 0x0303
-    /// ciphers   c02b c02f c02c c030 cca9 cca8 c009 c013 c00a c014 1301 1302 1303
-    /// extensions 0000 000b ff01 0017 0012 0005 000a 000d 0032 0010 002b 0033
-    /// groups    11ec 11eb 11ed 1d 17 18 19   (key_share: 11ec + 1d)
-    /// sigalgs   0904 0905 0906 0804 0403 0807 0805 0806 0401 0501 0601 0503 0603
-    /// alpn      h2, http/1.1        SNI present, no GREASE, no padding
-    /// JA3       771,49195,49199,49196,49200,52393,52392,49161,49171,49162,49172,
-    ///           4865,4866,4867,0,11,65281,23,18,5,10,13,50,16,43,51,
-    ///           4588,4587,4589,29,23,24,25,0
-    /// JA3 md5   047514f2ccd8b013647df2d9e189c231
-    /// ```
-    ///
-    /// A Go hello is *not* rustls-shaped, so this profile is the intersection
-    /// of what Go offers with what rustls can emit, and the divergences are
-    /// stated rather than hidden:
-    ///
-    /// - **Ciphers:** Go's offer minus its four CBC suites
-    ///   (`c009 c013 c00a c014`), which rustls cannot offer. The surviving nine
-    ///   are offered in Go's order (the allowlist order is the offer order), so
-    ///   the JA3 cipher list differs only by the four absent CBC entries.
-    /// - **Groups:** Go's hybrid order is `X25519MLKEM768` first; rustls 0.23
-    ///   implements `0x11ec` and this profile leads with it (allowlist order is
-    ///   offer order), but rustls has no `SecP256r1MLKEM768`/`SecP384r1MLKEM1024`
-    ///   (`0x11eb`/`0x11ed`), so those two are absent.
-    /// - **Extensions:** rustls emits its own set — it has no
-    ///   `renegotiation_info` (`ff01`), `extended_master_secret` (`0017`),
-    ///   `signed_certificate_timestamp` (`0012`) or `status_request` (`0005`)
-    ///   extension to offer, and always randomizes extension order. The
-    ///   extension hash in JA4 therefore cannot match Go's.
-    /// - **Signature algorithms:** Go 1.28 offers the ML-DSA schemes
-    ///   (`0904`/`0905`/`0906`), which rustls does not implement; the NIST/RSA
-    ///   tail is declared here in Go's order and rustls emits the subset it can.
-    ///
-    /// In short: this is an identity that *connects and negotiates* like the
-    /// CLI (h2 ALPN first, TLS 1.3 offered, no GREASE, no browser extensions)
-    /// and is far closer to Go than any browser preset, but a byte-exact Go
-    /// hello needs a Go-shaped TLS engine, not a rustls profile.
-    pub fn antigravity_cli() -> Self {
-        Self {
-            name: "antigravity-cli",
-            alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-            protocol_versions: rustls::ALL_VERSIONS,
-            cipher_suites: Some(vec![
-                rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-                rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-                rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-                rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-                rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-                rustls::CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-                rustls::CipherSuite::TLS13_AES_128_GCM_SHA256,
-                rustls::CipherSuite::TLS13_AES_256_GCM_SHA384,
-                rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
-            ]),
-            kx_groups: Some(vec![
-                rustls::NamedGroup::X25519MLKEM768,
-                rustls::NamedGroup::X25519,
-                rustls::NamedGroup::secp256r1,
-                rustls::NamedGroup::secp384r1,
-            ]),
-            verifier: Verifier::Platform,
-            // rustls owns extension order; the Go order is recorded in the doc
-            // comment above rather than asserted here, because asserting it
-            // would fail every build on a rustls that reorders its hello.
-            extension_order: None,
-            grease_enabled: false,
-            signature_algorithms: Some(vec![
-                0x0804, // rsa_pss_rsae_sha256
-                0x0403, // ecdsa_secp256r1_sha256
-                0x0807, // ed25519
-                0x0805, // rsa_pss_rsae_sha384
-                0x0806, // rsa_pss_rsae_sha512
-                0x0401, // rsa_pkcs1_sha256
-                0x0501, // rsa_pkcs1_sha384
-                0x0601, // rsa_pkcs1_sha512
-                0x0503, // ecdsa_secp384r1_sha384
-                0x0603, // ecdsa_secp521r1_sha512
-            ]),
-            alps_protocols: Vec::new(),
-        }
-    }
-
-    /// Specify expected TLS extension ordering.
-    pub fn with_extension_order(mut self, order: &[u16]) -> Self {
-        self.extension_order = Some(order.to_vec());
-        self
-    }
-
-    /// Toggle GREASE injection expectations.
-    pub fn with_grease(mut self, enabled: bool) -> Self {
-        self.grease_enabled = enabled;
-        self
-    }
-
-    /// Specify expected signature algorithms in order.
-    pub fn with_signature_algorithms(mut self, algs: &[u16]) -> Self {
-        self.signature_algorithms = Some(algs.to_vec());
-        self
-    }
-
-    /// Change the ALPN offer (affects the JA4 `a` digit).
+    /// Override the ALPN offer, in order.
+    #[must_use]
     pub fn with_alpn(mut self, protocols: &[&[u8]]) -> Self {
-        self.alpn_protocols = protocols.iter().map(|p| p.to_vec()).collect();
+        self.blueprint.alpn = protocols.iter().map(|protocol| protocol.to_vec()).collect();
         self
     }
 
-    /// Offer TLS 1.2 only (JA4 digit `12`): for endpoints whose middleboxes
-    /// reject 1.3 hello shapes, or to *not* look like every modern client.
-    pub fn tls12_only(mut self) -> Self {
-        self.protocol_versions = TLS12_ONLY;
+    /// Override the offered cipher suites, in order.
+    #[must_use]
+    pub fn with_cipher_suites(mut self, suites: Vec<u16>) -> Self {
+        self.blueprint.cipher_suites = suites;
         self
     }
 
-    /// Restrict the cipher offer. Suites the provider cannot actually run are
-    /// filtered at build time ([`Self::build`]) — this is an allowlist over
-    /// reality, not a forge list.
-    pub fn with_cipher_suites(mut self, suites: &[rustls::CipherSuite]) -> Self {
-        self.cipher_suites = Some(suites.to_vec());
+    /// Override the `supported_groups` list, in order.
+    #[must_use]
+    pub fn with_supported_groups(mut self, groups: Vec<u16>) -> Self {
+        self.blueprint.supported_groups = groups;
         self
     }
 
-    /// Restrict the key-share/groups offer (JA3's groups field; drives which
-    /// `key_share` extension value goes on the wire).
-    pub fn with_kx_groups(mut self, groups: &[rustls::NamedGroup]) -> Self {
-        self.kx_groups = Some(groups.to_vec());
+    /// Override the initial `key_share` groups, in order.
+    #[must_use]
+    pub fn with_key_share_groups(mut self, groups: Vec<u16>) -> Self {
+        self.blueprint.key_share_groups = groups;
         self
     }
 
-    /// Trust an explicit root store instead of the platform store.
-    pub fn with_roots(mut self, roots: rustls::RootCertStore) -> Self {
-        self.verifier = Verifier::Roots(roots);
+    /// Override the `signature_algorithms` list, in order.
+    #[must_use]
+    pub fn with_signature_algorithms(mut self, schemes: Vec<u16>) -> Self {
+        self.blueprint.signature_algorithms = schemes;
         self
     }
 
-    /// Compile the profile into a rustls client config, honouring every knob
-    /// the installed provider can actually deliver.
+    /// Override (or omit with `None`) `signature_algorithms_cert`.
+    #[must_use]
+    pub fn with_signature_algorithms_cert(mut self, schemes: Option<Vec<u16>>) -> Self {
+        self.blueprint.signature_algorithms_cert = schemes;
+        self
+    }
+
+    /// Override the ordered extension slots.
+    #[must_use]
+    pub fn with_extensions(mut self, extensions: Vec<ExtensionSlot>) -> Self {
+        self.blueprint.extensions = extensions;
+        self
+    }
+
+    /// Enable or disable per-connection extension permutation.
+    #[must_use]
+    pub fn with_extension_permutation(mut self, enabled: bool) -> Self {
+        self.blueprint.extension_permutation = enabled;
+        self
+    }
+
+    /// Set the RFC 7685 padding policy.
+    #[must_use]
+    pub fn with_padding(mut self, policy: PaddingPolicy) -> Self {
+        self.blueprint.padding = policy;
+        self
+    }
+
+    /// Materialize the ClientHello and key shares for `server_name`.
     ///
-    /// Suite and group restrictions are applied by *filtering the provider*
-    /// (rustls 0.23 takes those from `CryptoProvider`, not from the config
-    /// builder), so the resulting hello offers exactly the intersection of
-    /// the allowlist with what the base provider implements.
-    pub fn build(
+    /// # Errors
+    /// [`crate::error::NetError::Connect`] when randomness, key shares, or
+    /// blueprint serialization fails.
+    pub fn connect_params(
         &self,
-        base_provider: Arc<CryptoProvider>,
-    ) -> Result<Arc<rustls::ClientConfig>, NetError> {
-        let provider = filter_provider(self, &base_provider);
+        server_name: &str,
+    ) -> Result<(ClientHello, Vec<ClientKeyShare>), crate::error::NetError> {
+        let mut random = [0u8; 32];
+        netune_tls::hello::fill_random(&mut random)
+            .map_err(|error| crate::error::NetError::Connect(format!("TLS randomness: {error}")))?;
+        let mut session_id = [0u8; 32];
+        netune_tls::hello::fill_random(&mut session_id)
+            .map_err(|error| crate::error::NetError::Connect(format!("TLS randomness: {error}")))?;
+        let mut grease_seed = [0u8; 8];
+        netune_tls::hello::fill_random(&mut grease_seed)
+            .map_err(|error| crate::error::NetError::Connect(format!("TLS randomness: {error}")))?;
+        let mut permutation_seed = [0u8; 32];
+        netune_tls::hello::fill_random(&mut permutation_seed)
+            .map_err(|error| crate::error::NetError::Connect(format!("TLS randomness: {error}")))?;
 
-        let builder = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
-            .with_protocol_versions(self.protocol_versions)
-            .map_err(|error| NetError::Connect(format!("TLS profile {}: {error}", self.name)))?;
-
-        let config = match &self.verifier {
-            Verifier::Platform => {
-                use rustls_platform_verifier::BuilderVerifierExt;
-                builder
-                    .with_platform_verifier()
-                    .map_err(|error| NetError::Connect(format!("platform trust store: {error}")))?
-                    .with_no_client_auth()
-            }
-            Verifier::Roots(roots) => builder
-                .with_root_certificates(roots.clone())
-                .with_no_client_auth(),
-        };
-
-        let mut config = config;
-        config.alpn_protocols = self.alpn_protocols.clone();
-        Ok(Arc::new(config))
-    }
-}
-
-/// The base provider restricted to the profile's suite/group allowlists. An
-/// allowlist naming a suite the provider lacks is *silently dropped* rather
-/// than failing the build: the profile still connects, it just offers less.
-/// `None` (and an empty `Some`) mean "no restriction".
-///
-/// The allowlist order is the offer order: the hello carries suites and groups
-/// in the order the profile names them, not in the provider's default order.
-/// That is the whole point of a fingerprint profile — a Go client that leads
-/// with `X25519MLKEM768` must not be approximated by a provider list that
-/// leads with `X25519`.
-fn filter_provider(profile: &TlsProfile, base: &CryptoProvider) -> CryptoProvider {
-    let restrict = |allowlist: &Option<Vec<rustls::CipherSuite>>| {
-        allowlist
-            .as_ref()
-            .filter(|list| !list.is_empty())
-            .map(|list| {
-                list.iter()
-                    .filter_map(|want| {
-                        base.cipher_suites
-                            .iter()
-                            .find(|b| b.suite() == *want)
-                            .cloned()
-                    })
-                    .collect()
+        let shares = ClientKeyShare::generate(&self.blueprint.key_share_groups)
+            .map_err(|error| crate::error::NetError::Connect(error.to_string()))?;
+        let entries = shares
+            .iter()
+            .map(|share| KeyShareEntry {
+                group: share.group,
+                share: share.share.clone(),
             })
-            .unwrap_or_else(|| base.cipher_suites.clone())
-    };
-    let restrict_groups = |allowlist: &Option<Vec<rustls::NamedGroup>>| {
-        allowlist
-            .as_ref()
-            .filter(|list| !list.is_empty())
-            .map(|list| {
-                list.iter()
-                    .filter_map(|want| base.kx_groups.iter().find(|b| b.name() == *want).copied())
-                    .collect()
+            .collect();
+        let hello = self
+            .blueprint
+            .build(BlueprintBuildParams {
+                server_name,
+                random,
+                session_id: &session_id,
+                key_shares: entries,
+                grease_seed,
+                permutation_seed,
             })
-            .unwrap_or_else(|| base.kx_groups.clone())
-    };
-    CryptoProvider {
-        cipher_suites: restrict(&profile.cipher_suites),
-        kx_groups: restrict_groups(&profile.kx_groups),
-        ..base.clone()
+            .map_err(|error| crate::error::NetError::Connect(format!("TLS hello: {error}")))?;
+        Ok((hello, shares))
     }
 }
 
@@ -499,188 +258,55 @@ fn filter_provider(profile: &TlsProfile, base: &CryptoProvider) -> CryptoProvide
 mod tests {
     use super::*;
 
-    fn provider() -> Arc<CryptoProvider> {
-        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
-    }
-
     #[test]
-    fn the_default_profile_says_what_netune_ships() {
-        let profile = TlsProfile::netune_default();
-        assert_eq!(profile.name, "netune-default");
-        assert_eq!(profile.alpn_protocols, vec![b"http/1.1".to_vec()]);
-        assert_eq!(profile.protocol_versions, rustls::ALL_VERSIONS);
-        assert!(matches!(profile.verifier, Verifier::Platform));
-        assert!(profile.cipher_suites.is_none(), "provider default suites");
-        assert!(profile.kx_groups.is_none(), "provider default groups");
-    }
-
-    #[test]
-    fn the_codex_profiles_offer_h2_first_like_hyper_rustls() {
-        for profile in [
-            TlsProfile::codex_reqwest(),
-            TlsProfile::codex_network_proxy(),
-        ] {
-            assert_eq!(
-                profile.alpn_protocols,
-                vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-                "{}: hyper-rustls lists h2 first",
-                profile.name
-            );
-            assert_eq!(profile.protocol_versions, rustls::ALL_VERSIONS);
-        }
-    }
-
-    #[test]
-    fn tls12_only_flips_the_version_offer() {
-        let profile = TlsProfile::netune_default().tls12_only();
-        assert_eq!(profile.protocol_versions, TLS12_ONLY);
-    }
-
-    #[test]
-    fn the_default_profile_builds_and_offers_the_provider_default_suites() {
-        let provider = provider();
-        let config = TlsProfile::netune_default()
-            .build(provider.clone())
-            .expect("build");
-        // Every provider suite is offered: the profile is a pass-through.
-        // (Suites/groups live on the compiled provider, not on the config.)
-        let compiled = config.crypto_provider().cipher_suites.len();
-        assert_eq!(compiled, provider.cipher_suites.len());
-        // ALPN is exactly what the profile said.
-        assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
-    }
-
-    #[test]
-    fn a_cipher_allowlist_restricts_the_offer_and_drops_unknown_suites() {
-        let config = TlsProfile::netune_default()
-            .with_cipher_suites(&[
-                rustls::CipherSuite::TLS13_AES_128_GCM_SHA256,
-                // Not implemented by aws-lc-rs' default set — must be dropped, not fail.
-                rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
-            ])
-            .build(provider())
-            .expect("build");
-        for suite in &config.crypto_provider().cipher_suites {
-            assert!(
-                matches!(
-                    suite.suite(),
-                    rustls::CipherSuite::TLS13_AES_128_GCM_SHA256
-                        | rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
-                ),
-                "only allowlisted suites survive: {:?}",
-                suite.suite()
-            );
-        }
-    }
-
-    #[test]
-    fn a_kx_group_allowlist_restricts_the_offer() {
-        let config = TlsProfile::netune_default()
-            .with_kx_groups(&[rustls::NamedGroup::X25519])
-            .build(provider())
-            .expect("build");
-        let groups = config.crypto_provider().kx_groups.clone();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].name(), rustls::NamedGroup::X25519);
-    }
-
-    #[test]
-    fn an_empty_allowlist_falls_back_to_the_provider_default() {
-        let config = TlsProfile::netune_default()
-            .with_cipher_suites(&[])
-            .build(provider())
-            .expect("build");
-        assert_eq!(
-            config.crypto_provider().cipher_suites.len(),
-            provider().cipher_suites.len()
-        );
-    }
-
-    #[test]
-    fn browser_presets_resolve_and_declare_fingerprint_models() {
-        for name in &["chrome-current", "safari-current", "firefox-current"] {
-            let preset = Preset::by_name(name).expect("preset exists");
-            let profile = preset.profile();
-            assert_eq!(profile.name, *name);
-            assert_eq!(
-                profile.alpn_protocols,
-                vec![b"h2".to_vec(), b"http/1.1".to_vec()]
-            );
-            assert!(profile.extension_order.is_some());
-            assert!(profile.signature_algorithms.is_some());
-            // Verifies that browser profiles build into runnable client configs
-            assert!(profile.build(provider()).is_ok());
-        }
-    }
-
-    /// The Antigravity CLI identity must negotiate h2, must not offer GREASE,
-    /// and must not silently degrade to the provider default cipher set — the
-    /// whole point of the preset is that the offer is Go's, minus only the
-    /// suites rustls cannot run.
-    #[test]
-    fn the_antigravity_cli_profile_offers_go_suites_and_h2() {
-        let preset = Preset::by_name("antigravity-cli").expect("preset is registered");
-        let profile = preset.profile();
-        assert_eq!(profile.name, "antigravity-cli");
-        assert_eq!(
-            profile.alpn_protocols,
-            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-            "the CLI offers h2 first"
-        );
-        assert!(!profile.grease_enabled, "Go never sends GREASE");
-
-        let configured = profile
-            .cipher_suites
-            .clone()
-            .expect("the profile names suites explicitly");
-        assert_eq!(configured.len(), 9, "Go's 13 minus the four CBC suites");
-
-        // Building against aws-lc-rs drops nothing: every Go-compatible suite
-        // the profile names is implemented, so the compiled offer is exactly
-        // the allowlist, in the order the profile names it.
-        let config = profile.build(provider()).expect("build");
-        let compiled: Vec<_> = config
-            .crypto_provider()
-            .cipher_suites
-            .iter()
-            .map(|suite| suite.suite())
-            .collect();
-        assert_eq!(compiled.len(), configured.len());
-        for suite in &configured {
-            assert!(compiled.contains(suite), "{suite:?} survived the build");
-        }
-
-        // Go's first key-share group is the hybrid X25519MLKEM768.
-        let groups: Vec<_> = config
-            .crypto_provider()
-            .kx_groups
-            .iter()
-            .map(|group| group.name())
-            .collect();
-        assert_eq!(
-            groups.first(),
-            Some(&rustls::NamedGroup::X25519MLKEM768),
-            "hybrid group leads, as in the captured Go hello"
-        );
-        assert_eq!(
-            config.alpn_protocols,
-            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
-        );
-    }
-
-    #[test]
-    fn every_preset_has_a_unique_name_and_builds() {
+    fn presets_are_registered_and_unique() {
         let mut names: Vec<&str> = Preset::all().iter().map(|preset| preset.name()).collect();
         let count = names.len();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), count, "preset names are unique");
+    }
+
+    /// [`INV-TLS-10`]: a path-named preset offers exactly that path's ALPN.
+    #[test]
+    fn path_named_presets_offer_their_path_alpn() {
+        assert_eq!(
+            Preset::AntigravityCliStream.profile().blueprint.alpn,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            "the stream paths offer h2 first"
+        );
+        assert_eq!(
+            Preset::AntigravityCliUnary.profile().blueprint.alpn,
+            vec![b"http/1.1".to_vec()],
+            "the unary path offers http/1.1 only"
+        );
+        assert_eq!(
+            Preset::NetuneDefault.profile().blueprint.alpn,
+            vec![b"http/1.1".to_vec()],
+            "the shipped identity is HTTP/1.1 only"
+        );
+        assert!(Preset::by_name("antigravity-cli").is_none());
+    }
+
+    /// Every preset's hello encodes on the wire and parses cleanly
+    /// ([`INV-TLS-06`], [`INV-TLS-07`], [`INV-TLS-11`]).
+    #[test]
+    fn every_preset_builds_and_parses() {
         for preset in Preset::all() {
-            let profile = preset.profile();
-            assert_eq!(profile.name, preset.name(), "profile names its preset");
+            let (hello, _shares) = preset
+                .profile()
+                .connect_params("profile.example")
+                .expect("the preset's offer is completable");
+            let bytes = hello.serialize().expect("the preset hello encodes");
+            let parsed = netune_trace::ClientHello::parse(&bytes).expect("the hello parses");
             assert!(
-                profile.build(provider()).is_ok(),
-                "{} builds",
+                !parsed.extensions.is_empty(),
+                "{}: extensions non-empty",
+                preset.name()
+            );
+            assert!(
+                !parsed.cipher_suites.is_empty(),
+                "{}: cipher suites non-empty",
                 preset.name()
             );
         }

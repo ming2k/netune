@@ -118,7 +118,7 @@ policy. A type here would be a label with no wire effect.
 
 - `crates/netune-http3/src/client.rs`: `H3Client::connect`, `H3ClientConfig`,
   `H3ResponseStream`, per-exchange `RequestTrace`, retained `QuicConnection`.
-- `crates/netune-http3/tests/http3_e2e.rs`: connects through `QuicProfile::chrome_quic`,
+- `tests/e2e/http3_client.rs`: connects through `QuicProfile::chrome_quic`,
   asserts the resolved profile, and asserts the per-exchange L0 envelope.
 - `crates/netune-quic/src/profile.rs`: `QuicProfileRegistry` and resolved profile names.
 

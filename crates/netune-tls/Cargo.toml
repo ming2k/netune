@@ -1,0 +1,53 @@
+[package]
+name = "netune-tls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Owned egress TLS engine: byte-exact ClientHello, TLS 1.2/1.3 handshake and record layer (ADR-0045)"
+repository = "https://github.com/ming2k/netune"
+license.workspace = true
+readme.workspace = true
+keywords = ["tls", "clienthello", "fingerprint", "ja3", "ja4"]
+categories = ["network-programming", "cryptography"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+# No features yet. The engine is additive by construction: the wire model and
+# hello forge compile everywhere, and the crypto/handshake layers are plain
+# modules, not feature gates (a feature never changes a default identity
+# policy, [INV-TRACE-05]).
+default = []
+
+[dependencies]
+thiserror = { workspace = true }
+aws-lc-rs = { workspace = true }
+# The chain validator: a standalone X.509 path validator (a verifier, not a
+# TLS engine — [INV-TLS-04] does not forbid it) with the Mozilla root bundle.
+rustls-webpki = { workspace = true }
+rustls-pki-types = "1"
+webpki-root-certs = { workspace = true }
+# The async driver wraps the sans-IO machine in AsyncRead/AsyncWrite.
+tokio = { workspace = true, features = ["io-util", "rt"] }
+# The TLS 1.2 CBC path needs the EVP interface (caller-supplied IV, no
+# crate-managed padding) and the MD5+SHA1 dual PRF — the two primitives the
+# `aws-lc-rs` facade does not expose ([INV-TLS-05]).
+aws-lc-sys = "0.45"
+# RFC 8879 certificate decompression (zlib + brotli) so compress_certificate
+# offers satisfy [INV-TLS-06] without advertising unsupported algorithms.
+brotli = { workspace = true }
+flate2 = { workspace = true }
+
+[dev-dependencies]
+# Differential oracle + fingerprint cross-check: `rustls` (peer handshake)
+# and `netune-trace` (ClientHello parser, JA3/JA4) are test-only. Neither
+# ships ([INV-TLS-04]). `netune-test-support` provides the self-signed
+# identity for the live loopback handshake.
+netune-trace = { path = "../netune-trace", version = "0.0.28" }
+netune-test-support = { path = "../netune-test-support", version = "0.0.28" }
+rustls = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
+
+[lints]
+workspace = true

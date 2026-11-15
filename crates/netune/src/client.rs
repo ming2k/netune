@@ -2062,6 +2062,7 @@ mod identity_tests {
             netune_http2::H2RequestProfile {
                 name: "my-order",
                 pseudo_headers_order: netune_http2::PseudoHeaderOrder::AuthorityMethodPathScheme,
+                regular_header_order: netune_http2::RegularHeaderOrder::CallerOrder,
             },
         );
         let target = Target::plain("203.0.113.10:80")

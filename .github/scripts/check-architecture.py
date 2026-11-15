@@ -19,12 +19,16 @@ Rules, each mapped to the standard that states it:
     ARCH-009  production dependencies carry an explicit `version` with their `path`
     ARCH-010  H3/QPACK is owned; no vendored protocol runtime tree
     ARCH-011  production code never emits a contentless diagnostic event
+    ARCH-012  the root test harness is test-only
+    ARCH-013  no third-party TLS engine outside the ADR-0015/0028 paths (ADR-0045)
 
 The distinction that matters is production vs. dev: an oracle (`hyper`,
 `tungstenite`, `h3`) is allowed as a `dev-dependency`, because a differential
 test compares owned bytes against it and never links it into the artifact that
 ships. `ARCH-005`/`ARCH-006` therefore read `[dependencies]` only, which is the
-question "what ships", not "what the test suite resolves".
+question "what ships", not "what the test suite resolves". The same rule makes
+`netune-test-support` a dev-only leaf: it is declared in the topology with no
+allowed outgoing edge, so any `[dependencies]` entry naming it is ARCH-001.
 
 Usage:
     python3 .github/scripts/check-architecture.py [--root DIR]
@@ -64,23 +68,31 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     # transport (netune TCP/UDP, netune-quic) shares one definition of
     # `is_public_ip` rather than maintaining copies that drift.
     "netune-egress": set(),
+    # test-only infrastructure: scripted I/O, loopback pairs and self-signed
+    # TLS identities. It links no workspace crate, and the empty edge set is
+    # what makes a production dependency on it an ARCH-001 violation.
+    "netune-test-support": set(),
     # pure codecs: caller-provided buffers, no sibling, no orchestrator.
     "netune-http1": set(),
     "netune-http2": set(),
     "netune-ws": set(),
     # probe: parses and builds L2 frames; links none of the stack.
     "netune-probe": set(),
+    # owned egress TLS engine (ADR-0045): pure protocol layer over aws-lc
+    # primitives; handshake facts go into the trace model like netune-io's.
+    "netune-tls": {"netune-trace"},
     # QUIC and HTTP/3 client transport (ADR-0016).
     "netune-quic": {"netune-egress", "netune-io", "netune-trace"},
     "netune-http3": {"netune-quic", "netune-trace"},
     "netune-webtransport": {"netune-http3", "netune-quic"},
-    # egress orchestrator.
+    # egress orchestrator. `netune-tls` is the owned TLS engine (ADR-0045).
     "netune": {
         "netune-egress",
         "netune-http1",
         "netune-http2",
         "netune-http3",
         "netune-quic",
+        "netune-tls",
         "netune-trace",
         "netune-ws",
         "netune-io",
@@ -115,6 +127,23 @@ FORBIDDEN_QUIC_RUNTIME = {
     "h3-quinn",
 }
 ALLOWED_RUNTIME_DEPS: dict[str, set[str]] = {}
+# ADR-0045: the egress TCP-TLS engine is owned (`netune-tls`), so no crate may
+# link a third-party TLS implementation unless another ADR ratifies that path.
+# The ratifications today are ADR-0015 (ingress TLS termination) and ADR-0028
+# (QUIC's TLS 1.3 handshake), plus the test-support leaf that builds the
+# loopback identities. ADR-0045's step 6 is complete: `netune` carries no
+# rustls and `netune-tls` is never whitelisted.
+FORBIDDEN_TLS_RUNTIME = {
+    "rustls",
+    "tokio-rustls",
+    "native-tls",
+    "openssl",
+}
+ALLOWED_TLS_RUNTIME_DEPS: dict[str, set[str]] = {
+    "netune-server": {"rustls", "tokio-rustls"},
+    "netune-quic": {"rustls", "tokio-rustls"},
+    "netune-test-support": {"rustls", "tokio-rustls"},
+}
 FORBIDDEN_WS_RUNTIME = {
     "tungstenite",
     "tokio-tungstenite",
@@ -276,6 +305,14 @@ class Workspace:
                         crate,
                         f"production dependency on {name} (WebSocket runtime, ADR-0007)",
                     )
+                if name in FORBIDDEN_TLS_RUNTIME:
+                    allowed = ALLOWED_TLS_RUNTIME_DEPS.get(crate, set())
+                    if name not in allowed:
+                        self.report(
+                            "ARCH-013",
+                            crate,
+                            f"production dependency on {name} (third-party TLS engine, ADR-0045)",
+                        )
                 if name in FORBIDDEN_HTTP_CLIENT:
                     self.report(
                         "ARCH-006",
@@ -404,6 +441,53 @@ class Workspace:
                     f"{name} exists; H3/QPACK is owned by netune-http3 (ADR-0027)",
                 )
 
+    # -- ARCH-012: the root harness is test-only ---------------------------
+
+    def check_test_harness(self) -> None:
+        """The root package exists only to compile integration/e2e tests.
+
+        A root package that grows a library, a binary or production
+        dependencies has become a thirteenth product crate, which is exactly
+        what the multi-crate topology does not allow. All of its dependencies
+        must be dev-dependencies, and both external-test entry points must be
+        declared explicitly so `cargo nextest run` always sees them.
+        """
+        manifest = self.root / "Cargo.toml"
+        if not manifest.is_file():
+            return
+        data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        package = data.get("package")
+        if not isinstance(package, dict):
+            self.report("ARCH-012", "Cargo.toml", "no root test package is declared")
+            return
+        if package.get("publish") is not False:
+            self.report("ARCH-012", "Cargo.toml", "root test package must set `publish = false`")
+        if data.get("dependencies"):
+            self.report(
+                "ARCH-012",
+                "Cargo.toml",
+                "root test package has production dependencies; use dev-dependencies",
+            )
+        for section in ("lib", "bin"):
+            if data.get(section):
+                self.report(
+                    "ARCH-012",
+                    "Cargo.toml",
+                    f"root test package declares a `[{section}]` target",
+                )
+        declared = {
+            target.get("name")
+            for target in data.get("test", []) or []
+            if isinstance(target, dict)
+        }
+        for required in ("integration", "e2e"):
+            if required not in declared:
+                self.report(
+                    "ARCH-012",
+                    "Cargo.toml",
+                    f"root test package has no `{required}` test target",
+                )
+
     def run(self) -> list[Violation]:
         self.check_edges()
         self.check_protocol_runtimes()
@@ -411,6 +495,7 @@ class Workspace:
         self.check_transmit_path()
         self.check_vendor_tree()
         self.check_diagnostic_producers()
+        self.check_test_harness()
         return sorted(set(self.violations))
 
 

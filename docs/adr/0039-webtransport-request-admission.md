@@ -19,7 +19,7 @@ superseded_by: null
 ---
 
 > Implementation status: ADR-0037 Gate 5 is now exercised by
-> `crates/netune-webtransport/tests/security.rs` and the focused validation
+> `tests/e2e/webtransport_security.rs` and the focused validation
 > tests in `netune-http3`. Browser interoperability remains blocked by Chrome's
 > missing `reset_stream_at`, so this ADR does not lift the WebTransport
 > production gate.

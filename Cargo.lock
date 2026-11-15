@@ -802,14 +802,12 @@ dependencies = [
  "netune-http3",
  "netune-io",
  "netune-quic",
+ "netune-tls",
  "netune-trace",
  "netune-ws",
  "rcgen",
- "rustls",
- "rustls-platform-verifier",
  "socket2",
  "tokio",
- "tokio-rustls",
 ]
 
 [[package]]
@@ -834,6 +832,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "netune-test-support",
  "serde_json",
  "tokio",
 ]
@@ -916,6 +915,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "netune-test-support"
+version = "0.0.28"
+dependencies = [
+ "rcgen",
+ "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "netune-tls"
+version = "0.0.28"
+dependencies = [
+ "aws-lc-rs",
+ "aws-lc-sys",
+ "brotli",
+ "flate2",
+ "netune-test-support",
+ "netune-trace",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "thiserror 2.0.20",
+ "tokio",
+ "webpki-root-certs",
+]
+
+[[package]]
 name = "netune-trace"
 version = "0.0.28"
 dependencies = [
@@ -935,6 +961,32 @@ dependencies = [
  "rustls",
  "thiserror 2.0.20",
  "tokio",
+]
+
+[[package]]
+name = "netune-workspace-tests"
+version = "0.0.28"
+dependencies = [
+ "brotli",
+ "bytes",
+ "flate2",
+ "http",
+ "netune",
+ "netune-http1",
+ "netune-http2",
+ "netune-http3",
+ "netune-quic",
+ "netune-server",
+ "netune-test-support",
+ "netune-tls",
+ "netune-trace",
+ "netune-webtransport",
+ "netune-ws",
+ "quinn",
+ "rcgen",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

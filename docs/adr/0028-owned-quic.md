@@ -230,4 +230,4 @@ None at the transport level after ADR-0031.
   [RFC 9002](https://www.rfc-editor.org/rfc/rfc9002),
   [RFC 9221](https://www.rfc-editor.org/rfc/rfc9221)
 - Tests: `crates/netune-quic/src/wire/`, `crates/netune-quic/src/crypto/`,
-  `crates/netune-quic/tests/`
+  `tests/e2e/quic_*.rs`, `crates/netune-quic/tests/owned_handshake.rs`

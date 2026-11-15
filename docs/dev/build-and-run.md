@@ -31,7 +31,7 @@ cargo build -p netune-probe
 The ingress and egress suites use a real loopback client/server pair:
 
 ```bash
-cargo test -p netune-server --test interop
+cargo nextest run -p netune-workspace-tests --test e2e -E 'test(interop::)'
 ```
 
 To fetch from an origin you have started yourself, use the typed-error example
@@ -47,16 +47,19 @@ cargo run -p netune --example fetch -- http://127.0.0.1:8080/health
 ## 4. Automated Verification & Testing
 
 ```bash
-# Run all unit tests, differential tests, and loopback E2E suites
-cargo test --workspace
+# Run all unit, differential, integration and E2E suites
+cargo nextest run --workspace
 
 # Run differential tests against reference codecs
-cargo test -p netune-http1 --test differential
+cargo nextest run -p netune-http1 --test differential
 
 # Check formatting and Clippy warnings
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+Doctests are the one tier `nextest` cannot execute; run them with
+`cargo test --doc --workspace --all-features`.
 
 ---
 

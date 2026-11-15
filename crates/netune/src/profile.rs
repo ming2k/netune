@@ -396,7 +396,11 @@ impl H2Registry {
         let id = match tls_profile {
             Some("safari-current") => "safari-18",
             Some("firefox-current") => "firefox-132",
-            Some("antigravity-cli") => "go-nethttp",
+            // The CLI's h2 paths: telemetry and model streaming.
+            Some("antigravity-cli-stream") => "go-nethttp",
+            // The CLI's unary path opens no h2 connection at all, so it pairs
+            // with none (ADR-0047, [INV-TLS-10]).
+            Some("antigravity-cli-unary") => return None,
             _ => "chrome-130",
         };
         self.profiles.get_key_value(&ProfileId::new(id))
@@ -463,9 +467,15 @@ mod tests {
         );
         assert_eq!(
             registry
-                .default_for_tls(Some("antigravity-cli"))
+                .default_for_tls(Some("antigravity-cli-stream"))
                 .map(|(id, _)| id.as_str()),
             Some("go-nethttp")
+        );
+        // The unary path opens no h2 connection, so it pairs with none.
+        assert!(
+            registry
+                .default_for_tls(Some("antigravity-cli-unary"))
+                .is_none()
         );
         assert_eq!(
             registry.default_for_tls(None).map(|(id, _)| id.as_str()),

@@ -1,0 +1,18 @@
+[profile.default]
+# A flaky suite is a defect, not a retry budget. A failing test stays failing
+# until the shared cause is fixed.
+retries = 0
+fail-fast = false
+# No test may hang a CI job indefinitely. A slow test is reported once; a test
+# that has not completed after two periods is terminated and fails.
+slow-timeout = { period = "60s", terminate-after = 2 }
+leak-timeout = "1s"
+
+[profile.ci]
+inherits = "default"
+fail-fast = false
+
+[profile.soak]
+inherits = "default"
+slow-timeout = { period = "300s", terminate-after = 2 }
+leak-timeout = "10s"

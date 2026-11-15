@@ -3,30 +3,34 @@
 This guide shows how to select and define TLS ClientHello identities, route
 requests to them, and keep the connection pool from mixing them.
 
-A `TlsProfile` is **data**: it describes an identity, and it compiles into a
-`rustls::ClientConfig` when a connection needs one. It is not a closure over a
-builder, so a profile can be cloned, compared, and registered by name.
+A `TlsProfile` is **data**: it describes a ClientHello identity via a declarative
+`ClientHelloBlueprint` ([ADR-0048](../adr/0048-declarative-clienthello-blueprints.md))
+fed to the owned `netune-tls` engine ([ADR-0045](../adr/0045-owned-egress-tls-engine.md)).
+It controls cipher suites, key-exchange groups, independent `key_share` groups,
+signature schemes, extension order, seeded extension permutation, RFC 8701
+GREASE, RFC 7685 dynamic padding, RFC 8879 `compress_certificate`, ALPS, and
+`session_ticket`.
 
 ---
 
 ## Select a Built-In Preset
 
-Six presets ship in `Preset::all()`, each modelled on an identity observed in
-production:
+Seven presets ship in `Preset::all()`:
 
 | Preset | Wire identity |
 | :--- | :--- |
-| `netune-default` | Platform trust store, `http/1.1` ALPN, provider default ciphers and groups. |
-| `codex-reqwest` | The Codex CLI's product traffic: `h2,http/1.1` ALPN (hyper-rustls always lists `h2` first). |
-| `codex-network-proxy` | The identity the Codex network proxy presents on its upstream leg. |
-| `chrome-current` | A current Chrome extension sequence, including GREASE and ALPS. |
-| `safari-current` | The Safari counterpart. |
-| `firefox-current` | The Firefox counterpart. |
+| `netune-default` | Shipped identity: Go-shaped hello, `http/1.1` ALPN only. |
+| `antigravity-cli-stream` | Antigravity CLI telemetry/streaming paths: `h2, http/1.1` ALPN (Go 1.28 `boringcrypto`). |
+| `antigravity-cli-unary` | Antigravity CLI unary Cloud Code path: `http/1.1` ALPN only (Go 1.28 `boringcrypto`). |
+| `go-standard` | Upstream Go `crypto/tls` (without `boringcrypto`). |
+| `chrome-current` | Chrome/BoringSSL: GREASE, `compress_certificate(brotli)`, ALPS, seeded extension permutation, 517-byte padding. |
+| `firefox-current` | Firefox/NSS: `record_size_limit`, `post_handshake_auth`, `compress_certificate(zlib, brotli)`, `session_ticket`. |
+| `safari-current` | Safari/SecureTransport: GREASE, `compress_certificate(zlib)`, fixed extension order. |
 
 ### Route a request to a preset
 
-`TlsRouterConnector` compiles a profile on first use and caches it. The profile
-is selected per request through the target:
+`TlsRouterConnector` resolves the profile on each connection. The profile is
+selected per request through the target:
 
 ```rust,no_run
 use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TlsRouterConnector, TraceConfig};
@@ -39,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The profile is named at request time, on the target.
     let target = Target::tls("api.openai.com:443", "api.openai.com")
-        .with_tls_profile("codex-reqwest");
+        .with_tls_profile("antigravity-cli-stream");
 
     let head = RequestHead::new(http::Method::GET, "/v1/models");
 
@@ -64,12 +68,12 @@ the wire format the moment a field is added.
 use netune::{Preset, TlsProfile};
 
 // Start from a real identity, then narrow it.
-let mut profile = Preset::ChromeCurrent.profile();
+let mut profile: TlsProfile = Preset::ChromeCurrent.profile();
 profile.name = "custom-edge";
-// Offer only HTTP/1.1 (no h2) and drop GREASE: a hello a specific edge
-// gateway is known to accept.
-profile.alpn_protocols = vec![b"http/1.1".to_vec()];
-profile.grease_enabled = false;
+// Offer only HTTP/1.1 (no h2) and disable per-connection extension permutation.
+profile = profile
+    .with_alpn(&[b"http/1.1"])
+    .with_extension_permutation(false);
 ```
 
 Register it under a name, and requests can then select it like any preset:
@@ -79,8 +83,7 @@ use netune::{Preset, TcpConnector, TlsRouterConnector};
 
 let mut profile = Preset::ChromeCurrent.profile();
 profile.name = "custom-edge";
-profile.alpn_protocols = vec![b"http/1.1".to_vec()];
-profile.grease_enabled = false;
+profile = profile.with_alpn(&[b"http/1.1"]);
 
 let router = TlsRouterConnector::new(TcpConnector::new())
     .with_profile_named("custom-edge", profile);
@@ -96,10 +99,10 @@ preset's definition.
 ## Pool Slicing and Isolation
 
 Connections are keyed by `authority#profile`. A connection handshook under
-`codex-reqwest` is never handed to a request that asked for `netune-default`,
-because the pooled session's ClientHello is already on the wire and cannot be
-changed. Fingerprint leakage across identities is therefore a key-space
-property, not a policy someone has to remember.
+`antigravity-cli-stream` is never handed to a request that asked for
+`netune-default`, because the pooled session's ClientHello is already on the
+wire and cannot be changed. Fingerprint leakage across identities is therefore a
+key-space property, not a policy someone has to remember.
 
 An unknown profile name is a **loud** failure at connection time; the error
 lists every registered name. Silently falling back to a default identity would
@@ -110,10 +113,10 @@ fingerprint configuration exists to prevent.
 
 ## What a Profile Can and Cannot Change
 
-`TlsProfile` shapes what `rustls` can be told to do: ALPN protocols, protocol
-versions, cipher suites, key-exchange groups, extension order, GREASE, signature
-algorithms, ALPS, and the trust source. It cannot express a handshake `rustls`
-has no API for — a caller-chosen `legacy_session_id`, or a verifier that skips
-the CA chain. Those capabilities belong to the consumer, and
+`TlsProfile` shapes the offer lists (`alpn_protocols`, `cipher_suites`,
+`kx_groups`, `signature_algorithms`) that `netune-tls` serializes into the
+ClientHello. Any narrowed value the engine cannot complete is refused at hello
+construction (`[INV-TLS-06]`). Capabilities that skip CA chain verification
+belong to the consumer, and
 [ADR-0009](../adr/0009-reality-client-authentication-not-a-netune-capability.md)
 records that decision for REALITY specifically.

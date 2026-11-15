@@ -300,7 +300,7 @@ of recorded events; a missing event remains honest absence.
 - Current unconditional construction: `crates/netune/src/client.rs`
   (`Client::request`, `prewarm`, `connect_ws`).
 - Current hot-path lock: `crates/netune-io/src/timed.rs`.
-- Current wall-clock gate: `crates/netune/tests/overhead.rs`; the measured p99 on the
+- Current wall-clock gate: `tests/integration/overhead.rs`; the measured p99 on the
   development host is 69 ns per recorded event and the data-path tap adds 68 ns per write,
   far below the asserted 5 µs p99. The test is a loose guardrail, not evidence of a 5 µs
   cost.

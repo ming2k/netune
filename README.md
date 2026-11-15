@@ -97,11 +97,8 @@ deliberately with `cargo update -p netune`.
 ### Build and Test
 
 ```bash
-# Run unit and integration tests across all workspace crates
-cargo test
-
-# Run tests with nextest
-cargo nextest run
+# Run unit, differential, integration and E2E tests across the workspace
+cargo nextest run --workspace
 ```
 
 ### Basic Request & Trace Inspection

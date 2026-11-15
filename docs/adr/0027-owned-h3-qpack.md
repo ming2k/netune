@@ -237,4 +237,4 @@ they are not vendored, and a default build of `netune-http3` links neither.
 - RFCs: [RFC 9114](https://www.rfc-editor.org/rfc/rfc9114),
   [RFC 9204](https://www.rfc-editor.org/rfc/rfc9204),
   [RFC 7541](https://www.rfc-editor.org/rfc/rfc7541)
-- Tests: `crates/netune-http3/tests/`, `crates/netune-server/tests/http3_ingress.rs`
+- Tests: `tests/e2e/http3_client.rs`, `crates/netune-http3/tests/h3_interop.rs`, `tests/e2e/http3_ingress.rs`

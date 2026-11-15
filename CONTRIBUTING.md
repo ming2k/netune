@@ -23,7 +23,7 @@ Thank you for contributing to `netune`.
 
 ```bash
 cargo check --all-targets --all-features
-cargo nextest run
+cargo nextest run --workspace
 cargo nextest run -p netune-probe --features inject
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check

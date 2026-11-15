@@ -16,7 +16,7 @@ An invariant is a condition that must hold in every valid state of the system. A
 
 | Category | Definition & scope | Identifier policy | Enforcement mechanism |
 | :--- | :--- | :--- | :--- |
-| **System invariant** | Non-negotiable structural red-line with cross-boundary blast radius: dependency firewalls, privilege boundaries, replay safety, protocol direction. | Ratified in an ADR as `[INV-FAMILY-NN]`. | 1. Crate/feature boundaries<br>2. Dedicated integration test (`tests/*_integration.rs`)<br>3. Type-level constraints |
+| **System invariant** | Non-negotiable structural red-line with cross-boundary blast radius: dependency firewalls, privilege boundaries, replay safety, protocol direction. | Ratified in an ADR as `[INV-FAMILY-NN]`. | 1. Crate/feature boundaries<br>2. Dedicated integration/E2E test (`tests/integration/`, `tests/e2e/`)<br>3. Type-level constraints |
 | **Domain contract** | State-machine behaviour inside one crate: decoder phases, stream states, close handshakes. | No global `INV-` tag. Expressed as named types and `enum` variants. | Private fields, typestates, unit tests |
 | **Design constant** | Sizes, timeouts, buffer limits, preset values, default heads. | No `INV-` tag. A named `const`. | The constant itself; a test where it is load-bearing |
 | **Implementation note** | Localized edge-case guard or workaround. | No `INV-` tag. Ordinary code comment. | Direct regression test |
@@ -52,6 +52,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-CUSTOM-14..15]` | QUIC profiles resolve through one registry, unknown names fail loudly before endpoint creation, and the resolved profile name is available for identity/trace construction. | ADR-0021 |
 | `[INV-CUSTOM-16..17]` | HTTP/3 connection identity is the resolved QUIC profile; H3 does not grow a second handshake registry, and no request-order profile is added until the encoder can enforce it. | ADR-0022 |
 | `[INV-CUSTOM-18..19]` | H3 request-header order is enforced at the QPACK input boundary by the owned encoder; request order is request-scoped and never changes QUIC connection identity. `[INV-CUSTOM-20]` is retired with the fork it constrained. | ADR-0027 |
+| `[INV-CUSTOM-21..22]` | HTTP/2 regular-header order is named policy on `H2RequestProfile`, and the `go-nethttp` profile randomizes it per request from a seed rather than presenting a fixed order. | ADR-0046 |
 | `[INV-H3-01..08]` | H3 request streaming is the primitive; SETTINGS profiles are typed and enforceable; decoded dynamic header sections are acknowledged and blocked streams wait on insertions; header order is independent of QPACK table state; no third-party H3/QPACK runtime ships; critical-stream closure is connection-fatal; QPACK references are bounded. | ADR-0024, ADR-0027 |
 | `[INV-H3-09..11]` | H3 datagrams require bilateral SETTINGS, route only by Quarter Stream ID and are bounded before registration; extended CONNECT is an opt-in typed `:protocol` extension. | ADR-0030 |
 | `[INV-H3-12]` | Early H3 request frames are retained until the handshake decision and replayed in 1-RTT after rejection. | ADR-0031 |
@@ -67,7 +68,10 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-TRANSPORT-00..04]` | Replay safety: a pooled socket that drops before any response-head byte is replaced; after that point it is never retried. Idle bound, distinct `Incomplete`. | ADR-0001 (`00`), ADR-0005 (`01..04`) |
 | `[INV-TRANSPORT-05]` | Every egress connection-establishment phase after DNS/TCP (proxy tunnel, TLS, HTTP/2 preface/SETTINGS, WebSocket upgrade, SOCKS5 UDP associate) completes under a configurable bound; expiry is a retryable `connect` failure naming the phase, and a stalled connection is never pooled. | ADR-0040 |
 | `[INV-EGRESS-01..03]` | Confinement is checked before connect; private, loopback, link-local and metadata ranges are refused. | ADR-0002 |
-| `[INV-TLS-01..03]` | TLS identity is explicit data (`TlsProfile`); presets keep a stable wire identity across dependency updates. | ADR-0004 |
+| `[INV-TLS-01..03]` | TLS identity is explicit data (`TlsProfile`); presets keep a stable wire identity across dependency updates. | ADR-0004, ADR-0045 (the profile is wire data and the presets are owned-engine shapes) |
+| `[INV-TLS-04..09]` | The egress TCP-TLS path is owned (`netune-tls`, rustls is a dev-only oracle there); primitives come only from `aws-lc`; the offer equals the capability set; the hello is reproducible from profile plus seed; the engine owns no socket and records handshake facts; engine choice is connection identity. | ADR-0045 |
+| `[INV-TLS-10]` | A preset named for a specific product traffic path offers exactly that path's ALPN and pairs through the registry with the H2 identity of the same path. | ADR-0047 |
+| `[INV-TLS-11]` | Declarative `ClientHelloBlueprint` materialization is deterministic from blueprint plus per-connection seeds (GREASE values, extension permutation, random, session id); fixed seeds yield byte-identical ClientHello bytes. | ADR-0048 |
 | `[INV-CUSTOM-01..03]` | Wire determinism: configured-or-documented socket/DNS/segmentation behaviour; no lowercasing of raw headers. | ADR-0006 |
 | `[INV-WS-01..08]` | Client-role exclusivity of the WebSocket transport surface in `netune` (the workspace-wide prohibition on inbound code was retired by ADR-0011), masking direction, bounded reassembly, frame-level observability, no pooling, proven liveness, incremental UTF-8, differential parity. Directional exclusivity is now enforced per orchestrator by `[INV-SERVER-01]`. | ADR-0007, ADR-0011 |
 | `[INV-HTTP2-01]` | HTTP/2 framing and HPACK live in `netune-http2`, never behind a feature flag of `netune-http1`. | ADR-0003 |
@@ -89,6 +93,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-QUIC-23]` | A failed incoming handshake is reported exactly once as `AcceptError::Handshake`, never as a connection and never as endpoint shutdown. | ADR-0035 |
 | `[INV-QUIC-24]` | A path MTU is raised only by an ACKed probe packet; probes never carry application frames, never exceed the local/peer ceiling, and a lost/black-holed probe leaves the validated MTU unchanged. | ADR-0036 |
 | `[INV-QUIC-25]` | A server Initial uses the client's source connection ID as its destination CID, including a zero-length value, and chooses an independent non-zero local source CID. | ADR-0038 |
+| `[INV-TEST-01..04]` | Nextest owns executable-test discovery and policy (doctests are the one `cargo test` gate); test infrastructure is dev-only; the root harness is test-only with exactly one integration and one e2e entry point; external tests compile one binary per tier. | ADR-0044 |
 
 The authoritative wording of each invariant lives in its ADR. This table is an index, not a second source of truth; if the two disagree, the ADR wins and this table is corrected.
 

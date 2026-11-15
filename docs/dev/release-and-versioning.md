@@ -72,7 +72,7 @@ The crates were published to crates.io once (`0.0.1` for five of them, `0.0.2` f
 
    ```bash
    cargo check --all-targets --all-features
-   cargo nextest run
+   cargo nextest run --workspace
    cargo clippy --all-targets --all-features -- -D warnings
    cargo fmt --check
    ```

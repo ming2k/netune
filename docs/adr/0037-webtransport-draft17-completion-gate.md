@@ -76,7 +76,7 @@ hold:
 5. **Security.** `:authority`, `:scheme`, `:path`, Origin and Session ID
    validation are tested against spoofed and replayed inputs.
 
-Each gate is an independent test suite in `crates/netune-webtransport/tests/`;
+Each gate is an independent test suite in `tests/e2e/webtransport_session.rs` and `tests/e2e/webtransport_security.rs`;
 a gate that cannot run in CI is not a gate.
 
 ## Boundaries

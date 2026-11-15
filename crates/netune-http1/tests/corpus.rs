@@ -1,11 +1,12 @@
 //! Framing corpus: every case here is a shape a real provider or proxy sends.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-mod support;
 
 use http::{HeaderMap, Method, StatusCode};
 use netune_http1::{BodyKind, Http1Reader, HttpError, Limits};
-use support::{CHUNKED_RESPONSE, CONTENT_LENGTH_RESPONSE, ScriptedIo, UNTIL_CLOSE_RESPONSE};
+use netune_test_support::{
+    CHUNKED_RESPONSE, CONTENT_LENGTH_RESPONSE, ScriptedIo, UNTIL_CLOSE_RESPONSE,
+};
 
 async fn read_all(
     data: &[u8],

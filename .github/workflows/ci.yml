@@ -47,7 +47,7 @@ jobs:
       # The default build must not contain the transmit path; the inject
       # build must compile and pass. Both are asserted by running the suite
       # in both configurations.
-      - run: cargo nextest run
+      - run: cargo nextest run --workspace
         if: matrix.features == ''
       # Additive capabilities must remain optional: the trace crate builds and
       # tests without its default `ja4` feature, and no observation/identity
@@ -62,10 +62,10 @@ jobs:
         if: matrix.features == 'netune-probe/inject'
       # The `all-features` posture is where opt-in code is *executed*, not merely
       # compiled: `netune-server`'s `tls` suite lives behind the non-default
-      # `tls` feature, so `cargo nextest run` never runs it and the lint/doc
+      # `tls` feature, so `cargo nextest run --workspace` never runs it and the lint/doc
       # jobs compile it without executing. Running the whole workspace with
       # every feature on is the only gate that proves those paths work.
-      - run: cargo nextest run --all-features
+      - run: cargo nextest run --workspace --all-features
         if: matrix.features == 'all-features'
   webtransport-interop:
     name: WebTransport non-Rust interop (Go)

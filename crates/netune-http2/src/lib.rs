@@ -68,7 +68,9 @@ pub use connection::{
     MIN_MAX_FRAME_SIZE, PeerSettings, Role, error_code,
 };
 pub use error::H2Error;
-pub use fingerprint::{H2ConnectionProfile, H2Fingerprint, H2RequestProfile, PseudoHeaderOrder};
+pub use fingerprint::{
+    H2ConnectionProfile, H2Fingerprint, H2RequestProfile, PseudoHeaderOrder, RegularHeaderOrder,
+};
 pub use frame::{
     FRAME_CONTINUATION, FRAME_DATA, FRAME_GOAWAY, FRAME_HEADERS, FRAME_PING, FRAME_PRIORITY,
     FRAME_PUSH_PROMISE, FRAME_RST_STREAM, FRAME_SETTINGS, FRAME_WINDOW_UPDATE, Frame, FrameHeader,

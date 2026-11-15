@@ -15,7 +15,7 @@ Run these before every commit. They are the same commands CI runs.
 │ 1. Compilation   cargo check --all-targets --all-features          │
 │                  cargo check --all-targets --no-default-features   │
 ├────────────────────────────────────────────────────────────────────┤
-│ 2. Tests         cargo nextest run                                 │
+│ 2. Tests         cargo nextest run --workspace                     │
 │                  cargo nextest run -p netune-probe --features inject│
 ├────────────────────────────────────────────────────────────────────┤
 │ 3. Lints         cargo clippy --all-targets --all-features \       │
@@ -53,6 +53,8 @@ separately so both privilege postures are proven rather than assumed.
 | `ARCH-008` | A transmit path that compiles without `--features inject`. |
 | `ARCH-009` | A workspace `path` dependency with no `version`, or the wrong one. |
 | `ARCH-011` | A production crate emitting `EventKind::Error` directly instead of through `record_error`. |
+| `ARCH-012` | A root test harness that grows a library, a binary, production dependencies, or loses an integration/e2e entry point. |
+| `ARCH-013` | A third-party TLS engine outside the ADR-0015/0028 paths (`netune-tls` is owned; ADR-0045). |
 
 The allowed edges live in one table inside that script, because the real graph
 is not a flat ring: `netune-io` depends on `netune-trace`, since `TimedIo`
@@ -104,7 +106,7 @@ unfinished one.
 Before a version bump or tag:
 
 1. `cargo check --all-targets --all-features` — zero warnings.
-2. `cargo nextest run` and the `inject` suite — all pass.
+2. `cargo nextest run --workspace` and the `inject` suite — all pass.
 3. `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --check`.
 4. `cargo doc --no-deps --all-features` with `RUSTDOCFLAGS="-D warnings"`.
 5. `python3 .github/scripts/check-docs.py` — clean.

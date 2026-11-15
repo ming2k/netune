@@ -101,7 +101,7 @@ per-read/per-write lock is paid on the hot path. `daer` today works around this 
   netune a transport that cannot present the identity its callers select, which is the
   failure mode ADR-0004 exists to prevent for TCP.
 - `TraceSink` makes `Recorder::push` a branch plus a virtual call when a sink is present. The
-  cost is bounded and measurable (`tests/overhead.rs` is the harness); the alternative — a
+  cost is bounded and measurable (`tests/integration/overhead.rs` is the harness); the alternative — a
   consumer reimplementing the event vocabulary — costs correctness instead.
 - The ring buffer stays. A sink that misses events because the consumer is slow must not
   lose the window that `RequestTrace` reports, so the two are independent: the sink is

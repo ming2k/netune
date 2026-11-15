@@ -21,7 +21,8 @@
 ## 3. Engineering Discipline
 
 - **Mechanisms over exhortations.** Enforce boundaries with crate rules, private fields, feature gates, and deterministic tests — not with comments.
-- **Verify before declaring done.** Run `cargo check --all-targets --all-features`, `cargo test --workspace --all-features`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, and the integrity scripts in `.github/scripts/`.
+- **Verify before declaring done.** Run `cargo check --all-targets --all-features`, `cargo nextest run --workspace --all-features` (doctests separately via `cargo test --doc --workspace --all-features`), `cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, and the integrity scripts in `.github/scripts/`.
+- **Nextest owns testing; xtask does not.** Never add an `xtask test` wrapper around discovery, filtering, retries or timeouts. Those are nextest's job, configured once in `.config/nextest.toml`.
 - **Clean lineage.** Reference only ADRs that exist in `docs/adr/0001`+. Never cite external decision numbers.
 - **Documentation has a place.** User-facing docs live in `docs/{tutorials,how-to,reference,explanation}/`; contributor docs in `docs/dev/`; no new Markdown files at the repository root.
 

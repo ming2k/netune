@@ -37,9 +37,27 @@ This document codifies the workspace topology, dependency direction, and non-neg
 │  is_public_ip + EgressConfinement: the one confinement policy│
 │  every outbound transport (TCP, UDP, QUIC) shares            │
 └──────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│ netune-tls (owned egress TLS engine leaf, ADR-0045)          │
+│  byte-exact ClientHello, TLS 1.2/1.3 handshake state machine,│
+│  record layer; primitives from aws-lc; rustls is a dev-only  │
+│  differential oracle; drives no socket of its own            │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-**Dependency rule**: no leaf depends on an orchestrator; `netune` and `netune-server` never depend on each other (`[INV-SERVER-01]`, ADR-0011); `netune-probe` depends on no workspace crate at all. Leaves may depend on other leaves only along the edges the topology table permits (`netune-io → netune-trace`; `netune-diagnostics → netune-trace`; `netune-quic → netune-egress, netune-io, netune-trace`; `netune-http3 → netune-quic, netune-trace`; `netune-webtransport → netune-http3, netune-quic`; `netune-server → netune-http3, netune-quic` for the optional H3 ingress). Any edge not in that table — a leaf importing an orchestrator, an orchestrator importing the other orchestrator, or a cycle — is an architectural inversion and is rejected by the gate `.github/scripts/check-architecture.py`.
+**Dependency rule**: no leaf depends on an orchestrator; `netune` and `netune-server` never depend on each other (`[INV-SERVER-01]`, ADR-0011); `netune-probe` depends on no workspace crate at all. Leaves may depend on other leaves only along the edges the topology table permits (`netune-io → netune-trace`; `netune-diagnostics → netune-trace`; `netune-quic → netune-egress, netune-io, netune-trace`; `netune-http3 → netune-quic, netune-trace`; `netune-webtransport → netune-http3, netune-quic`; `netune-tls → netune-trace`; `netune-server → netune-http3, netune-quic` for the optional H3 ingress). Any edge not in that table — a leaf importing an orchestrator, an orchestrator importing the other orchestrator, or a cycle — is an architectural inversion and is rejected by the gate `.github/scripts/check-architecture.py`.
+
+`netune-test-support` is a separate, test-only leaf: scripted I/O, loopback
+pairs and self-signed TLS identities shared by the suites. It depends on no
+workspace crate, is marked `publish = false`, and may only appear under
+`[dev-dependencies]`; its empty edge set makes a production dependency an
+`ARCH-001` violation. The workspace root is the complementary test-only
+package (`netune-workspace-tests`) that owns `tests/integration` and
+`tests/e2e`; `ARCH-012` rejects a library, binary or production dependency
+there, and requires both external entry points to exist. The runner, fixture
+and entry-point rules are [ADR-0044](../adr/0044-test-architecture-nextest-and-tiered-entry-points.md)
+(`[INV-TEST-01..04]`).
 
 ### 1.1 Diagnostic Spine
 
@@ -63,7 +81,7 @@ This document codifies the workspace topology, dependency direction, and non-neg
 ### 2.3 Directional Role Exclusivity (ADR-0007, ADR-0011)
 
 - **Red-line**: each orchestrator exposes one direction of travel. `netune` opens sockets outward and never listens; `netune-server` accepts inward and never dials a peer on a caller's behalf. No listening socket, accept loop or server session table exists in `netune`; no egress connector, pool or `EgressConfinement` call exists in `netune-server`.
-- **Enforcement**: `netune` exposes no `listen` and no `TcpListener`; `netune-server`'s dependency list contains no egress crate, and `cargo tree` proves it (`[INV-SERVER-01]`). Mock origins in `crates/netune/tests/` remain the client suite's own fixtures; `netune-server` is tested by its own suite and by `crates/netune-server/tests/`.
+- **Enforcement**: `netune` exposes no `listen` and no `TcpListener`; `netune-server`'s dependency list contains no egress crate, and `cargo tree` proves it (`[INV-SERVER-01]`). Mock origins in `tests/integration/` and `tests/e2e/` remain the client suite's own fixtures; `netune-server` is tested by its own unit suite and by the same external tiers.
 
 ### 2.3.1 Codec Role Symmetry (ADR-0011, ADR-0012)
 
@@ -92,7 +110,7 @@ This document codifies the workspace topology, dependency direction, and non-neg
 
 - **Red-line**: HTTP/3 ingress is an `H3Server` bound to a QUIC endpoint, not a mode of the TCP `Server`. The H3 state machine lives in `netune-http3`; the orchestrator owns admission, handler dispatch, bounds, trace and drain.
 - **Exchange identity**: H3 wire stream `0` is a valid request, so ingress traces use non-zero exchange ids and record the wire stream id in the H3 start event (`[INV-SERVER-22..24]`).
-- **Enforcement**: `crates/netune-server/src/h3.rs`, `crates/netune-http3/src/server.rs`, and `crates/netune-server/tests/http3_ingress.rs`.
+- **Enforcement**: `crates/netune-server/src/h3.rs`, `crates/netune-http3/src/server.rs`, and `tests/e2e/http3_ingress.rs`.
 
 ### 2.4.3 Owned QUIC (ADR-0028)
 
@@ -105,11 +123,16 @@ This document codifies the workspace topology, dependency direction, and non-neg
 - **Consumer seams**: a per-connection `QuicUdpSocketFactory` (invoked after confinement and before the first Initial), a per-connection `CongestionControllerFactory`, `QuicProfile.keep_alive`, RFC 9000 idle timeout and verified `peer_certificates` are the only product extension points. They never grant flow-control credit, change packet sizing or bypass TLS verification (ADR-0034).
 - **Handshake failures are values**: `Endpoint::accept` separates `EndpointClosed` from `Handshake`; a failed peer is observable and non-fatal, and `H3Server` publishes it to a bounded observer channel instead of stopping the listener (ADR-0035, `[INV-QUIC-23]`, `[INV-SERVER-25]`).
 - **Path MTU is measured, not assumed**: packets start at the 1200-byte floor; only an ACKed probe may raise `validated_mtu`, and probes never carry application frames (ADR-0036, `[INV-QUIC-24]`).
-- **Enforcement**: `crates/netune-quic/src/{wire,crypto,owned}/`, `ARCH-005` with an empty `ALLOWED_RUNTIME_DEPS`, the quinn differential tests, and the consumer-seam tests in `crates/netune-quic/tests/owned_server_e2e.rs`.
+- **Enforcement**: `crates/netune-quic/src/{wire,crypto,owned}/`, `ARCH-005` with an empty `ALLOWED_RUNTIME_DEPS`, the quinn differential tests, and the consumer-seam tests in `tests/e2e/quic_owned_server.rs`.
+
+### 2.4.4 Owned Egress TLS (ADR-0045)
+
+- **Red-line**: the egress TCP-TLS production path is owned by `netune-tls`: ClientHello serialization, TLS 1.2/1.3 handshake state machine and record layer are workspace code; the offered cipher/group/signature sets equal the implemented capability set; every cryptographic primitive comes from `aws-lc` (`rustls`/`tokio-rustls` are dev-only oracles on this path until the migration removes them from `netune`'s dependency set; `netune-server` (ADR-0015) and `netune-quic` (ADR-0028) keep their ratification).
+- **Enforcement**: `[INV-TLS-04..07]`; `check-architecture.py` rejects `rustls`/`tokio-rustls` in any crate not whitelisted for ADR-0015/0028, and never whitelists `netune-tls`; the golden corpus in `crates/netune-tls` pins the measured hello bytes.
 
 ### 2.5 Codecs Never Open Sockets
 
-- **Red-line**: `netune-http1`, `netune-http2` and `netune-ws` operate on caller-provided byte buffers or `AsyncRead`/`AsyncWrite` handles. They never resolve, connect, listen, or own a socket; transport policy belongs to an orchestrator.
+- **Red-line**: `netune-http1`, `netune-http2`, `netune-ws` and `netune-tls` operate on caller-provided byte buffers or `AsyncRead`/`AsyncWrite` handles. They never resolve, connect, listen, or own a socket; transport policy belongs to an orchestrator.
 - **Enforcement**: the codec crates have no DNS/TCP/listen entry points and depend on no orchestrator.
 
 ### 2.5.1 A Multiplexed Trace Carries Stream Identity (ADR-0012)

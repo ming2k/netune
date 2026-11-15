@@ -6,14 +6,15 @@
 //! A divergence here is a release blocker, not a flake.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-mod support;
 
 use http::{HeaderMap, Method, StatusCode};
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Bytes as HyperBytes;
 use hyper_util::rt::TokioIo;
 use netune_http1::Http1Reader;
-use support::{CHUNKED_RESPONSE, CONTENT_LENGTH_RESPONSE, ScriptedIo, UNTIL_CLOSE_RESPONSE};
+use netune_test_support::{
+    CHUNKED_RESPONSE, CONTENT_LENGTH_RESPONSE, ScriptedIo, UNTIL_CLOSE_RESPONSE,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Parse `corpus` with hyper's client over a duplex stream.

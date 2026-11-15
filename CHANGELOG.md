@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Owned egress TLS engine begins (ADR-0045).** New leaf crate `netune-tls`
+  owns the egress TCP-TLS handshake: the TLS wire constants and framing
+  (`wire`), a typed, byte-exact ClientHello model with pure serialization
+  (`hello`), the RFC 8446 §7.1 key schedule (`key_schedule`), the TLS 1.3
+  AEAD record layer (`record`), all seven key-exchange groups with RFC 10024
+  hybrid combiners (`key_exchange`), and the sans-IO TLS 1.3 client
+  state machine (`handshake`) with HelloRetryRequest, a mandatory
+  `ServerCertVerifier` trust seam, CertificateVerify and Finished
+  verification, and the full TLS 1.2 client handshake (ten completable
+  suites: six AEAD differential against a TLS-1.2-only `rustls` server under
+  both PRF hashes, four CBC+HMAC-SHA1 against openssl-derived goldens via
+  the `aws-lc-sys` EVP interface) with the extended master secret as the
+  mandatory derivation, plus the engine seam in `netune` (step 5):
+  `Target::with_tls_engine` selects the engine per request, the choice
+  enters the connection identity and pool key ([`INV-TLS-09`]), the
+  `netune-tls` async driver wraps the established connection in
+  `AsyncRead`/`AsyncWrite`, and the profile's lists map onto the Go-shaped
+  hello with refusals for unmapped values — exercised end to end in the
+  integration tier against `rustls` peers in both versions. Acceptance is
+  golden corpora: the `go_identity`
+  hello reproduces the measured 1.5.9 JA3 (`03117a8ed39ef02427ebbc39f121275c`)
+  and both measured JA4 fingerprints; every intermediate key-schedule value
+  and three record ciphertexts reproduce RFC 8448 §3 byte-for-byte; and the
+  owned handshakes complete live differential runs against `rustls` servers
+  in both versions — hybrid agreement, ALPN negotiation and an HTTP
+  request/response over the owned record layer. Cryptographic primitives
+  come from `aws-lc`;
+  `rustls` is a dev-only oracle on this path (`[INV-TLS-04..09]`), and the
+  architecture gate rejects a third-party TLS engine outside the
+  ADR-0015/0028 paths (`ARCH-013`).
+- **Antigravity CLI dual identity (ADR-0047).** The single `antigravity-cli`
+  preset splits into `antigravity-cli-unary` (ALPN `http/1.1` only) and
+  `antigravity-cli-stream` (`h2, http/1.1`, paired with the `go-nethttp` H2
+  fingerprint through the registry); a path-named preset offers exactly that
+  path's ALPN (`[INV-TLS-10]`).
+
+### Changed
+
+- **Breaking:** `Preset::AntigravityCli` and the name `"antigravity-cli"` are
+  removed; use `AntigravityCliStream` / `antigravity-cli-stream` or
+  `AntigravityCliUnary` / `antigravity-cli-unary`
+  ([ADR-0047](docs/adr/0047-antigravity-cli-dual-identity.md)). The `0.0.x`
+  line is already patch-breaking by policy.
+- **Breaking: HTTP/2 regular-header order is named policy (ADR-0046).**
+  `H2RequestProfile` gains `regular_header_order`
+  (`CallerOrder` / `GoMapRandom` / `Fixed`), `order_request_headers` takes the
+  connection seed, and `H2Fingerprint::go()` selects `GoMapRandom` with a
+  per-request seed mixed from the stream id — the go-nethttp identity no
+  longer presents the fixed regular-header order that Go never has
+  (`[INV-CUSTOM-21..22]`).
+- **Breaking:** `H2ClientConnection::handshake` draws a per-connection
+  regular-header order seed from process entropy;
+  `handshake_with_seed` makes the wire sequence reproducible.
+- **Fixed:** `netune_trace::ja3` spelled the JA3 string with the field and
+  list separators inverted (fields dash-joined, lists comma-joined); it now
+  produces the standard JA3 format — fields comma-joined, values within a
+  field dash-joined — so the MD5 of a hello matches the historical tooling
+  and the measured corpus instead of an inverted private convention.
+
+### Changed
+
+- **Test architecture.** `cargo nextest` is the one test runner, configured in
+  `.config/nextest.toml`; the only remaining `cargo test` command is the doctest
+  gate, which nextest cannot execute. Shared fixtures moved to the dev-only
+  `netune-test-support` crate, external integration/e2e tests moved under the
+  root `tests/` harness with one entry point per tier, and oversized unit-test
+  modules moved beside their source as `src/<module>/tests.rs`. No public API
+  changes.
+
 ## [0.0.28] - 2026-11-12
 
 ### Added

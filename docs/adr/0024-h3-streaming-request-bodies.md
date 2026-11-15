@@ -78,7 +78,7 @@ still knows how to read one.
 - **`[INV-H3-01]` Request Streaming Is the Primitive**: the H3 client must not
   implement a second buffered request path. `send` composes `open_request`, and
   the integration test writes two body chunks before `finish`. *Enforced by*:
-  the public `H3RequestBody` API and `http3_e2e`.
+  the public `H3RequestBody` API and `tests/e2e/http3_client.rs`.
 
 - **`[INV-H3-02]` Exchange Identity Starts at Open**: `H3StreamStart` is recorded
   before any body byte, and the exchange id is the one carried by the response

@@ -302,6 +302,11 @@ impl EvasionPolicy {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConnectionIdentity {
     pub tls_profile: Option<String>,
+    /// The TLS engine that handshakes this connection: `None` is the default
+    /// rustls path; a name selects a registered engine (the owned
+    /// `netune-tls` engine). Engine choice is connection identity
+    /// ([`INV-TLS-09`]).
+    pub tls_engine: Option<String>,
     pub tls_server_name: Option<String>,
     pub evasion: EvasionPolicy,
     pub h2_profile: Option<String>,

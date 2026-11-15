@@ -25,14 +25,74 @@ This guide defines how `netune` is tested, what each test tier is for, and the r
 
 | Tier | Location | Runs against |
 | :--- | :--- | :--- |
-| 1. Unit | `#[cfg(test)]` modules in `src/` | Pure functions, state machines |
-| 2. Differential | `crates/*/tests/differential.rs`, `tests/golden.rs`, `crates/netune-http3/tests/h3_interop.rs`, `crates/netune-quic/tests/owned_*` | A battle-tested oracle as a **dev-dependency only**; H3 against `h3`/`h3-quinn` and QUIC against `quinn` in both directions |
-| 3. Integration | `crates/netune/tests/*.rs`, `crates/netune-server/tests/{ingress,http3_ingress}.rs`, `crates/netune-http3/tests/http3_e2e.rs` | Loopback mock origins, TLS fixtures, `FaultIo`; ingress shedding, slow-peer bounds, drain; H3 streaming upload, dynamic QPACK and per-exchange trace |
-| 4. End-to-end | `crates/netune/tests/{e2e,tls_e2e,ws,ws_session}.rs`, `crates/netune-server/tests/interop.rs`, `crates/netune-server/tests/http3_ingress.rs` | A full client lifecycle over a real socket; our H1/H2 client against our server; our HTTP/3 client against `H3Server` over a real QUIC handshake |
+| 1. Unit | `#[cfg(test)]` inline modules in `src/`, or `src/<module>/tests.rs` when the module's tests outgrew the file | Pure functions, state machines |
+| 2. Differential | `crates/*/tests/differential.rs`, `crates/*/tests/golden.rs`, `crates/netune-http3/tests/h3_interop.rs`, `crates/netune-quic/tests/owned_handshake.rs` | A battle-tested oracle as a **dev-dependency only**; H3 against `h3`/`h3-quinn` and QUIC against `quinn` in both directions |
+| 3. Integration | `tests/integration/main.rs` plus its modules | Loopback mock origins, TLS fixtures, `FaultIo`; ingress shedding, slow-peer bounds, drain; codec-to-orchestrator integration |
+| 4. End-to-end | `tests/e2e/main.rs` plus its modules | A full client lifecycle over a real socket; our H1/H2/H3 client against our server; QUIC and WebTransport sessions over a real handshake |
 
-The WebSocket guide's code samples are also compiled and executed by `crates/netune/tests/guide_examples.rs`, so a drifting guide fails CI instead of misleading readers.
+The WebSocket guide's code samples are also compiled and executed by `tests/e2e/websocket_guide.rs`, so a drifting guide fails CI instead of misleading readers. The HTTP guide has the equivalent guard in `tests/integration/serve_http_guide.rs`.
 
-`crates/netune-server/tests/interop.rs` is the only suite that may see both orchestrators, and it sees `netune` as a **dev-dependency**. It asserts two things at once: that a request completes between our own ends, and that neither orchestrator's production manifest names the other (`[INV-SERVER-01]`).
+`tests/e2e/interop.rs` is the only suite that may see both orchestrators, and it sees `netune` as a **dev-dependency**. It asserts two things at once: that a request completes between our own ends, and that neither orchestrator's production manifest names the other (`[INV-SERVER-01]`).
+
+### 1.1 Unit-test placement
+
+Inline is the default. A small or medium module keeps its tests beside the
+code:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // ...
+}
+```
+
+A test module moves to a sibling directory when the tests, not the business
+logic, are what made the file large. The working threshold is **at least 150
+lines of test code and at least 30% of the file**; a 2,000-line state machine
+with 200 lines of tests stays inline, because the size is the behaviour it
+implements. A moved module keeps the same access it had:
+
+```text
+src/pool.rs                 →  src/pool/tests.rs
+src/http2/client.rs         →  src/http2/client/tests.rs
+src/message.rs (two suites) →  src/message/tests/{mod.rs,utf8.rs,assembler.rs}
+```
+
+The declaration becomes `#[cfg(test)] mod tests;`, so `use super::*` still
+names the production module and nothing has to become public for a test.
+
+### 1.2 Shared test infrastructure
+
+`crates/netune-test-support` is the one home for fixtures that are not about a
+single crate: scripted byte transports, loopback pairs, HTTP/1.1 wire constants
+and generated self-signed TLS identities. It is a `dev-dependency` everywhere
+it appears, declares `publish = false`, and depends on no workspace crate. The
+architecture gate (`ARCH-001`) rejects any production dependency on it, so it
+cannot drift into the shipping graph. A fixture that encodes transport policy
+belongs in the owning crate's tests instead. The rule is
+[ADR-0044](../adr/0044-test-architecture-nextest-and-tiered-entry-points.md)
+(`[INV-TEST-02]`).
+
+### 1.3 External test entry points
+
+The workspace root is a test-only package (`netune-workspace-tests`) because a
+virtual workspace cannot own a `tests/` directory:
+
+```text
+tests/
+  common/               shared fixtures; no #[test] functions
+  integration/main.rs   one binary for all integration modules
+  e2e/main.rs           one binary for all end-to-end modules
+```
+
+The two entry points are deliberate compilation units. A new scenario is a
+module added to the matching `main.rs`; it is compiled and linked with its tier
+instead of becoming another executable. `tests/common` is included by both
+entry points with `#[path = "../common/mod.rs"]`, so a helper is written once.
+The root package has only dev-dependencies, no library and no binary; `ARCH-012`
+enforces that shape, and also requires both entry points to exist
+(`[INV-TEST-03..04]`, [ADR-0044](../adr/0044-test-architecture-nextest-and-tiered-entry-points.md)).
 
 ---
 
@@ -82,35 +142,48 @@ their error vocabulary to the registry.
 
 ## 4. Running the Suite
 
+The workspace root is a test-only package, so a bare `cargo nextest run` would
+select only the root harness. `--workspace` is the full suite, and every gate
+uses it explicitly.
+
 ```bash
 # Everything, default features
-cargo nextest run
+cargo nextest run --workspace
 
 # The privileged transmission path, compiled and tested explicitly
 cargo nextest run -p netune-probe --features inject
 
-# A single crate
+# A single crate's unit and differential suites
 cargo nextest run -p netune-ws
 
-# Plain cargo, if nextest is unavailable
-cargo test --workspace
+# One external tier, complete feature posture
+cargo nextest run -p netune-workspace-tests --test integration --all-features
+cargo nextest run -p netune-workspace-tests --test e2e --all-features
 
 # H3/QPACK differential interop against the dev-only h3 oracle
-cargo test -p netune-http3 --test h3_interop
+cargo nextest run -p netune-http3 --test h3_interop
 
 # WebTransport admission, Origin, session-ID and control adversarial suite
-cargo test -p netune-webtransport --test security
+cargo nextest run -p netune-workspace-tests -E 'test(webtransport_security::)'
 
 # Owned QUIC engine (ADR-0028): wire, packet protection, handshake and streams
-cargo test -p netune-quic
+cargo nextest run -p netune-quic
+
+# Doctests: nextest does not execute them, so this one gate stays on cargo
+cargo test --doc --workspace --all-features
 
 # Deterministic zero-cost gate (requires valgrind + gungraun-runner)
 cargo bench -p netune --bench zero_cost
 ```
 
-The benchmark gate is intentionally separate from `cargo test`: it measures
-instructions, not wall time, and fails a regression against a baseline generated
-in the same CI run (`ir=0%`).
+`cargo nextest` is the test runner; there is no `xtask test` wrapper. Test
+discovery, filtering, retries and timeouts belong to nextest, configured once
+in `.config/nextest.toml`. A wrapper that reimplemented them would be a second,
+weaker test runner.
+
+The benchmark gate is intentionally separate from `cargo nextest run --workspace`: it
+measures instructions, not wall time, and fails a regression against a baseline
+generated in the same CI run (`ir=0%`).
 
 ### 4.1 Independent WebTransport interop
 
@@ -141,8 +214,9 @@ scheduled `Fuzz and soak` workflow, not on every pull request. The long-running
 QUIC echo/keep-alive test is ignored by default and is run by the same workflow:
 
 ```bash
-cargo test -p netune-quic --test owned_server_e2e \
-  soak_echoes_many_streams_under_keepalive -- --ignored --exact
+cargo nextest run -p netune-workspace-tests \
+  -E 'test(soak_echoes_many_streams_under_keepalive)' \
+  --run-ignored ignored-only --profile soak
 ```
 
 A fuzz finding is fixed with a minimal reproducer in the owning crate's test
@@ -154,9 +228,11 @@ CI additionally sets `RUSTFLAGS="-D warnings"`, so warnings are failures on `mai
 
 ## 5. Adding a Test
 
-- Unit behaviour → a `#[cfg(test)]` module beside the code.
+- Unit behaviour → a `#[cfg(test)]` module beside the code, or `src/<module>/tests.rs` when section 1.1's threshold applies.
+- A fixture shared by unrelated crates → `netune-test-support`, never a copy in each suite.
 - A decoder or encoder that has a spec → add a differential or golden case, not only a hand-written expectation.
-- A transport failure mode → a `FaultIo` scenario in `crates/netune/tests/`, asserting both the error variant and the recorded events.
+- A transport failure mode → a module under `tests/integration/`, asserting both the error variant and the recorded events.
+- A full lifecycle over a real socket → a module under `tests/e2e/`.
 - A documentation snippet → a ```` ```rust ```` block in the document itself. It is compiled automatically (section 6).
 
 ---
@@ -170,7 +246,9 @@ fail, so the examples are compiled as doctests:
   `docs/{tutorials,how-to}/` with `#[doc = include_str!(…)]`, gated on
   `#[cfg(doctest)]`. Its `rust` blocks become real doctests.
 - CI runs `cargo test --doc --workspace --all-features`, so a guide that names a
-  type, method, or field that does not exist is a build failure.
+  type, method, or field that does not exist is a build failure. This is the one
+  test tier that stays on `cargo test`: nextest does not execute doctests, and
+  wrapping them in a second runner would only hide that fact.
 
 The fencing rules that follow from this:
 
@@ -182,7 +260,7 @@ The fencing rules that follow from this:
 
 Never use `ignore`: an ignored block is a block nobody checks, which is how the
 examples drifted from the API in the first place. `docs/how-to/websocket-client.md`
-additionally has an executed transcription in `tests/guide_examples.rs` — that
+additionally has an executed transcription in `tests/e2e/websocket_guide.rs` — that
 one proves the *behaviour* the text describes, not just that it compiles.
 
 ---

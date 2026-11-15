@@ -40,7 +40,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ## 3. Verify Before Sending a Change
 
 ```bash
-cargo nextest run
+# `--workspace` is required: the root itself is the external-test package
+cargo nextest run --workspace
 cargo nextest run -p netune-probe --features inject
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
@@ -59,7 +60,9 @@ These are the same gates CI runs; see [`workflow.md`](workflow.md) for the full 
 | `crates/netune` | Transport orchestration and policy (the only crate that composes the stack). |
 | `crates/netune-http1`, `netune-http2`, `netune-ws` | Wire codecs; they never open sockets. |
 | `crates/netune-trace` | Trace model, pure timing derivations, JA3/JA4. |
+| `crates/netune-test-support` | Test-only fixtures; a `dev-dependency` everywhere, never in a shipping graph. |
 | `crates/netune-probe` | L2 frame parse/build; transmit only behind `--features inject`. |
+| `tests/integration`, `tests/e2e` | The two workspace-level external-test entry points and their module directories. |
 | `docs/adr/` | Ratified decisions. |
 | `docs/dev/` | Contributor docs, setup, testing, architecture, invariants, and workflow. |
 | `docs/dev/standards/` | Engineering documentation & collaboration meta-standards. |

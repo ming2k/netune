@@ -8,7 +8,7 @@ The transport is **client-only** by design ([ADR-0007](../adr/0007-owned-client-
 there is no listening or accept surface anywhere in the workspace.
 
 > **Every snippet on this page is executed by the test suite**
-> (`crates/netune/tests/guide_examples.rs`), so the code cannot silently
+> (`tests/e2e/websocket_guide.rs`), so the code cannot silently
 > drift from the real API.
 
 ---

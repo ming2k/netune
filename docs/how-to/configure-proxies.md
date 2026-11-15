@@ -28,7 +28,7 @@ A proxy is a `Connector` wrapper: the inner connector dials the **proxy**, and
 the wrapper opens a tunnel to the target inside it.
 
 ```rust,no_run
-use netune::{Client, ClientConfig, Pool, Proxy, ProxyConnector, RequestHead, Target, TcpConnector, TlsConnector, TraceConfig};
+use netune::{Client, ClientConfig, Pool, Proxy, ProxyConnector, RequestHead, Target, TcpConnector, TlsRouterConnector, TraceConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. For an HTTPS target, run TLS *inside* the tunnel, so the target's SNI
     //    and certificate validation are unchanged by the proxy.
-    let tls_connector = TlsConnector::platform(proxy_connector)?;
+    let tls_connector = TlsRouterConnector::new(proxy_connector);
     let client = Client::new(tls_connector, Pool::default(), ClientConfig::default());
 
     // 4. The target is the origin, not the proxy.

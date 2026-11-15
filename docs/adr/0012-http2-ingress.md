@@ -104,7 +104,7 @@ repository:
   its first bytes or its ALPN result, and never upgraded in place. A listener that does not offer the
   protocol a peer asked for refuses it (`505`) rather than downgrading. *Enforced by*:
   `the first bytes select the protocol` and `http2_is_refused_when_the_listener_does_not_offer_it` in
-  `crates/netune-server/tests/production.rs`; there is no upgrade path in the accept loop.
+  `tests/integration/production.rs`; there is no upgrade path in the accept loop.
 - **`[INV-SERVER-10]` A Multiplexed Log Is Split By Stream**: a trace whose events carry
   `stream != 0` is grouped by that field, never by position, and a connection-level failure is
   copied into every sub-log it ended. *Enforced by*: `split_multiplexed` in

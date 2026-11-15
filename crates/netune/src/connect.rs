@@ -97,6 +97,19 @@ impl Target {
         self.identity.tls_server_name.as_deref()
     }
 
+    /// Select the TLS engine that handshakes this target: a name registered
+    /// with the connector's engine registry. Engine choice is connection
+    /// identity ([`INV-TLS-09`]): two engines are never pooled as one.
+    pub fn with_tls_engine(mut self, engine: impl Into<String>) -> Self {
+        self.identity.tls_engine = Some(engine.into());
+        self
+    }
+
+    /// The TLS engine name requested for this target, if any.
+    pub fn tls_engine(&self) -> Option<&str> {
+        self.identity.tls_engine.as_deref()
+    }
+
     /// The wire-shaping policy requested for this target.
     pub fn evasion(&self) -> EvasionPolicy {
         self.identity.evasion

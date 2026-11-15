@@ -52,11 +52,9 @@ netune-io = { path = "../netune-io", version = "0.0.28" }
 netune-quic = { path = "../netune-quic", version = "0.0.28", optional = true }
 netune-trace = { path = "../netune-trace", version = "0.0.28" }
 netune-ws = { path = "../netune-ws", version = "0.0.28", optional = true }
-rustls = { workspace = true }
-rustls-platform-verifier = { workspace = true }
+netune-tls = { path = "../netune-tls", version = "0.0.28" }
 socket2 = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt"] }
-tokio-rustls = { workspace = true }
 
 [dev-dependencies]
 netune-diagnostics = { path = "../netune-diagnostics", version = "0.0.28" }

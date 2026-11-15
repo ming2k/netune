@@ -95,9 +95,9 @@ WebSocket is not a symmetric peer protocol. RFC 6455 §5.1 mandates that client�
 ### Verification Artifacts
 
 - `netune-ws` unit tests pin RFC 3174 SHA-1 vectors, the RFC 6455 §1.3 handshake example, and the UTF-8 grammar's exclusion ranges (overlong, surrogates, >U+10FFFF).
-- `netune-ws/tests/differential.rs` proves wire parity with `tungstenite` (`[INV-WS-08]`) across length boundaries, masked and unmasked.
-- `netune/tests/ws.rs` and `netune/tests/ws_session.rs` run the client against local mock origins: full-duplex echo, auto-pong, close-code echo, subprotocol negotiation (match and mismatch), pong-deadline death, and decoy-pong non-discharge.
-- `netune/tests/guide_examples.rs` compile-and-runs every snippet in `docs/how-to/websocket-client.md`, so the guide cannot silently drift from the API.
+- `crates/netune-ws/tests/differential.rs` proves wire parity with `tungstenite` (`[INV-WS-08]`) across length boundaries, masked and unmasked.
+- `tests/e2e/websocket.rs` and `tests/e2e/websocket_session.rs` run the client against local mock origins: full-duplex echo, auto-pong, close-code echo, subprotocol negotiation (match and mismatch), pong-deadline death, and decoy-pong non-discharge.
+- `tests/e2e/websocket_guide.rs` compile-and-runs every snippet in `docs/how-to/websocket-client.md`, so the guide cannot silently drift from the API.
 
 ## Rejected Alternatives & Negative Knowledge
 

@@ -44,4 +44,9 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
       - name: Repeated stream/keep-alive soak
-        run: cargo test -p netune-quic --test owned_server_e2e soak_echoes_many_streams_under_keepalive -- --ignored --exact
+        run: >-
+          cargo nextest run
+          -p netune-workspace-tests
+          -E 'test(soak_echoes_many_streams_under_keepalive)'
+          --run-ignored ignored-only
+          --profile soak

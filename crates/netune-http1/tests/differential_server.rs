@@ -11,7 +11,6 @@
 //! body — the peer waits for bytes that are already on the wire.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-mod support;
 
 use std::time::Duration;
 
@@ -22,7 +21,7 @@ use hyper_util::rt::TokioIo;
 use netune_http1::{
     BodyKind, Http1ServerReader, Limits, ReasonPhrase, ResponseHead, ResponseWriter, TargetForm,
 };
-use support::ScriptedIo;
+use netune_test_support::ScriptedIo;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 

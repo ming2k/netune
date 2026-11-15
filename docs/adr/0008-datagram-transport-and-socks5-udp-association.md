@@ -107,7 +107,7 @@ a buffer from it cannot build a payload that is guaranteed to fail.
 - `[INV-UDP-03]` **A relayed datagram must carry the session's source.** A decoded
   SOCKS5 wrapper whose source differs from the destination the caller asked for is
   dropped, never delivered. A hostile or buggy relay cannot deliver a host the caller
-  never addressed. Enforced by `tests/udp_socks5.rs::inv_udp_03_a_datagram_claiming_a_foreign_source_is_dropped`.
+  never addressed. Enforced by `tests/integration/udp_socks5.rs::inv_udp_03_a_datagram_claiming_a_foreign_source_is_dropped`.
 - `[INV-UDP-04]` **Fragments are refused.** A SOCKS5 UDP request with `FRAG != 0` is
   dropped: netune never emits fragments, and reading a fragment as a whole datagram
   would corrupt the protocol above. Enforced by

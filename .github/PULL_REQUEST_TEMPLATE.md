@@ -14,7 +14,7 @@
 ## Verification
 
 - [ ] `cargo check --all-targets --all-features`
-- [ ] `cargo nextest run` (and the `inject` suite when relevant)
+- [ ] `cargo nextest run --workspace` (and the `inject` suite when relevant)
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings`
 - [ ] `cargo fmt --check`
 - [ ] `python3 .github/scripts/check-docs.py`

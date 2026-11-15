@@ -12,7 +12,7 @@ superseded_by: null
 - Status: Accepted
 - Date: 2026-11-12
 - Deciders: Ming Li
-- Amends: [ADR-0006](0006-dns-resolution.md), [ADR-0001](0001-http1-ownership.md)
+- Amends: [ADR-0006](0006-transport-customizability-wire-evasion.md), [ADR-0001](0001-owned-transport-trace-model.md)
 
 ---
 

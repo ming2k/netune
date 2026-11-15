@@ -8,7 +8,7 @@
 //! # Current slice
 //!
 //! Implemented and tested: DNS + TCP establishment with per-phase trace events,
-//! TLS via rustls with the platform trust store or configurable profiles
+//! TLS via the owned engine with configurable profiles
 //! ([`TlsProfile`], [`Preset`], [`TlsRouterConnector`]), [`TimedIo`] recording every
 //! read/write syscall boundary, a keep-alive pool ([`Pool`]) with profile isolation
 //! and transparent stale-connection recovery (`INV-TRANSPORT-01`), `TCP_INFO` sampling
@@ -94,6 +94,7 @@ pub use netune_http2::{
 /// `netune-io` because ingress needs the identical tap and the two
 /// orchestrators must not depend on each other (ADR-0011).
 pub use netune_io::{Fault, FaultIo, FaultScript, RingIo, TimedIo};
+pub use netune_tls::handshake::ServerCertVerifier;
 pub use netune_trace::{ConnectionIdentity, EvasionPolicy, Fidelity, RequestTrace, TraceCollector};
 #[cfg(feature = "ws")]
 pub use netune_ws::{CloseCode, CloseReason, Message as WsMessage, Opcode as WsOpcode};
@@ -104,8 +105,8 @@ pub use profile::{H2Registry, H2RequestRegistry};
 pub use proxy::{Proxy, ProxyConnector};
 pub use socket::SocketConfig;
 pub use tcp_info::{SAMPLE_INTERVAL, Sampler, TcpSample, sample as sample_tcp_info};
-pub use tls::{TlsConnector, TlsRouterConnector, platform_client_config};
-pub use tls_profile::{Preset, TlsProfile, Verifier};
+pub use tls::{OwnedVerifier, TlsRouterConnector};
+pub use tls_profile::{Preset, TlsProfile};
 pub use udp::{
     DatagramConnector, DatagramTransport, EstablishedDatagrams, Socks5DatagramConnector,
     UdpConnector,

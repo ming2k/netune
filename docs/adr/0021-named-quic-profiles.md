@@ -98,7 +98,7 @@ name would create two sources of truth for one identity.
 
 - `crates/netune-quic/src/profile.rs`: `QuicProfileRegistry`, built-ins, unknown-name test.
 - `crates/netune-quic/src/connector.rs`: `QuicConnector::from_registry`, `profile_name`.
-- `crates/netune-quic/tests/quic_e2e.rs`: establish/inspect a connection through the registry.
+- `tests/e2e/quic_transport.rs`: establish/inspect a connection through the registry.
 
 ---
 

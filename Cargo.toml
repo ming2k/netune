@@ -2,6 +2,68 @@
 members = ["crates/*"]
 resolver = "2"
 
+# The workspace root is also a test-only package. Cargo cannot compile a
+# `tests/` directory that belongs to no package, and a virtual workspace has no
+# package at all; declaring the harness here is what makes the shared
+# integration/e2e entry points real nextest targets. `check-architecture.py`
+# (ARCH-012) enforces that it stays test-only: no library, no binary and no
+# production dependencies.
+[package]
+name = "netune-workspace-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+# The harness mirrors the optional capabilities the suites exercise. `http2`
+# and `ws` match the orchestrators' defaults; `tls` and `http3` stay opt-in so
+# the default CI run keeps the same posture as the crates, and
+# `--all-features` is the run that executes the opt-in ingress paths.
+[features]
+default = ["http2", "ws"]
+http2 = ["netune/http2", "netune-server/http2"]
+ws = ["netune/ws"]
+tls = ["netune-server/tls"]
+http3 = ["tls", "netune/http3", "netune-server/http3"]
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+
+[dev-dependencies]
+brotli = { workspace = true }
+bytes = { workspace = true }
+flate2 = { workspace = true }
+http = { workspace = true }
+netune = { path = "crates/netune", version = "0.0.28", default-features = false }
+netune-http1 = { path = "crates/netune-http1", version = "0.0.28" }
+netune-http2 = { path = "crates/netune-http2", version = "0.0.28" }
+netune-http3 = { path = "crates/netune-http3", version = "0.0.28" }
+netune-quic = { path = "crates/netune-quic", version = "0.0.28" }
+netune-server = { path = "crates/netune-server", version = "0.0.28", default-features = false }
+netune-tls = { path = "crates/netune-tls", version = "0.0.28" }
+netune-test-support = { path = "crates/netune-test-support", version = "0.0.28" }
+netune-trace = { path = "crates/netune-trace", version = "0.0.28" }
+netune-webtransport = { path = "crates/netune-webtransport", version = "0.0.28" }
+netune-ws = { path = "crates/netune-ws", version = "0.0.28" }
+quinn = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }
+tokio-rustls = { workspace = true }
+
+[lints]
+workspace = true
+
 [workspace.package]
 version = "0.0.28"
 edition = "2024"
@@ -34,6 +96,9 @@ quinn-proto = { version = "0.11", default-features = false, features = ["rustls-
 # codec (ADR-0027); neither crate may appear in a production dependency graph.
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
+# The owned TLS engine's chain validator (a verifier, not a TLS engine).
+rustls-webpki = { version = "0.103", default-features = false, features = ["std", "aws-lc-rs"] }
+webpki-root-certs = "1.0"
 thiserror = "2.0"
 
 # Workspace-wide lint policy (inherited by every member via `lints.workspace =

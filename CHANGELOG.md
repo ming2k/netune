@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.31] - 2026-11-15
+
+### Added
+
+- **In-workspace parser fuzzing and pure-Rust WebTransport differential gate (ADR-0049).**
+  `test-support::fuzz` provides a deterministic corpus, truncation and mutation
+  engine (`run_fuzz` and `run_fuzz_soak`), and every wire parser crate
+  (`netune-http1`, `netune-http2`, `netune-http3`, `netune-quic`,
+  `netune-webtransport`) owns a first-class `tests/fuzz.rs` target that compiles
+  and runs on stable Rust in every PR and scales to deep soak campaigns under
+  `--profile soak` (`[INV-TEST-05..06]`).
+  `crates/netune-webtransport/tests/differential.rs` replaces the external Go
+  harness with an in-process raw-H3 wire peer in both roles.
+
+### Changed
+
+- Removed top-level `fuzz/`, `interop/`, `scripts/` and
+  `crates/netune-webtransport/examples/interop_server.rs`; architecture gate
+  `ARCH-014` rejects out-of-workspace fuzz, interop or shell-runner trees
+  (ADR-0049).
+- Renamed the test-only support crate and root test package to `test-support`
+  and `workspace-tests` (ADR-0044).
+
+## [0.0.30] - 2026-11-15
+
+### Fixed
+
+- `netune-tls::driver::OwnedTlsStream`: fragment outbound `AsyncWrite`
+  application payloads at `MAX_PLAINTEXT_LEN` (16,384 bytes) and drain buffered
+  ciphertext across partial inner writes so callers never trip
+  `RecordError::PlaintextTooLarge` or lose progress across `Poll::Pending`.
+
 ## [0.0.29] - 2026-11-15
 
 ### Added

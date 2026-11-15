@@ -398,3 +398,98 @@ fn firefox_safari_and_go_standard_blueprints_parse_cleanly() {
         assert!(!parsed.extensions.is_empty(), "{name}: extensions");
     }
 }
+
+#[test]
+fn blueprint_omits_sni_extension_for_ip_literals_and_empty_names() {
+    let blueprint = ClientHelloBlueprint::chrome_current();
+    for server_name in ["127.0.0.1", "::1", "2001:db8::1", ""] {
+        let shares = vec![KeyShareEntry {
+            group: 0x001d,
+            share: vec![0x22; 32],
+        }];
+        let hello = blueprint
+            .build(BlueprintBuildParams {
+                server_name,
+                random: TEST_RANDOM,
+                session_id: &TEST_SESSION_ID,
+                key_shares: shares,
+                grease_seed: [0x01; 8],
+                permutation_seed: [0x55; 32],
+            })
+            .expect("build");
+        let has_sni = hello
+            .extensions
+            .iter()
+            .any(|ext| matches!(ext.body, ExtensionBody::ServerName { .. }));
+        assert!(!has_sni, "SNI must be omitted for {server_name:?}");
+        let wire = hello.serialize().expect("serialize");
+        let parsed = Parsed::parse(&wire).expect("parse");
+        assert!(
+            !parsed.extensions.contains(&0x0000),
+            "wire extensions must not carry 0x0000 for {server_name:?}"
+        );
+    }
+}
+
+#[test]
+fn attach_psk_rebalances_or_drops_chrome_padding() {
+    let mut hello = ClientHelloBlueprint::chrome_current()
+        .build(BlueprintBuildParams {
+            server_name: "example.com",
+            random: TEST_RANDOM,
+            session_id: &TEST_SESSION_ID,
+            key_shares: vec![KeyShareEntry {
+                group: 0x001d,
+                share: vec![0x22; 32],
+            }],
+            grease_seed: [0x01; 8],
+            permutation_seed: [0x55; 32],
+        })
+        .expect("build");
+    assert_eq!(hello.serialize().expect("pre").len() - 4, 512);
+
+    // A short ticket keeps the total padded body at 512 bytes.
+    hello
+        .attach_psk_and_sign(
+            crate::hello::PskIdentity {
+                identity: vec![0xaa; 16],
+                obfuscated_ticket_age: 42,
+            },
+            &[0x11; 32],
+            crate::key_schedule::Hash::Sha256,
+        )
+        .expect("short psk");
+    assert_eq!(hello.serialize().expect("short").len() - 4, 512);
+    assert!(
+        hello
+            .extensions
+            .iter()
+            .any(|ext| matches!(ext.body, ExtensionBody::Padding { .. }))
+    );
+
+    // A large ticket exceeding 512B on its own drops Padding cleanly.
+    hello
+        .attach_psk_and_sign(
+            crate::hello::PskIdentity {
+                identity: vec![0xbb; 250],
+                obfuscated_ticket_age: 42,
+            },
+            &[0x11; 32],
+            crate::key_schedule::Hash::Sha256,
+        )
+        .expect("large psk");
+    assert!(
+        !hello
+            .extensions
+            .iter()
+            .any(|ext| matches!(ext.body, ExtensionBody::Padding { .. })),
+        "oversized PSK hello must not carry redundant zero Padding"
+    );
+    assert_eq!(
+        hello
+            .extensions
+            .iter()
+            .position(|ext| matches!(ext.body, ExtensionBody::PreSharedKey { .. })),
+        Some(hello.extensions.len() - 1)
+    );
+}

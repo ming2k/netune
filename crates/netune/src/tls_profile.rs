@@ -218,20 +218,41 @@ impl TlsProfile {
         server_name: &str,
     ) -> Result<(ClientHello, Vec<ClientKeyShare>), crate::error::NetError> {
         let mut random = [0u8; 32];
-        netune_tls::hello::fill_random(&mut random)
-            .map_err(|error| crate::error::NetError::Connect(format!("TLS randomness: {error}")))?;
+        netune_tls::hello::fill_random(&mut random).map_err(|error| {
+            crate::error::NetError::Connect(crate::error::ConnectError::tls(
+                server_name,
+                format!("TLS randomness: {error}"),
+            ))
+        })?;
         let mut session_id = [0u8; 32];
-        netune_tls::hello::fill_random(&mut session_id)
-            .map_err(|error| crate::error::NetError::Connect(format!("TLS randomness: {error}")))?;
+        netune_tls::hello::fill_random(&mut session_id).map_err(|error| {
+            crate::error::NetError::Connect(crate::error::ConnectError::tls(
+                server_name,
+                format!("TLS randomness: {error}"),
+            ))
+        })?;
         let mut grease_seed = [0u8; 8];
-        netune_tls::hello::fill_random(&mut grease_seed)
-            .map_err(|error| crate::error::NetError::Connect(format!("TLS randomness: {error}")))?;
+        netune_tls::hello::fill_random(&mut grease_seed).map_err(|error| {
+            crate::error::NetError::Connect(crate::error::ConnectError::tls(
+                server_name,
+                format!("TLS randomness: {error}"),
+            ))
+        })?;
         let mut permutation_seed = [0u8; 32];
-        netune_tls::hello::fill_random(&mut permutation_seed)
-            .map_err(|error| crate::error::NetError::Connect(format!("TLS randomness: {error}")))?;
+        netune_tls::hello::fill_random(&mut permutation_seed).map_err(|error| {
+            crate::error::NetError::Connect(crate::error::ConnectError::tls(
+                server_name,
+                format!("TLS randomness: {error}"),
+            ))
+        })?;
 
-        let shares = ClientKeyShare::generate(&self.blueprint.key_share_groups)
-            .map_err(|error| crate::error::NetError::Connect(error.to_string()))?;
+        let shares =
+            ClientKeyShare::generate(&self.blueprint.key_share_groups).map_err(|error| {
+                crate::error::NetError::Connect(crate::error::ConnectError::tls(
+                    server_name,
+                    error.to_string(),
+                ))
+            })?;
         let entries = shares
             .iter()
             .map(|share| KeyShareEntry {
@@ -249,7 +270,12 @@ impl TlsProfile {
                 grease_seed,
                 permutation_seed,
             })
-            .map_err(|error| crate::error::NetError::Connect(format!("TLS hello: {error}")))?;
+            .map_err(|error| {
+                crate::error::NetError::Connect(crate::error::ConnectError::tls(
+                    server_name,
+                    format!("TLS hello: {error}"),
+                ))
+            })?;
         Ok((hello, shares))
     }
 }

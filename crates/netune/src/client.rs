@@ -421,8 +421,10 @@ impl<C: Connector> Client<C> {
     ) -> Result<H2ClientConnection<Box<dyn crate::connect::Transport>>, NetError> {
         crate::handshake::bound(
             self.config.h2_handshake_timeout,
+            DiagnosticPhase::Http2,
             "HTTP/2 handshake",
             authority,
+            recorder,
             H2ClientConnection::handshake(stream, fingerprint),
         )
         .await?
@@ -468,9 +470,9 @@ impl<C: Connector> Client<C> {
         // and every redirect hop passes through, so no target-construction path
         // can smuggle a control byte onto the wire.
         netune_http1::validate_host_field(target.authority.as_bytes()).map_err(|error| {
-            NetError::Connect(format!(
-                "invalid target authority {:?}: {error}",
-                target.authority
+            NetError::Connect(crate::error::ConnectError::config(
+                DiagnosticPhase::Request,
+                format!("invalid target authority {:?}: {error}", target.authority),
             ))
         })?;
 
@@ -501,11 +503,11 @@ impl<C: Connector> Client<C> {
                         .h2_profiles
                         .default_for_tls(target.tls_profile())
                         .ok_or_else(|| {
-                            NetError::Connect(
+                            NetError::Connect(crate::error::ConnectError::config(
+                                DiagnosticPhase::Dispatch,
                                 "no built-in HTTP/2 profile is registered; register one with \
-                                 Client::with_h2_profile"
-                                    .into(),
-                            )
+                                 Client::with_h2_profile",
+                            ))
                         })?;
                     if self.forces_h2(target) {
                         identity.h2_profile = Some(id.to_string());
@@ -811,8 +813,10 @@ impl<C: Connector> Client<C> {
             Http1Reader::with_limits_and_buffer(io, self.config.limits, BytesMut::new());
         let response_head = match crate::handshake::bound(
             handshake.handshake_timeout,
+            DiagnosticPhase::WebSocket,
             "WebSocket handshake",
             &target.authority,
+            &recorder,
             reader.read_response_head(&Method::GET),
         )
         .await
@@ -824,10 +828,7 @@ impl<C: Connector> Client<C> {
                     format!("WebSocket upgrade response read: {error}"),
                 ));
             }
-            Err(error) => {
-                recorder.record_error(error.diagnostic());
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
 
         if response_head.status != StatusCode::SWITCHING_PROTOCOLS {
@@ -1534,10 +1535,7 @@ fn resolve_location(
 ) -> Result<(Target, String), NetError> {
     if let Some(rest) = location.strip_prefix("https://") {
         let (authority, path) = split_authority(rest, 443);
-        let name = authority
-            .rsplit_once(':')
-            .map_or(authority.as_str(), |(host, _)| host)
-            .to_string();
+        let name = crate::connect::authority_host(&authority).to_string();
         let mut target = Target::tls(authority, name);
         // A redirect changes the destination, not the identity the caller
         // selected. Only the authority and the verified server name follow the
@@ -1563,13 +1561,8 @@ fn resolve_location(
         let mut target = current.clone();
         target.authority = authority;
         if target.identity.tls_server_name.is_some() {
-            target.identity.tls_server_name = Some(
-                target
-                    .authority
-                    .rsplit_once(':')
-                    .map_or(target.authority.as_str(), |(host, _)| host)
-                    .to_string(),
-            );
+            target.identity.tls_server_name =
+                Some(crate::connect::authority_host(&target.authority).to_string());
         }
         return Ok((target, path));
     }
@@ -1597,14 +1590,7 @@ fn split_authority(rest: &str, default_port: u16) -> (String, String) {
         Some(index) => (&rest[..index], &rest[index..]),
         None => (rest, "/"),
     };
-    let has_port = authority
-        .rsplit_once(':')
-        .is_some_and(|(_, port)| port.chars().all(|character| character.is_ascii_digit()));
-    let authority = if has_port {
-        authority.to_string()
-    } else {
-        format!("{authority}:{default_port}")
-    };
+    let authority = crate::connect::normalize_authority(authority, default_port);
     (authority, path.to_string())
 }
 
@@ -2151,5 +2137,21 @@ mod identity_tests {
         assert_eq!(path, "/next");
         assert!(next.tls_server_name().is_none());
         assert_eq!(next.identity.evasion, EvasionPolicy::sni_split());
+    }
+
+    #[test]
+    fn redirect_location_unbrackets_ipv6_tls_server_name() {
+        let original = Target::tls("a.example:443", "a.example");
+        let (next, path) = resolve_location(&original, "/start", "https://[::1]:8443/next")
+            .expect("resolve ipv6 absolute redirect");
+        assert_eq!(path, "/next");
+        assert_eq!(next.authority, "[::1]:8443");
+        assert_eq!(next.tls_server_name(), Some("::1"));
+
+        let (rel, path) = resolve_location(&next, "/next", "//[2001:db8::9]/v2")
+            .expect("resolve ipv6 protocol-relative redirect");
+        assert_eq!(path, "/v2");
+        assert_eq!(rel.authority, "[2001:db8::9]:443");
+        assert_eq!(rel.tls_server_name(), Some("2001:db8::9"));
     }
 }

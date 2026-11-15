@@ -269,9 +269,12 @@ impl H1Registry {
 
     pub fn resolve(&self, id: &ProfileId) -> Result<&H1WireProfile, NetError> {
         self.profiles.get(id).ok_or_else(|| {
-            NetError::Connect(format!(
-                "unknown HTTP/1 wire profile {id:?}; registered: {}",
-                self.names().join(", ")
+            NetError::Connect(crate::error::ConnectError::config(
+                netune_trace::DiagnosticPhase::Dispatch,
+                format!(
+                    "unknown HTTP/1 wire profile {id:?}; registered: {}",
+                    self.names().join(", ")
+                ),
             ))
         })
     }
@@ -354,9 +357,12 @@ impl H2RequestRegistry {
 
     pub fn resolve(&self, id: &ProfileId) -> Result<&netune_http2::H2RequestProfile, NetError> {
         self.profiles.get(id).ok_or_else(|| {
-            NetError::Connect(format!(
-                "unknown HTTP/2 request profile {id:?}; registered: {}",
-                self.names().join(", ")
+            NetError::Connect(crate::error::ConnectError::config(
+                netune_trace::DiagnosticPhase::Dispatch,
+                format!(
+                    "unknown HTTP/2 request profile {id:?}; registered: {}",
+                    self.names().join(", ")
+                ),
             ))
         })
     }
@@ -381,9 +387,12 @@ impl H2Registry {
 
     pub fn resolve(&self, id: &ProfileId) -> Result<&netune_http2::H2Fingerprint, NetError> {
         self.profiles.get(id).ok_or_else(|| {
-            NetError::Connect(format!(
-                "unknown HTTP/2 profile {id:?}; registered: {}",
-                self.names().join(", ")
+            NetError::Connect(crate::error::ConnectError::config(
+                netune_trace::DiagnosticPhase::Dispatch,
+                format!(
+                    "unknown HTTP/2 profile {id:?}; registered: {}",
+                    self.names().join(", ")
+                ),
             ))
         })
     }

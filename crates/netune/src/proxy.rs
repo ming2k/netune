@@ -21,11 +21,11 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use netune_http1::{Http1Reader, Limits};
-use netune_trace::{DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EventKind, TraceCollector};
+use netune_trace::{DiagnosticPhase, EventKind, TraceCollector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::connect::{Connector, Established, Target, Transport};
-use crate::error::NetError;
+use crate::connect::{Connector, Established, Target, Transport, parse_authority};
+use crate::error::{ConnectError, NetError};
 
 /// Which proxy to use.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,16 +48,22 @@ pub enum Proxy {
 impl Proxy {
     /// Parse a proxy URL.
     pub fn parse(url: &str) -> Result<Self, NetError> {
-        let (scheme, rest) = url
-            .split_once("://")
-            .ok_or_else(|| NetError::Connect(format!("proxy url has no scheme: {url}")))?;
+        let (scheme, rest) = url.split_once("://").ok_or_else(|| {
+            NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Proxy,
+                format!("proxy url has no scheme: {url}"),
+            ))
+        })?;
         let (userinfo, authority) = match rest.rsplit_once('@') {
             Some((userinfo, authority)) => (Some(userinfo), authority),
             None => (None, rest),
         };
         let authority = authority.trim_end_matches('/').to_string();
         if authority.is_empty() {
-            return Err(NetError::Connect("proxy url has no host".into()));
+            return Err(NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Proxy,
+                "proxy url has no host",
+            )));
         }
         let credentials = userinfo.map(|userinfo| match userinfo.split_once(':') {
             Some((user, password)) => (user.to_string(), password.to_string()),
@@ -72,17 +78,18 @@ impl Proxy {
             // plaintext and put `Proxy-Authorization` on the wire unencrypted;
             // TLS to the proxy is not implemented, so refuse rather than
             // downgrade.
-            "https" => Err(NetError::Connect(
+            "https" => Err(NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Proxy,
                 "https proxy URLs are not supported: the proxy hop is plaintext HTTP CONNECT; \
-                 use http:// or terminate TLS outside this connector"
-                    .into(),
-            )),
+                 use http:// or terminate TLS outside this connector",
+            ))),
             "socks5" | "socks5h" => Ok(Self::Socks5 {
                 authority,
                 credentials,
             }),
-            other => Err(NetError::Connect(format!(
-                "unsupported proxy scheme: {other}"
+            other => Err(NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Proxy,
+                format!("unsupported proxy scheme: {other}"),
             ))),
         }
     }
@@ -158,29 +165,20 @@ impl<C: Connector> Connector for ProxyConnector<C> {
         };
         match crate::handshake::bound(
             self.handshake_timeout,
+            DiagnosticPhase::Proxy,
             "proxy handshake",
             self.proxy.authority(),
+            recorder,
             handshake,
         )
         .await
         {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                recorder.record_error(
-                    DiagnosticRecord::new(DiagnosticCode::EGRESS_PROXY_FAILED)
-                        .with_phase(DiagnosticPhase::Proxy)
-                        .with_message(error.to_string()),
-                );
+                recorder.record_error(error.diagnostic());
                 return Err(error);
             }
-            Err(error) => {
-                recorder.record_error(
-                    DiagnosticRecord::new(DiagnosticCode::EGRESS_PROXY_FAILED)
-                        .with_phase(DiagnosticPhase::Proxy)
-                        .with_message(error.to_string()),
-                );
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         }
         recorder.mark(EventKind::ProxyTunnel, 0, 0);
 
@@ -203,7 +201,10 @@ async fn http_connect(
     // Direct connector callers bypass `Client::plan`, so validate here too: the
     // authority is interpolated into a request line and a `Host` header.
     netune_http1::validate_host_field(authority.as_bytes()).map_err(|error| {
-        NetError::Connect(format!("proxy CONNECT authority is invalid: {error}"))
+        NetError::Connect(ConnectError::config(
+            DiagnosticPhase::Proxy,
+            format!("proxy CONNECT authority is invalid: {error}"),
+        ))
     })?;
     let mut request = format!(
         "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: keep-alive\r\n"
@@ -217,21 +218,27 @@ async fn http_connect(
     stream
         .write_all(request.as_bytes())
         .await
-        .map_err(|error| NetError::Connect(format!("proxy CONNECT write: {error}")))?;
-    stream
-        .flush()
-        .await
-        .map_err(|error| NetError::Connect(format!("proxy CONNECT flush: {error}")))?;
+        .map_err(|error| {
+            NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+        })?;
+    stream.flush().await.map_err(|error| {
+        NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+    })?;
 
     let mut reader = Http1Reader::with_limits(stream, Limits::default());
     let head = reader
         .read_response_head(&http::Method::CONNECT)
         .await
-        .map_err(|error| NetError::Connect(format!("proxy CONNECT response: {error}")))?;
+        .map_err(|error| {
+            NetError::Connect(
+                ConnectError::proxy(authority, format!("proxy CONNECT response: {error}"))
+                    .with_source(error),
+            )
+        })?;
     if !head.status.is_success() {
-        return Err(NetError::Connect(format!(
-            "proxy refused the tunnel: HTTP {}",
-            head.status
+        return Err(NetError::Connect(ConnectError::proxy(
+            authority,
+            format!("proxy refused the tunnel: HTTP {}", head.status),
         )));
     }
     Ok(())
@@ -253,109 +260,118 @@ async fn socks5_connect(
     } else {
         &[0x05, 0x01, 0x00]
     };
-    stream
-        .write_all(greeting)
-        .await
-        .map_err(|error| NetError::Connect(format!("socks5 greeting: {error}")))?;
+    stream.write_all(greeting).await.map_err(|error| {
+        NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+    })?;
     let mut chosen = [0u8; 2];
-    stream
-        .read_exact(&mut chosen)
-        .await
-        .map_err(|error| NetError::Connect(format!("socks5 greeting reply: {error}")))?;
+    stream.read_exact(&mut chosen).await.map_err(|error| {
+        NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+    })?;
     if chosen[0] != 0x05 {
-        return Err(NetError::Connect("socks5: not a SOCKS5 proxy".into()));
+        return Err(NetError::Connect(ConnectError::proxy(
+            authority,
+            "socks5: not a SOCKS5 proxy",
+        )));
     }
     match chosen[1] {
         0x00 => {}
         0x02 => {
-            let (user, password) = credentials
-                .ok_or_else(|| NetError::Connect("socks5: proxy requires credentials".into()))?;
+            let (user, password) = credentials.ok_or_else(|| {
+                NetError::Connect(ConnectError::proxy(
+                    authority,
+                    "socks5: proxy requires credentials",
+                ))
+            })?;
             if user.len() > 255 || password.len() > 255 {
-                return Err(NetError::Connect("socks5: credential too long".into()));
+                return Err(NetError::Connect(ConnectError::config(
+                    DiagnosticPhase::Proxy,
+                    "socks5: credential too long",
+                )));
             }
             let mut auth = vec![0x01, user.len() as u8];
             auth.extend_from_slice(user.as_bytes());
             auth.push(password.len() as u8);
             auth.extend_from_slice(password.as_bytes());
-            stream
-                .write_all(&auth)
-                .await
-                .map_err(|error| NetError::Connect(format!("socks5 auth: {error}")))?;
+            stream.write_all(&auth).await.map_err(|error| {
+                NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+            })?;
             let mut reply = [0u8; 2];
-            stream
-                .read_exact(&mut reply)
-                .await
-                .map_err(|error| NetError::Connect(format!("socks5 auth reply: {error}")))?;
+            stream.read_exact(&mut reply).await.map_err(|error| {
+                NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+            })?;
             if reply[1] != 0x00 {
-                return Err(NetError::Connect("socks5: authentication rejected".into()));
+                return Err(NetError::Connect(ConnectError::proxy(
+                    authority,
+                    "socks5: authentication rejected",
+                )));
             }
         }
         0xFF => {
-            return Err(NetError::Connect(
-                "socks5: no acceptable auth method".into(),
-            ));
+            return Err(NetError::Connect(ConnectError::proxy(
+                authority,
+                "socks5: no acceptable auth method",
+            )));
         }
         other => {
-            return Err(NetError::Connect(format!(
-                "socks5: unsupported auth method {other}"
+            return Err(NetError::Connect(ConnectError::proxy(
+                authority,
+                format!("socks5: unsupported auth method {other}"),
             )));
         }
     }
 
     // CONNECT with an ATYP=domain request.
     if host.len() > 255 {
-        return Err(NetError::Connect("socks5: host too long".into()));
+        return Err(NetError::Connect(ConnectError::config(
+            DiagnosticPhase::Proxy,
+            "socks5: host too long",
+        )));
     }
     let mut request = vec![0x05, 0x01, 0x00, 0x03, host.len() as u8];
     request.extend_from_slice(host.as_bytes());
     request.extend_from_slice(&port.to_be_bytes());
-    stream
-        .write_all(&request)
-        .await
-        .map_err(|error| NetError::Connect(format!("socks5 connect: {error}")))?;
+    stream.write_all(&request).await.map_err(|error| {
+        NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+    })?;
 
     let mut reply = [0u8; 4];
-    stream
-        .read_exact(&mut reply)
-        .await
-        .map_err(|error| NetError::Connect(format!("socks5 connect reply: {error}")))?;
+    stream.read_exact(&mut reply).await.map_err(|error| {
+        NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+    })?;
     if reply[0] != 0x05 || reply[1] != 0x00 {
-        return Err(NetError::Connect(format!(
-            "socks5: connect failed (code {:#04x})",
-            reply[1]
+        return Err(NetError::Connect(ConnectError::proxy(
+            authority,
+            format!("socks5: connect failed (code {:#04x})", reply[1]),
         )));
     }
     // Drain the bound address, whose length depends on ATYP.
     match reply[3] {
         0x01 => {
             let mut rest = [0u8; 4 + 2];
-            stream
-                .read_exact(&mut rest)
-                .await
-                .map_err(|error| NetError::Connect(format!("socks5 bound address: {error}")))?;
+            stream.read_exact(&mut rest).await.map_err(|error| {
+                NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+            })?;
         }
         0x04 => {
             let mut rest = [0u8; 16 + 2];
-            stream
-                .read_exact(&mut rest)
-                .await
-                .map_err(|error| NetError::Connect(format!("socks5 bound address: {error}")))?;
+            stream.read_exact(&mut rest).await.map_err(|error| {
+                NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+            })?;
         }
         0x03 => {
             let mut length = [0u8; 1];
-            stream
-                .read_exact(&mut length)
-                .await
-                .map_err(|error| NetError::Connect(format!("socks5 bound address: {error}")))?;
+            stream.read_exact(&mut length).await.map_err(|error| {
+                NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+            })?;
             let mut rest = vec![0u8; length[0] as usize + 2];
-            stream
-                .read_exact(&mut rest)
-                .await
-                .map_err(|error| NetError::Connect(format!("socks5 bound address: {error}")))?;
+            stream.read_exact(&mut rest).await.map_err(|error| {
+                NetError::Connect(ConnectError::io(DiagnosticPhase::Proxy, authority, error))
+            })?;
         }
         other => {
-            return Err(NetError::Connect(format!(
-                "socks5: unknown address type {other}"
+            return Err(NetError::Connect(ConnectError::proxy(
+                authority,
+                format!("socks5: unknown address type {other}"),
             )));
         }
     }
@@ -363,13 +379,19 @@ async fn socks5_connect(
 }
 
 fn split_authority(authority: &str) -> Result<(&str, u16), NetError> {
-    let (host, port) = authority
-        .rsplit_once(':')
-        .ok_or_else(|| NetError::Connect(format!("authority has no port: {authority}")))?;
-    let port = port
-        .parse::<u16>()
-        .map_err(|_| NetError::Connect(format!("authority has an invalid port: {authority}")))?;
-    Ok((host.trim_start_matches('[').trim_end_matches(']'), port))
+    let (host, port) = parse_authority(authority).map_err(|reason| {
+        NetError::Connect(ConnectError::config(
+            DiagnosticPhase::Proxy,
+            format!("invalid target authority {authority:?}: {reason}"),
+        ))
+    })?;
+    let port = port.ok_or_else(|| {
+        NetError::Connect(ConnectError::config(
+            DiagnosticPhase::Proxy,
+            format!("authority has no port: {authority}"),
+        ))
+    })?;
+    Ok((host, port))
 }
 
 #[cfg(test)]

@@ -35,13 +35,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use netune_trace::{EventKind, TraceCollector};
+use netune_trace::{DiagnosticPhase, EventKind, TraceCollector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 
-use crate::connect::{Connector, EgressConfinement, Target, is_public_ip};
+use crate::connect::{
+    Connector, EgressConfinement, Target, is_public_ip, order_happy_eyeballs, parse_authority,
+};
 use crate::dns::{DnsResolver, SystemResolver};
-use crate::error::NetError;
+use crate::error::{ConnectError, NetError, ResolveError};
 use crate::proxy::Proxy;
 use crate::socket::SocketConfig;
 
@@ -222,19 +224,34 @@ impl<R: DnsResolver> UdpConnector<R> {
     /// the same policy as a direct one; a second implementation of this rule is
     /// a second place for it to be wrong.
     pub async fn resolve_one(&self, host: &str, port: u16) -> Result<SocketAddr, NetError> {
+        let deadline = self
+            .connect_timeout
+            .map(|timeout| tokio::time::Instant::now() + timeout);
+        let addresses = self.resolve_all(host, port, deadline).await?;
+        Ok(addresses[0])
+    }
+
+    async fn resolve_all(
+        &self,
+        host: &str,
+        port: u16,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Vec<SocketAddr>, NetError> {
         let resolve = self.resolver.resolve(host, port);
-        let addresses = match self.connect_timeout {
-            Some(timeout) => tokio::time::timeout(timeout, resolve).await.map_err(|_| {
-                NetError::Resolve(format!(
-                    "DNS resolution for {host} exceeded the {}s timeout",
-                    timeout.as_secs()
-                ))
-            })?,
+        let addresses = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, resolve)
+                .await
+                .map_err(|_| {
+                    NetError::Resolve(ResolveError::timeout(
+                        host,
+                        self.connect_timeout.unwrap_or_default(),
+                    ))
+                })?,
             None => resolve.await,
         }?;
-        let Some(address) = addresses.first().copied() else {
-            return Err(NetError::Resolve(format!("no addresses for {host}")));
-        };
+        if addresses.is_empty() {
+            return Err(NetError::Resolve(ResolveError::empty(host)));
+        }
         if self.confinement == EgressConfinement::StrictPublic {
             for addr in &addresses {
                 if !is_public_ip(addr.ip()) {
@@ -245,7 +262,7 @@ impl<R: DnsResolver> UdpConnector<R> {
                 }
             }
         }
-        Ok(address)
+        Ok(addresses)
     }
 }
 
@@ -258,15 +275,84 @@ impl<R: DnsResolver> DatagramConnector for UdpConnector<R> {
         Box<dyn std::future::Future<Output = Result<EstablishedDatagrams, NetError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            let (host, port) = split_datagram_authority(authority)?;
+            let deadline = self
+                .connect_timeout
+                .map(|timeout| tokio::time::Instant::now() + timeout);
+            let (host, port) = match split_datagram_authority(authority) {
+                Ok(parts) => parts,
+                Err(error) => {
+                    recorder.record_error(error.diagnostic());
+                    return Err(error);
+                }
+            };
 
             recorder.mark(EventKind::DnsStart, 0, 0);
-            let address = self.resolve_one(host, port).await?;
-            recorder.mark(EventKind::DnsEnd, 1, 0);
+            let addresses = match self.resolve_all(host, port, deadline).await {
+                Ok(addresses) => addresses,
+                Err(error) => {
+                    recorder.record_error(error.diagnostic());
+                    return Err(error);
+                }
+            };
+            recorder.mark(EventKind::DnsEnd, addresses.len() as u32, 0);
 
-            let socket = open_connected(address, &self.socket_config)
-                .await
-                .map_err(|error| NetError::Connect(error.to_string()))?;
+            let ordered = order_happy_eyeballs(&addresses);
+            let mut last_error = None;
+            let mut connected = None;
+            for address in ordered {
+                if let Some(deadline) = deadline
+                    && tokio::time::Instant::now() >= deadline
+                {
+                    let error = NetError::Connect(ConnectError::timeout(
+                        DiagnosticPhase::Tcp,
+                        authority,
+                        "UDP connect",
+                        self.connect_timeout.unwrap_or_default(),
+                    ));
+                    recorder.record_error(error.diagnostic());
+                    return Err(error);
+                }
+                let dial = open_connected(address, &self.socket_config);
+                let result = match deadline {
+                    Some(deadline) => match tokio::time::timeout_at(deadline, dial).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            let error = NetError::Connect(ConnectError::timeout(
+                                DiagnosticPhase::Tcp,
+                                address.to_string(),
+                                "UDP connect",
+                                self.connect_timeout.unwrap_or_default(),
+                            ));
+                            recorder.record_error(error.diagnostic());
+                            return Err(error);
+                        }
+                    },
+                    None => dial.await,
+                };
+                match result {
+                    Ok(socket) => {
+                        connected = Some(socket);
+                        break;
+                    }
+                    Err(error) => last_error = Some((address, error)),
+                }
+            }
+
+            let socket = match connected {
+                Some(socket) => socket,
+                None => {
+                    let error = match last_error {
+                        Some((fail_addr, fail_err)) => NetError::Connect(ConnectError::io(
+                            DiagnosticPhase::Unknown,
+                            fail_addr.to_string(),
+                            fail_err,
+                        )),
+                        None => NetError::Resolve(ResolveError::empty(authority)),
+                    };
+                    recorder.record_error(error.diagnostic());
+                    return Err(error);
+                }
+            };
             let local_port = socket.local_addr().ok().map(|address| address.port());
             let max_datagram_size = max_datagram_size(&socket);
 
@@ -306,20 +392,26 @@ fn max_datagram_size(socket: &UdpSocket) -> usize {
     crate::socket::udp_max_datagram_size(socket).unwrap_or(crate::socket::UDP_MAX_PAYLOAD)
 }
 
-/// Splits a datagram authority into host and port.
+/// Splits a datagram authority into unbracketed host and port.
 ///
 /// Unparseable or absent ports are refused rather than defaulted: see
 /// [`NO_DEFAULT_PORT`].
 fn split_datagram_authority(authority: &str) -> Result<(&str, u16), NetError> {
-    let (host, port) = authority.rsplit_once(':').ok_or_else(|| {
-        NetError::Resolve(format!(
-            "datagram authority {authority:?} has no port and there is no default (wanted {NO_DEFAULT_PORT:?})"
+    let (host, port) = parse_authority(authority).map_err(|reason| {
+        NetError::Resolve(ResolveError::invalid_authority(
+            authority,
+            format!("invalid authority {authority:?}: {reason}"),
         ))
     })?;
-    let port = port
-        .parse::<u16>()
-        .map_err(|error| NetError::Resolve(format!("invalid port in authority: {error}")))?;
-    Ok((host.trim_start_matches('[').trim_end_matches(']'), port))
+    let port = port.ok_or_else(|| {
+        NetError::Resolve(ResolveError::invalid_authority(
+            authority,
+            format!(
+                "datagram authority {authority:?} has no port and there is no default (wanted {NO_DEFAULT_PORT:?})"
+            ),
+        ))
+    })?;
+    Ok((host, port))
 }
 
 // ---------------------------------------------------------------------------
@@ -359,9 +451,10 @@ impl<C: Connector> Socks5DatagramConnector<C> {
     /// cannot work should not be buildable.
     pub fn new(inner: C, proxy: Proxy) -> Result<Self, NetError> {
         if !matches!(proxy, Proxy::Socks5 { .. }) {
-            return Err(NetError::Connect(
-                "only a SOCKS5 proxy can associate a UDP datagram session".into(),
-            ));
+            return Err(NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Proxy,
+                "only a SOCKS5 proxy can associate a UDP datagram session",
+            )));
         }
         Ok(Self {
             inner,
@@ -395,13 +488,23 @@ impl<C: Connector> DatagramConnector for Socks5DatagramConnector<C> {
             let established = self.inner.connect(&control_target, recorder).await?;
             let mut control = established.stream;
 
-            let bound = crate::handshake::bound(
+            let bound = match crate::handshake::bound(
                 self.handshake_timeout,
+                DiagnosticPhase::Proxy,
                 "socks5 UDP associate",
                 self.proxy.authority(),
-                socks5_udp_associate(&mut control),
+                recorder,
+                socks5_udp_associate(&mut control, self.proxy.authority()),
             )
-            .await??;
+            .await
+            {
+                Ok(Ok(bound)) => bound,
+                Ok(Err(error)) => {
+                    recorder.record_error(error.diagnostic());
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            };
             recorder.mark(EventKind::ProxyTunnel, 0, 0);
 
             // The local socket binds a wildcard address, not the reply's: a
@@ -412,13 +515,31 @@ impl<C: Connector> DatagramConnector for Socks5DatagramConnector<C> {
             } else {
                 "[::]:0"
             };
-            let relay = UdpSocket::bind(any)
-                .await
-                .map_err(|error| NetError::Connect(format!("socks5 UDP relay bind: {error}")))?;
-            let relay_address = relay
-                .local_addr()
-                .map_err(|error| NetError::Connect(format!("socks5 UDP relay address: {error}")))?;
-            let peer = relay_bound_peer(bound, &self.proxy)?;
+            let relay = UdpSocket::bind(any).await.map_err(|error| {
+                let err = NetError::Connect(ConnectError::io(
+                    DiagnosticPhase::Proxy,
+                    self.proxy.authority(),
+                    error,
+                ));
+                recorder.record_error(err.diagnostic());
+                err
+            })?;
+            let relay_address = relay.local_addr().map_err(|error| {
+                let err = NetError::Connect(ConnectError::io(
+                    DiagnosticPhase::Proxy,
+                    self.proxy.authority(),
+                    error,
+                ));
+                recorder.record_error(err.diagnostic());
+                err
+            })?;
+            let peer = match relay_bound_peer(bound, &self.proxy) {
+                Ok(peer) => peer,
+                Err(error) => {
+                    recorder.record_error(error.diagnostic());
+                    return Err(error);
+                }
+            };
             let max_datagram_size = max_datagram_size(&relay) - SOCKS5_UDP_HEADER_CEILING;
 
             recorder.mark(EventKind::UdpOpen, 1, 0);
@@ -452,9 +573,10 @@ fn relay_bound_peer(bound: SocketAddr, proxy: &Proxy) -> Result<SocketAddr, NetE
         // Unreachable: `new` refuses anything else. Kept explicit so a future
         // variant cannot silently fall through to the wrong host.
         Proxy::Http { .. } => {
-            return Err(NetError::Connect(
-                "only a SOCKS5 proxy can associate a UDP datagram session".into(),
-            ));
+            return Err(NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Proxy,
+                "only a SOCKS5 proxy can associate a UDP datagram session",
+            )));
         }
     };
     let (host, _port) = crate::connect::split_target_authority(authority)?;
@@ -465,8 +587,11 @@ fn relay_bound_peer(bound: SocketAddr, proxy: &Proxy) -> Result<SocketAddr, NetE
         // host, and `local` records nothing about it. Resolving again would be a
         // second, silent DNS decision. Refusing is honest.
         Err(_) => {
-            return Err(NetError::Connect(format!(
-                "socks5: proxy {host:?} answered a wildcard UDP relay address and is named by domain, which is not supported"
+            return Err(NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Proxy,
+                format!(
+                    "socks5: proxy {host:?} answered a wildcard UDP relay address and is named by domain, which is not supported"
+                ),
             )));
         }
     };
@@ -474,10 +599,10 @@ fn relay_bound_peer(bound: SocketAddr, proxy: &Proxy) -> Result<SocketAddr, NetE
     // port would aim datagrams at its SOCKS listener: a failure that surfaces
     // far from its cause. There is nothing to infer from, so refuse here.
     if bound.port() == 0 {
-        return Err(NetError::Connect(
-            "socks5: UDP associate answered a wildcard relay address with port 0, which cannot be used"
-                .into(),
-        ));
+        return Err(NetError::Connect(ConnectError::proxy(
+            authority,
+            "socks5: UDP associate answered a wildcard relay address with port 0, which cannot be used",
+        )));
     }
     Ok(SocketAddr::new(ip, bound.port()))
 }
@@ -637,71 +762,92 @@ fn socks5_udp_decode(datagram: &[u8]) -> Option<DecodedDatagram<'_>> {
 /// `ProxyConnector`, so the SOCKS5 greeting is this function's job.
 async fn socks5_udp_associate(
     control: &mut Box<dyn crate::connect::Transport>,
+    proxy_authority: &str,
 ) -> Result<SocketAddr, NetError> {
     let greeting: &[u8] = &[0x05, 0x01, 0x00];
-    control
-        .write_all(greeting)
-        .await
-        .map_err(|error| NetError::Connect(format!("socks5 greeting: {error}")))?;
+    control.write_all(greeting).await.map_err(|error| {
+        NetError::Connect(ConnectError::io(
+            DiagnosticPhase::Proxy,
+            proxy_authority,
+            error,
+        ))
+    })?;
     let mut chosen = [0u8; 2];
-    control
-        .read_exact(&mut chosen)
-        .await
-        .map_err(|error| NetError::Connect(format!("socks5 greeting reply: {error}")))?;
+    control.read_exact(&mut chosen).await.map_err(|error| {
+        NetError::Connect(ConnectError::io(
+            DiagnosticPhase::Proxy,
+            proxy_authority,
+            error,
+        ))
+    })?;
     if chosen[0] != 0x05 || chosen[1] != 0x00 {
         // Credentials for a UDP association would need their own exchange; until
         // an authenticated association is implemented, say so rather than send
         // datagrams a proxy will drop.
-        return Err(NetError::Connect(
-            "socks5: UDP associate needs the no-auth method".into(),
-        ));
+        return Err(NetError::Connect(ConnectError::proxy(
+            proxy_authority,
+            "socks5: UDP associate needs the no-auth method",
+        )));
     }
 
     // UDP ASSOCIATE with a wildcard local address: netune does not know which
     // local address the relay socket will bind to, and proxies accept 0.0.0.0:0.
     let request = [0x05u8, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
-    control
-        .write_all(&request)
-        .await
-        .map_err(|error| NetError::Connect(format!("socks5 UDP associate: {error}")))?;
+    control.write_all(&request).await.map_err(|error| {
+        NetError::Connect(ConnectError::io(
+            DiagnosticPhase::Proxy,
+            proxy_authority,
+            error,
+        ))
+    })?;
 
     let mut reply = [0u8; 4];
-    control
-        .read_exact(&mut reply)
-        .await
-        .map_err(|error| NetError::Connect(format!("socks5 UDP associate reply: {error}")))?;
+    control.read_exact(&mut reply).await.map_err(|error| {
+        NetError::Connect(ConnectError::io(
+            DiagnosticPhase::Proxy,
+            proxy_authority,
+            error,
+        ))
+    })?;
     if reply[0] != 0x05 || reply[1] != 0x00 {
-        return Err(NetError::Connect(format!(
-            "socks5: UDP associate refused (code {:#04x})",
-            reply[1]
+        return Err(NetError::Connect(ConnectError::proxy(
+            proxy_authority,
+            format!("socks5: UDP associate refused (code {:#04x})", reply[1]),
         )));
     }
-    read_socks5_bound_address(control, reply[3]).await
+    read_socks5_bound_address(control, proxy_authority, reply[3]).await
 }
 
 /// Reads the address body of a SOCKS5 reply whose `ATYP` was already consumed.
 async fn read_socks5_bound_address(
     control: &mut Box<dyn crate::connect::Transport>,
+    proxy_authority: &str,
     atyp: u8,
 ) -> Result<SocketAddr, NetError> {
     use std::net::{Ipv4Addr, Ipv6Addr};
     match atyp {
         0x01 => {
             let mut raw = [0u8; 6];
-            control
-                .read_exact(&mut raw)
-                .await
-                .map_err(|error| NetError::Connect(format!("socks5 bound address: {error}")))?;
+            control.read_exact(&mut raw).await.map_err(|error| {
+                NetError::Connect(ConnectError::io(
+                    DiagnosticPhase::Proxy,
+                    proxy_authority,
+                    error,
+                ))
+            })?;
             let ip = Ipv4Addr::new(raw[0], raw[1], raw[2], raw[3]);
             let port = u16::from_be_bytes([raw[4], raw[5]]);
             Ok(SocketAddr::from((ip, port)))
         }
         0x04 => {
             let mut raw = [0u8; 18];
-            control
-                .read_exact(&mut raw)
-                .await
-                .map_err(|error| NetError::Connect(format!("socks5 bound address: {error}")))?;
+            control.read_exact(&mut raw).await.map_err(|error| {
+                NetError::Connect(ConnectError::io(
+                    DiagnosticPhase::Proxy,
+                    proxy_authority,
+                    error,
+                ))
+            })?;
             let mut octets = [0u8; 16];
             octets.copy_from_slice(&raw[..16]);
             let port = u16::from_be_bytes([raw[16], raw[17]]);
@@ -709,24 +855,34 @@ async fn read_socks5_bound_address(
         }
         0x03 => {
             let mut length = [0u8; 1];
-            control
-                .read_exact(&mut length)
-                .await
-                .map_err(|error| NetError::Connect(format!("socks5 bound address: {error}")))?;
+            control.read_exact(&mut length).await.map_err(|error| {
+                NetError::Connect(ConnectError::io(
+                    DiagnosticPhase::Proxy,
+                    proxy_authority,
+                    error,
+                ))
+            })?;
             let mut rest = vec![0u8; length[0] as usize + 2];
-            control
-                .read_exact(&mut rest)
-                .await
-                .map_err(|error| NetError::Connect(format!("socks5 bound address: {error}")))?;
+            control.read_exact(&mut rest).await.map_err(|error| {
+                NetError::Connect(ConnectError::io(
+                    DiagnosticPhase::Proxy,
+                    proxy_authority,
+                    error,
+                ))
+            })?;
             let port = u16::from_be_bytes([rest[rest.len() - 2], rest[rest.len() - 1]]);
             // Resolving a relay named by domain would need the caller's resolver
             // and would be a silent second DNS decision; refuse instead.
-            Err(NetError::Connect(format!(
-                "socks5: UDP relay returned a domain name (port {port}), which is not supported"
+            Err(NetError::Connect(ConnectError::proxy(
+                proxy_authority,
+                format!(
+                    "socks5: UDP relay returned a domain name (port {port}), which is not supported"
+                ),
             )))
         }
-        other => Err(NetError::Connect(format!(
-            "socks5: unknown address type {other}"
+        other => Err(NetError::Connect(ConnectError::proxy(
+            proxy_authority,
+            format!("socks5: unknown address type {other}"),
         ))),
     }
 }

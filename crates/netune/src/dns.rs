@@ -16,7 +16,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
-use crate::error::NetError;
+use crate::error::{NetError, ResolveError, ResolveErrorKind};
 
 /// Asynchronous resolver for network authorities (`host` or `host:port`).
 pub trait DnsResolver: Send + Sync + std::fmt::Debug {
@@ -39,14 +39,13 @@ impl DnsResolver for SystemResolver {
         port: u16,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<SocketAddr>, NetError>> + Send + 'a>> {
         Box::pin(async move {
-            let authority = format!("{host}:{port}");
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host(&authority)
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
                 .await
-                .map_err(|error| NetError::Resolve(format!("{host}: {error}")))?
+                .map_err(|error| NetError::Resolve(ResolveError::io(host, error)))?
                 .collect();
 
             if addrs.is_empty() {
-                Err(NetError::Resolve(format!("no addresses found for {host}")))
+                Err(NetError::Resolve(ResolveError::empty(host)))
             } else {
                 Ok(addrs)
             }
@@ -125,8 +124,10 @@ impl DnsResolver for StaticResolver {
             if let Some(fallback) = &self.fallback {
                 fallback.resolve(host, port).await
             } else {
-                Err(NetError::Resolve(format!(
-                    "static table has no entry for '{host}'"
+                Err(NetError::Resolve(ResolveError::new(
+                    ResolveErrorKind::Empty,
+                    host,
+                    format!("static table has no entry for '{host}'"),
                 )))
             }
         })

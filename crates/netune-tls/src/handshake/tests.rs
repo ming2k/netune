@@ -700,3 +700,696 @@ fn compressed_certificate_decompresses_zlib_and_brotli_and_hashes_wire_message()
         );
     }
 }
+
+fn encode_hrr_record(suite: u16, extensions: &[(u16, Vec<u8>)]) -> Vec<u8> {
+    let hrr_random: [u8; 32] = [
+        0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8,
+        0x91, 0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8,
+        0x33, 0x9c,
+    ];
+    let mut ext_bytes = Vec::new();
+    for (kind, payload) in extensions {
+        ext_bytes.extend_from_slice(&kind.to_be_bytes());
+        ext_bytes.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        ext_bytes.extend_from_slice(payload);
+    }
+    let mut body = Vec::new();
+    body.extend_from_slice(&0x0303u16.to_be_bytes()); // legacy_version
+    body.extend_from_slice(&hrr_random);
+    body.push(32); // session_id_len
+    body.extend_from_slice(&[0x22; 32]);
+    body.extend_from_slice(&suite.to_be_bytes());
+    body.push(0x00); // compression
+    body.extend_from_slice(&(ext_bytes.len() as u16).to_be_bytes());
+    body.extend_from_slice(&ext_bytes);
+
+    let mut msg = Vec::with_capacity(4 + body.len());
+    msg.push(super::SERVER_HELLO);
+    msg.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..4]);
+    msg.extend_from_slice(&body);
+    crate::record::unprotected_record(
+        crate::record::CONTENT_HANDSHAKE,
+        crate::record::LEGACY_VERSION_TLS13,
+        &msg,
+    )
+}
+
+#[test]
+fn hello_retry_request_completes_handshake_against_rustls() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+
+    let identity = test_support::tls::identity(&["localhost"], &[b"http/1.1"]);
+    for suite in [
+        rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256,
+        rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
+    ] {
+        let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+        provider.cipher_suites = vec![suite];
+        provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::SECP256R1];
+        let mut server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .expect("versions")
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![identity.certificate.clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(identity.key.clone()),
+                ),
+            )
+            .expect("cert");
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let server_config = Arc::new(server_config);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut conn = rustls::ServerConnection::new(server_config).expect("server");
+            let mut buf = [0u8; 16_384];
+            let mut replied = false;
+            loop {
+                while conn.wants_write() {
+                    let n = conn.write_tls(&mut &mut buf[..]).expect("write_tls");
+                    if n == 0 {
+                        break;
+                    }
+                    sock.write_all(&buf[..n]).expect("write");
+                }
+                if !conn.is_handshaking() && replied {
+                    break;
+                }
+                let n = sock.read(&mut buf).expect("read");
+                if n == 0 {
+                    break;
+                }
+                conn.read_tls(&mut &buf[..n]).expect("read_tls");
+                conn.process_new_packets().expect("process");
+                let mut plain = [0u8; 64];
+                if let Ok(r) = conn.reader().read(&mut plain)
+                    && r > 0
+                {
+                    assert_eq!(&plain[..r], b"ping");
+                    conn.writer().write_all(b"pong").expect("write pong");
+                    replied = true;
+                }
+            }
+        });
+
+        // Client shares ONLY x25519 (0x001d), forcing rustls to send HRR for P-256 (0x0017).
+        let shares = ClientKeyShare::generate(&[0x001d]).expect("shares");
+        let entries = shares
+            .iter()
+            .map(|s| KeyShareEntry {
+                group: s.group,
+                share: s.share.clone(),
+            })
+            .collect();
+        let hello = ClientHello::go_identity(GoIdentity {
+            server_name: "localhost",
+            alpn: &[b"http/1.1"],
+            random: [0x11; 32],
+            session_id: &[0x22; 32],
+            key_shares: entries,
+            cipher_suites: None,
+            kx_groups: Some(&[0x001d, 0x0017]),
+        });
+        let mut machine = ClientHandshake::start(hello, shares, AcceptAny).expect("start");
+        let mut sock = std::net::TcpStream::connect(addr).expect("connect");
+        sock.write_all(&machine.take_output()).expect("write ch1");
+
+        let mut buf = [0u8; 16_384];
+        let est = loop {
+            let n = sock.read(&mut buf).expect("read");
+            assert!(n > 0, "eof before established");
+            let progress = machine.progress(&buf[..n]).expect("progress");
+            let out = machine.take_output();
+            if !out.is_empty() {
+                sock.write_all(&out).expect("write flight");
+            }
+            if let HandshakeProgress::Established(est) = progress {
+                break est;
+            }
+        };
+        let (write, read) = match est.protectors {
+            super::Protectors::Tls13 { write, read, .. } => (write, read),
+            _ => panic!("expected tls 1.3"),
+        };
+        sock.write_all(
+            &write
+                .seal(0, CONTENT_APPLICATION_DATA, b"ping")
+                .expect("seal ping"),
+        )
+        .expect("send ping");
+        let mut hdr = [0u8; 5];
+        sock.read_exact(&mut hdr).expect("pong hdr");
+        let plen = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
+        let mut rec = Vec::with_capacity(5 + plen);
+        rec.extend_from_slice(&hdr);
+        rec.resize(5 + plen, 0);
+        sock.read_exact(&mut rec[5..]).expect("pong body");
+        let (ct, body) = read.open(0, &rec).expect("open pong");
+        assert_eq!(ct, CONTENT_APPLICATION_DATA);
+        assert_eq!(&body, b"pong");
+        server.join().expect("server thread");
+    }
+}
+
+#[test]
+fn hello_retry_request_handles_cookie_only_and_rebinds_or_strips_psk() {
+    // Part A: HRR with cookie ONLY (no key_share) preserves share, inserts
+    // `cookie` before `pre_shared_key`, and recomputes binder over HRR transcript.
+    let shares = ClientKeyShare::generate(&[0x001d]).expect("shares");
+    let entries = shares
+        .iter()
+        .map(|s| KeyShareEntry {
+            group: s.group,
+            share: s.share.clone(),
+        })
+        .collect();
+    let mut hello1 = ClientHello::go_identity(GoIdentity {
+        server_name: "localhost",
+        alpn: &[b"http/1.1"],
+        random: [0x11; 32],
+        session_id: &[0x22; 32],
+        key_shares: entries,
+        cipher_suites: None,
+        kx_groups: Some(&[0x001d, 0x0017]),
+    });
+    let psk = vec![0x77; 32];
+    hello1
+        .attach_psk_and_sign(
+            crate::hello::PskIdentity {
+                identity: b"ticket-id".to_vec(),
+                obfuscated_ticket_age: 123,
+            },
+            &psk,
+            crate::key_schedule::Hash::Sha256,
+        )
+        .expect("attach psk");
+    let ch1_msg = hello1.serialize().expect("serialize ch1");
+
+    let mut machine = ClientHandshake::start_with_psk(hello1, shares, AcceptAny, Some(psk.clone()))
+        .expect("start psk");
+    let _ = machine.take_output();
+
+    let mut cookie_wire = Vec::new();
+    cookie_wire.extend_from_slice(&(b"stateless-cookie".len() as u16).to_be_bytes());
+    cookie_wire.extend_from_slice(b"stateless-cookie");
+    let hrr_rec = encode_hrr_record(
+        0x1301,
+        &[
+            (0x002b, vec![0x03, 0x04]),
+            (crate::wire::EXT_COOKIE, cookie_wire.clone()),
+        ],
+    );
+    let hrr_msg = &hrr_rec[5..];
+
+    assert!(matches!(
+        machine.progress(&hrr_rec),
+        Ok(HandshakeProgress::Blocked)
+    ));
+    let ch2_rec = machine.take_output();
+    assert!(ch2_rec.len() > 5);
+    assert_eq!(machine.hrr_group, None);
+    let cookie_pos = machine
+        .hello
+        .extensions
+        .iter()
+        .position(|ext| {
+            matches!(&ext.body, ExtensionBody::Raw { kind, body }
+                if *kind == crate::wire::EXT_COOKIE && body == &cookie_wire)
+        })
+        .expect("CH2 must carry echoed cookie");
+    let psk_pos = machine
+        .hello
+        .extensions
+        .iter()
+        .position(|ext| matches!(ext.body, ExtensionBody::PreSharedKey { .. }))
+        .expect("CH2 must keep pre_shared_key last");
+    assert_eq!(psk_pos, machine.hello.extensions.len() - 1);
+    assert!(cookie_pos < psk_pos);
+
+    // Independently recompute expected RFC 8446 §4.2.11.2 binder over
+    // `message_hash || HRR || Truncated(CH2)`.
+    let ch2_msg = &ch2_rec[5..];
+    let ch1_hash =
+        crate::key_schedule::transcript_hash(crate::key_schedule::Hash::Sha256, &ch1_msg);
+    let mut prefix = vec![super::MESSAGE_HASH, 0x00, 0x00, 32];
+    prefix.extend_from_slice(&ch1_hash);
+    prefix.extend_from_slice(hrr_msg);
+    let binders_len = 2 + 1 + 32;
+    let mut binder_input = prefix.clone();
+    binder_input.extend_from_slice(&ch2_msg[..ch2_msg.len() - binders_len]);
+    let t_hash =
+        crate::key_schedule::transcript_hash(crate::key_schedule::Hash::Sha256, &binder_input);
+    let early =
+        crate::key_schedule::Secret::extract(&[0u8; 32], &psk, crate::key_schedule::Hash::Sha256);
+    let bkey = early
+        .derive_secret(
+            "res binder",
+            &crate::key_schedule::empty_transcript_hash(crate::key_schedule::Hash::Sha256),
+        )
+        .expect("bkey");
+    let fkey = bkey.finished_key().expect("fkey");
+    let expected_binder = aws_lc_rs::hmac::sign(
+        &aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &fkey),
+        &t_hash,
+    );
+    assert_eq!(&ch2_msg[ch2_msg.len() - 32..], expected_binder.as_ref());
+
+    // A second HRR must fail with TooManyRetries.
+    let err = machine
+        .progress(&hrr_rec)
+        .expect_err("second HRR must be refused");
+    assert!(matches!(
+        err,
+        super::HandshakeError::TooManyRetries { max: 1 }
+    ));
+
+    // Part B: HRR switching to SHA-384 suite (0x1302) strips SHA-256 PSK from CH2.
+    let shares = ClientKeyShare::generate(&[0x001d]).expect("shares");
+    let entries = shares
+        .iter()
+        .map(|s| KeyShareEntry {
+            group: s.group,
+            share: s.share.clone(),
+        })
+        .collect();
+    let mut hello_sha256_psk = ClientHello::go_identity(GoIdentity {
+        server_name: "localhost",
+        alpn: &[b"http/1.1"],
+        random: [0x11; 32],
+        session_id: &[0x22; 32],
+        key_shares: entries,
+        cipher_suites: Some(&[0x1301, 0x1302]),
+        kx_groups: Some(&[0x001d, 0x0017]),
+    });
+    hello_sha256_psk
+        .attach_psk_and_sign(
+            crate::hello::PskIdentity {
+                identity: b"ticket-id".to_vec(),
+                obfuscated_ticket_age: 123,
+            },
+            &[0x88; 32],
+            crate::key_schedule::Hash::Sha256,
+        )
+        .expect("attach psk");
+    let mut machine =
+        ClientHandshake::start_with_psk(hello_sha256_psk, shares, AcceptAny, Some(vec![0x88; 32]))
+            .expect("start");
+    let hrr_sha384 = encode_hrr_record(
+        0x1302,
+        &[(0x002b, vec![0x03, 0x04]), (0x0033, vec![0x00, 0x17])],
+    );
+    assert!(matches!(
+        machine.progress(&hrr_sha384),
+        Ok(HandshakeProgress::Blocked)
+    ));
+    assert!(machine.offered_psk.is_none());
+    assert!(
+        !machine
+            .hello
+            .extensions
+            .iter()
+            .any(|ext| matches!(ext.body, ExtensionBody::PreSharedKey { .. }))
+    );
+}
+
+#[test]
+fn hello_retry_request_rejects_malformed_extensions_and_already_shared_group() {
+    let make_machine = || {
+        let shares = ClientKeyShare::generate(&[0x001d]).expect("shares");
+        let entries = shares
+            .iter()
+            .map(|s| KeyShareEntry {
+                group: s.group,
+                share: s.share.clone(),
+            })
+            .collect();
+        let hello = ClientHello::go_identity(GoIdentity {
+            server_name: "localhost",
+            alpn: &[b"http/1.1"],
+            random: [0x11; 32],
+            session_id: &[0x22; 32],
+            key_shares: entries,
+            cipher_suites: None,
+            kx_groups: Some(&[0x001d, 0x0017]),
+        });
+        ClientHandshake::start(hello, shares, AcceptAny).expect("start")
+    };
+
+    // Malformed supported_versions (len 1).
+    let mut m = make_machine();
+    assert!(matches!(
+        m.progress(&encode_hrr_record(0x1301, &[(0x002b, vec![0x03])])),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+
+    // Malformed key_share (len 3).
+    let mut m = make_machine();
+    assert!(matches!(
+        m.progress(&encode_hrr_record(
+            0x1301,
+            &[(0x002b, vec![0x03, 0x04]), (0x0033, vec![0x00, 0x17, 0x00])],
+        )),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+
+    // Empty cookie vector (violates cookie<1..2^16-1>).
+    let mut m = make_machine();
+    assert!(matches!(
+        m.progress(&encode_hrr_record(
+            0x1301,
+            &[
+                (0x002b, vec![0x03, 0x04]),
+                (crate::wire::EXT_COOKIE, vec![0x00, 0x00])
+            ],
+        )),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+
+    // Neither key_share nor cookie.
+    let mut m = make_machine();
+    assert!(matches!(
+        m.progress(&encode_hrr_record(0x1301, &[(0x002b, vec![0x03, 0x04])])),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+
+    // Requesting a group already shared in ClientHello1.
+    let mut m = make_machine();
+    assert!(matches!(
+        m.progress(&encode_hrr_record(
+            0x1301,
+            &[(0x002b, vec![0x03, 0x04]), (0x0033, vec![0x00, 0x1d])],
+        )),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+}
+
+#[test]
+fn tls12_plaintext_new_session_ticket_before_ccs_is_accepted_against_rustls() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+
+    let identity = test_support::tls::identity(&["localhost"], &[b"http/1.1"]);
+    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+    provider.cipher_suites =
+        vec![rustls::crypto::aws_lc_rs::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256];
+    let mut server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS12])
+        .expect("tls12")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![identity.certificate.clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+                identity.key.clone(),
+            )),
+        )
+        .expect("cert");
+    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    server_config.ticketer = rustls::crypto::aws_lc_rs::Ticketer::new().expect("ticketer");
+    let server_config = Arc::new(server_config);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("accept");
+        let mut conn = rustls::ServerConnection::new(server_config).expect("server");
+        let mut buf = [0u8; 16_384];
+        let mut sent = false;
+        loop {
+            while conn.wants_write() {
+                let n = conn.write_tls(&mut &mut buf[..]).expect("write_tls");
+                if n == 0 {
+                    break;
+                }
+                sock.write_all(&buf[..n]).expect("write");
+            }
+            if !conn.is_handshaking() && sent {
+                break;
+            }
+            let n = sock.read(&mut buf).expect("read");
+            if n == 0 {
+                break;
+            }
+            conn.read_tls(&mut &buf[..n]).expect("read_tls");
+            conn.process_new_packets().expect("process");
+            let mut plain = [0u8; 64];
+            if let Ok(r) = conn.reader().read(&mut plain)
+                && r > 0
+            {
+                assert_eq!(&plain[..r], b"hello12");
+                conn.writer().write_all(b"world12").expect("write");
+                sent = true;
+            }
+        }
+    });
+
+    let shares = ClientKeyShare::generate(&[0x001d]).expect("shares");
+    let entries = shares
+        .iter()
+        .map(|s| KeyShareEntry {
+            group: s.group,
+            share: s.share.clone(),
+        })
+        .collect();
+    let hello = ClientHello::go_identity(GoIdentity {
+        server_name: "localhost",
+        alpn: &[b"http/1.1"],
+        random: [0x31; 32],
+        session_id: &[0x32; 32],
+        key_shares: entries,
+        cipher_suites: None,
+        kx_groups: Some(&[0x001d, 0x0017]),
+    });
+    let mut machine = ClientHandshake::start(hello, shares, AcceptAny).expect("start");
+    let mut sock = std::net::TcpStream::connect(addr).expect("connect");
+    sock.write_all(&machine.take_output()).expect("write ch");
+
+    let mut buf = [0u8; 16_384];
+    let est = loop {
+        let n = sock.read(&mut buf).expect("read");
+        assert!(n > 0);
+        let progress = machine.progress(&buf[..n]).expect("progress");
+        let out = machine.take_output();
+        if !out.is_empty() {
+            sock.write_all(&out).expect("write flight");
+        }
+        if let HandshakeProgress::Established(est) = progress {
+            break est;
+        }
+    };
+    let (write, read) = match est.protectors {
+        super::Protectors::Tls12 { write, read, .. } => (write, read),
+        _ => panic!("expected tls 1.2"),
+    };
+    sock.write_all(
+        &write
+            .seal(1, CONTENT_APPLICATION_DATA, b"hello12")
+            .expect("seal"),
+    )
+    .expect("send");
+    let mut hdr = [0u8; 5];
+    sock.read_exact(&mut hdr).expect("hdr");
+    let plen = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
+    let mut rec = Vec::with_capacity(5 + plen);
+    rec.extend_from_slice(&hdr);
+    rec.resize(5 + plen, 0);
+    sock.read_exact(&mut rec[5..]).expect("body");
+    let (ct, body) = read.open(1, &rec).expect("open");
+    assert_eq!(ct, CONTENT_APPLICATION_DATA);
+    assert_eq!(&body, b"world12");
+    server.join().expect("server");
+}
+
+#[test]
+fn take_u24_handles_messages_larger_than_64kib() {
+    let mut buf = vec![0x01, 0x11, 0x70]; // 70_000 in 24-bit big endian
+    buf.extend_from_slice(&vec![0xab; 70_000]);
+    buf.extend_from_slice(b"tail");
+    let (len, rest) = super::take_u24(&buf).expect("take_u24 > 64 KiB");
+    assert_eq!(len, 70_000);
+    assert_eq!(rest.len(), 70_004);
+    assert_eq!(&rest[70_000..], b"tail");
+}
+
+fn encode_server_hello_record(suite: u16, extensions: &[(u16, Vec<u8>)]) -> Vec<u8> {
+    let mut ext_bytes = Vec::new();
+    for (kind, payload) in extensions {
+        ext_bytes.extend_from_slice(&kind.to_be_bytes());
+        ext_bytes.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        ext_bytes.extend_from_slice(payload);
+    }
+    let mut body = Vec::new();
+    body.extend_from_slice(&0x0303u16.to_be_bytes()); // legacy_version
+    body.extend_from_slice(&[0x44; 32]); // normal server_random (not HRR)
+    body.push(32);
+    body.extend_from_slice(&[0x22; 32]); // echoed session_id
+    body.extend_from_slice(&suite.to_be_bytes());
+    body.push(0x00); // null compression
+    body.extend_from_slice(&(ext_bytes.len() as u16).to_be_bytes());
+    body.extend_from_slice(&ext_bytes);
+
+    let mut msg = Vec::with_capacity(4 + body.len());
+    msg.push(super::SERVER_HELLO);
+    msg.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..4]);
+    msg.extend_from_slice(&body);
+    crate::record::unprotected_record(
+        crate::record::CONTENT_HANDSHAKE,
+        crate::record::LEGACY_VERSION_TLS13,
+        &msg,
+    )
+}
+
+fn go_test_handshake() -> ClientHandshake<AcceptAny> {
+    let shares = ClientKeyShare::generate(&[0x001d]).expect("shares");
+    let entries = shares
+        .iter()
+        .map(|s| KeyShareEntry {
+            group: s.group,
+            share: s.share.clone(),
+        })
+        .collect();
+    let hello = ClientHello::go_identity(GoIdentity {
+        server_name: "localhost",
+        alpn: &[b"http/1.1"],
+        random: [0x11; 32],
+        session_id: &[0x22; 32],
+        key_shares: entries,
+        cipher_suites: None,
+        kx_groups: Some(&[0x001d, 0x0017]),
+    });
+    ClientHandshake::start(hello, shares, AcceptAny).expect("start")
+}
+
+#[test]
+fn server_hello_and_hrr_reject_duplicates_forbidden_extensions_empty_fragments_and_bad_ccs() {
+    // 1. Duplicate extension in ServerHello is rejected (RFC 8446 §4.2).
+    let mut m = go_test_handshake();
+    assert!(matches!(
+        m.progress(&encode_server_hello_record(
+            0x1301,
+            &[(0x002b, vec![0x03, 0x04]), (0x002b, vec![0x03, 0x04]),],
+        )),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+
+    // 2. Forbidden extensions in HelloRetryRequest (ALPN, record_size_limit, pre_shared_key)
+    // are rejected and do not mutate `negotiated_alpn` or `max_write_plaintext`.
+    let mut m = go_test_handshake();
+    assert!(matches!(
+        m.progress(&encode_hrr_record(
+            0x1301,
+            &[
+                (0x002b, vec![0x03, 0x04]),
+                (0x0033, vec![0x00, 0x17]),
+                (
+                    0x0010,
+                    vec![
+                        0x00, 0x09, 0x08, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1'
+                    ]
+                ),
+            ],
+        )),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+    assert!(m.negotiated_alpn.is_none());
+
+    let mut m = go_test_handshake();
+    assert!(matches!(
+        m.progress(&encode_hrr_record(
+            0x1301,
+            &[
+                (0x002b, vec![0x03, 0x04]),
+                (0x0033, vec![0x00, 0x17]),
+                (0x001c, vec![0x04, 0x00]),
+            ],
+        )),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+    assert_eq!(m.max_write_plaintext, crate::record::MAX_PLAINTEXT_LEN);
+
+    let mut m = go_test_handshake();
+    assert!(matches!(
+        m.progress(&encode_hrr_record(
+            0x1301,
+            &[
+                (0x002b, vec![0x03, 0x04]),
+                (0x0033, vec![0x00, 0x17]),
+                (0x0029, vec![0x00, 0x00]),
+            ],
+        )),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+
+    // 3. TLS 1.3 ServerHello must reject ALPN / record_size_limit (they belong in EncryptedExtensions).
+    let mut m = go_test_handshake();
+    assert!(matches!(
+        m.progress(&encode_server_hello_record(
+            0x1301,
+            &[
+                (0x002b, vec![0x03, 0x04]),
+                (0x0033, vec![0x00, 0x1d, 0x00, 0x20]),
+                (0x001c, vec![0x04, 0x00]),
+            ],
+        )),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+
+    // 4. TLS 1.2 ServerHello must reject TLS 1.3 key_share / pre_shared_key extensions.
+    let mut m = go_test_handshake();
+    assert!(matches!(
+        m.progress(&encode_server_hello_record(
+            0xc02f,
+            &[
+                (0xff01, vec![0x00]),
+                (0x0017, vec![]),
+                (0x0033, vec![0x00, 0x1d, 0x00, 0x20]),
+            ],
+        )),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+
+    // 5. Empty handshake fragment (len = 0) and malformed CCS payload (!= [0x01]) are rejected.
+    let mut m = go_test_handshake();
+    let empty_hs = crate::record::unprotected_record(
+        crate::record::CONTENT_HANDSHAKE,
+        crate::record::LEGACY_VERSION_TLS13,
+        &[],
+    );
+    assert!(matches!(
+        m.progress(&empty_hs),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+
+    let mut m = go_test_handshake();
+    let bad_ccs = crate::record::unprotected_record(
+        crate::record::CONTENT_CHANGE_CIPHER_SPEC,
+        crate::record::LEGACY_VERSION_TLS13,
+        &[0x02],
+    );
+    assert!(matches!(
+        m.progress(&bad_ccs),
+        Err(super::HandshakeError::ProtocolViolation { .. })
+    ));
+
+    // 6. Premature TLS 1.2 ChangeCipherSpec before client flight / pending keys is rejected.
+    let mut m = go_test_handshake();
+    let tls12_sh = encode_server_hello_record(0xc02f, &[(0xff01, vec![0x00]), (0x0017, vec![])]);
+    assert!(matches!(
+        m.progress(&tls12_sh),
+        Ok(HandshakeProgress::Blocked)
+    ));
+    let valid_ccs = crate::record::unprotected_record(
+        crate::record::CONTENT_CHANGE_CIPHER_SPEC,
+        crate::record::LEGACY_VERSION_TLS13,
+        &[0x01],
+    );
+    assert!(matches!(
+        m.progress(&valid_ccs),
+        Err(super::HandshakeError::UnexpectedRecord { .. })
+    ));
+}

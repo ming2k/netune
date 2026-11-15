@@ -78,7 +78,9 @@ pub use connect::{
 };
 pub use decompress::Decoder;
 pub use dns::{DnsResolver, StaticResolver, SystemResolver};
-pub use error::{AttemptError, NetError};
+pub use error::{
+    AttemptError, ConnectError, ConnectErrorKind, NetError, ResolveError, ResolveErrorKind,
+};
 pub use evasion::SegmentingIo;
 #[cfg(feature = "http2")]
 pub use h2_client::H2Client;
@@ -95,7 +97,10 @@ pub use netune_http2::{
 /// orchestrators must not depend on each other (ADR-0011).
 pub use netune_io::{Fault, FaultIo, FaultScript, RingIo, TimedIo};
 pub use netune_tls::handshake::ServerCertVerifier;
-pub use netune_trace::{ConnectionIdentity, EvasionPolicy, Fidelity, RequestTrace, TraceCollector};
+pub use netune_trace::{
+    ConnectionIdentity, DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EvasionPolicy, Fidelity,
+    RequestTrace, TraceCollector,
+};
 #[cfg(feature = "ws")]
 pub use netune_ws::{CloseCode, CloseReason, Message as WsMessage, Opcode as WsOpcode};
 pub use pool::{IdleConnection, Pool, PoolConfig, PoolKey};

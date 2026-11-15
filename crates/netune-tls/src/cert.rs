@@ -12,6 +12,7 @@ fn tlv_value(tlv: &[u8]) -> Option<&[u8]> {
         length if *length < 0x80 => tlv.get(2..),
         0x81 => tlv.get(3..),
         0x82 => tlv.get(4..),
+        0x83 => tlv.get(5..),
         _ => None,
     }
 }
@@ -20,12 +21,9 @@ fn tlv_value(tlv: &[u8]) -> Option<&[u8]> {
 /// encoded TLV and the rest.
 fn take_tlv(input: &[u8]) -> Option<(&[u8], &[u8])> {
     let (_tag, rest) = input.split_first()?;
-    // Long-form lengths only go up to two bytes here; certificates never
-    // need more, and the u32 arithmetic is bounded by the slice length.
+    // Long-form lengths up to three bytes (16 MiB), bounded by the slice length.
     let (length, rest) = match rest.first()? {
         length if *length < 0x80 => (*length as usize, &rest[1..]),
-        // 0x81/0x82 announce two- and one-byte lengths; the marker byte
-        // itself is not part of the length.
         0x81 => {
             let (&len, rest) = rest[1..].split_first()?;
             (len as usize, rest)
@@ -33,6 +31,13 @@ fn take_tlv(input: &[u8]) -> Option<(&[u8], &[u8])> {
         0x82 => {
             let (bytes, rest) = rest[1..].split_first_chunk::<2>()?;
             (u16::from_be_bytes(*bytes) as usize, rest)
+        }
+        0x83 => {
+            let (bytes, rest) = rest[1..].split_first_chunk::<3>()?;
+            (
+                u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]) as usize,
+                rest,
+            )
         }
         _ => return None,
     };
@@ -109,5 +114,50 @@ mod tests {
         assert!(subject_public_key_info(&[]).is_none());
         assert!(subject_public_key_info(&[0x30]).is_none());
         assert!(subject_public_key_info(&[0x30, 0x03, 0x00]).is_none());
+    }
+
+    fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        let len = value.len();
+        if len < 0x80 {
+            out.push(len as u8);
+        } else if len <= 0xff {
+            out.push(0x81);
+            out.push(len as u8);
+        } else if len <= 0xffff {
+            out.push(0x82);
+            out.extend_from_slice(&(len as u16).to_be_bytes());
+        } else {
+            out.push(0x83);
+            out.extend_from_slice(&(len as u32).to_be_bytes()[1..4]);
+        }
+        out.extend_from_slice(value);
+        out
+    }
+
+    #[test]
+    fn a_certificate_with_three_byte_der_lengths_yields_a_spki() {
+        let spki = [
+            0x30, 0x0a, 0x30, 0x03, 0x02, 0x01, 0x00, 0x03, 0x03, 0x00, 0xaa, 0xbb,
+        ];
+        // Make `subject` larger than 64 KiB so `subject`, `tbsCertificate`, and
+        // `Certificate` all exercise 3-byte (0x83) DER length prefixes.
+        let large_subject = der_tlv(0x30, &vec![0x04; 66_000]);
+        let mut tbs_body = Vec::new();
+        tbs_body.extend_from_slice(&[0xa0, 0x03, 0x02, 0x01, 0x03]); // version
+        tbs_body.extend_from_slice(&[0x02, 0x01, 0x01]); // serial
+        tbs_body.extend_from_slice(&[0x30, 0x00]); // signature
+        tbs_body.extend_from_slice(&[0x30, 0x00]); // issuer
+        tbs_body.extend_from_slice(&[0x30, 0x00]); // validity
+        tbs_body.extend_from_slice(&large_subject); // subject (>64 KiB)
+        tbs_body.extend_from_slice(&spki);
+        let tbs = der_tlv(0x30, &tbs_body);
+        let mut cert_body = Vec::new();
+        cert_body.extend_from_slice(&tbs);
+        cert_body.extend_from_slice(&[0x30, 0x00, 0x03, 0x00]);
+        let certificate = der_tlv(0x30, &cert_body);
+
+        let extracted = subject_public_key_info(&certificate).expect("3-byte DER length parses");
+        assert_eq!(extracted, spki);
     }
 }

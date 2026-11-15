@@ -292,3 +292,58 @@ fn unprotected_records_frame_verbatim() {
     let record = unprotected_record(CONTENT_APPLICATION_DATA, LEGACY_VERSION_TLS13, &[]);
     assert_eq!(record[..RECORD_HEADER_LEN], [0x17, 0x03, 0x03, 0x00, 0x00]);
 }
+
+#[test]
+fn tls12_seal_enforces_max_plaintext_len() {
+    let protector = super::RecordProtector12::new(super::RecordCipher12::AesCbcSha1 {
+        mac_key: vec![0x11; 20],
+        write_key: vec![0x22; 16],
+        fixed_iv: [0; 16],
+        algorithm: &aws_lc_rs::cipher::AES_128,
+    })
+    .expect("protector");
+    assert_eq!(
+        protector.seal(
+            0,
+            CONTENT_APPLICATION_DATA,
+            &vec![0u8; super::MAX_PLAINTEXT_LEN + 1],
+        ),
+        Err(RecordError::RecordTooLarge {
+            len: super::MAX_PLAINTEXT_LEN + 1,
+            max: super::MAX_PLAINTEXT_LEN,
+        }),
+    );
+}
+
+#[test]
+fn tls12_cbc_open_rejects_empty_and_unaligned_ciphertext_without_panicking() {
+    let unprotector = super::RecordUnprotector12::new(super::RecordCipher12::AesCbcSha1 {
+        mac_key: vec![0x11; 20],
+        write_key: vec![0x22; 16],
+        fixed_iv: [0; 16],
+        algorithm: &aws_lc_rs::cipher::AES_128,
+    })
+    .expect("unprotector");
+
+    // 16-byte record payload = 16-byte explicit IV + 0-byte ciphertext (< 32-byte minimum).
+    let empty_ct = unprotected_record(CONTENT_APPLICATION_DATA, LEGACY_VERSION_TLS13, &[0xaa; 16]);
+    assert_eq!(
+        unprotector.open(0, &empty_ct),
+        Err(RecordError::LengthMismatch {
+            got: RECORD_HEADER_LEN + 16,
+            declared: RECORD_HEADER_LEN + 32,
+        })
+    );
+
+    // 35-byte record payload = 16-byte explicit IV + 19-byte unaligned ciphertext.
+    let unaligned_ct =
+        unprotected_record(CONTENT_APPLICATION_DATA, LEGACY_VERSION_TLS13, &[0xbb; 35]);
+    assert_eq!(
+        unprotector.open(0, &unaligned_ct),
+        Err(RecordError::DecryptionFailed)
+    );
+
+    // Direct guard on cbc_transform itself: empty or unaligned input never panics.
+    assert!(super::cbc_transform(128, &[0x22; 16], [0; 16], &[], false).is_err());
+    assert!(super::cbc_transform(128, &[0x22; 16], [0; 16], &[0; 3], false).is_err());
+}

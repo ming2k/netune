@@ -39,6 +39,8 @@ pub const EXT_PRE_SHARED_KEY: u16 = 0x0029;
 pub const EXT_PSK_KEY_EXCHANGE_MODES: u16 = 0x002d;
 /// `post_handshake_auth` (RFC 8446 §4.2.6).
 pub const EXT_POST_HANDSHAKE_AUTH: u16 = 0x0031;
+/// `cookie` (RFC 8446 §4.2.2).
+pub const EXT_COOKIE: u16 = 0x002c;
 /// `signature_algorithms_cert`.
 pub const EXT_SIGNATURE_ALGORITHMS_CERT: u16 = 0x0032;
 /// `key_share`.

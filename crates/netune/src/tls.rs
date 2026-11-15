@@ -23,7 +23,7 @@ use netune_trace::{
 };
 
 use crate::connect::{Connector, Established, Target};
-use crate::error::NetError;
+use crate::error::{ConnectError, NetError};
 use crate::handshake::{DEFAULT_HANDSHAKE_TIMEOUT, bound};
 use crate::tls_profile::{Preset, TlsProfile};
 
@@ -106,9 +106,12 @@ fn unknown_profile_error(name: &str) -> NetError {
         .map(|preset| preset.name())
         .collect::<Vec<_>>()
         .join(", ");
-    NetError::Connect(format!(
-        "unknown TLS profile {name:?} (not a built-in preset: {known}, nor registered with \
-         with_profile_named)"
+    NetError::Connect(ConnectError::config(
+        DiagnosticPhase::Tls,
+        format!(
+            "unknown TLS profile {name:?} (not a built-in preset: {known}, nor registered with \
+             with_profile_named)"
+        ),
     ))
 }
 
@@ -138,6 +141,10 @@ impl<C: Connector> TlsRouterConnector<C> {
         };
         let offered_psk = if profile.blueprint.psk_key_exchange_modes.is_some()
             && let Some(ticket) = self.session_cache.take(&session_key)
+            && profile
+                .blueprint
+                .cipher_suites
+                .contains(&ticket.cipher_suite)
         {
             let age_ms = ticket.obfuscated_age_ms(std::time::Instant::now());
             hello
@@ -149,7 +156,12 @@ impl<C: Connector> TlsRouterConnector<C> {
                     &ticket.psk,
                     ticket.hash,
                 )
-                .map_err(|error| NetError::Connect(format!("TLS PSK binder: {error}")))?;
+                .map_err(|error| {
+                    NetError::Connect(ConnectError::tls(
+                        server_name.clone(),
+                        format!("TLS PSK binder: {error}"),
+                    ))
+                })?;
             Some(ticket.psk)
         } else {
             None
@@ -163,10 +175,11 @@ impl<C: Connector> TlsRouterConnector<C> {
         };
         let connecting = async {
             connector
-                .connect_with_session(
+                .connect_for_server(
                     established.stream,
                     netune_tls::OwnedConnectParams { hello, shares },
                     self.verifier.clone(),
+                    Some(server_name.as_str()),
                     offered_psk,
                     session_store,
                 )
@@ -174,8 +187,10 @@ impl<C: Connector> TlsRouterConnector<C> {
         };
         let stream = bound(
             self.handshake_timeout,
+            DiagnosticPhase::Tls,
             "TLS handshake",
             &server_name,
+            recorder,
             connecting,
         )
         .await?
@@ -186,7 +201,7 @@ impl<C: Connector> TlsRouterConnector<C> {
                     .with_phase(DiagnosticPhase::Tls)
                     .with_message(message.clone()),
             );
-            NetError::Connect(message)
+            NetError::Connect(ConnectError::tls(server_name.clone(), message).with_source(error))
         })?;
 
         let alpn = match stream.alpn() {
@@ -236,8 +251,9 @@ impl<C: Connector> Connector for TlsRouterConnector<C> {
         if let Some(engine) = target.tls_engine()
             && engine != "netune-tls"
         {
-            return Err(NetError::Connect(format!(
-                "unknown TLS engine {engine:?} (the owned engine is \"netune-tls\")"
+            return Err(NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Tls,
+                format!("unknown TLS engine {engine:?} (the owned engine is \"netune-tls\")"),
             )));
         }
         let name = target.tls_profile().unwrap_or(Preset::NetuneDefault.name());

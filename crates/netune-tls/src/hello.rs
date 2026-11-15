@@ -500,18 +500,75 @@ impl ClientHello {
         let hash_len = hash.output_len();
         self.extensions
             .retain(|ext| !matches!(ext.body, ExtensionBody::PreSharedKey { .. }));
+
+        // If a prior padding policy sized the ClientHello body to a target
+        // (such as BoringSsl517's 512-byte body), rebalance or drop the
+        // padding after inserting the PSK extension rather than stacking both.
+        let padded_target = if self
+            .extensions
+            .iter()
+            .any(|ext| matches!(ext.body, ExtensionBody::Padding { .. }))
+        {
+            Some(self.serialize()?.len().saturating_sub(4))
+        } else {
+            None
+        };
+        let pad_pos = self
+            .extensions
+            .iter()
+            .position(|ext| matches!(ext.body, ExtensionBody::Padding { .. }));
+        self.extensions
+            .retain(|ext| !matches!(ext.body, ExtensionBody::Padding { .. }));
+
         self.extensions.push(Extension {
             body: ExtensionBody::PreSharedKey {
                 identities: vec![identity],
                 binders: vec![vec![0u8; hash_len]],
             },
         });
+
+        if let (Some(target), Some(idx)) = (padded_target, pad_pos) {
+            let unpadded_with_psk = self.serialize()?.len().saturating_sub(4);
+            let needed = target.saturating_sub(unpadded_with_psk);
+            if needed >= 4 {
+                let insert_at = idx.min(self.extensions.len().saturating_sub(1));
+                self.extensions.insert(
+                    insert_at,
+                    Extension {
+                        body: ExtensionBody::Padding { len: needed - 4 },
+                    },
+                );
+            }
+        }
+        self.rebind_psk_with_prefix(&[], psk, hash)
+    }
+
+    /// Recompute the PSK binder on the trailing `pre_shared_key` extension
+    /// over `transcript_prefix || Truncated(ClientHello)` (RFC 8446 §4.2.11.2,
+    /// including a `ClientHello2` after a `HelloRetryRequest`).
+    pub(crate) fn rebind_psk_with_prefix(
+        &mut self,
+        transcript_prefix: &[u8],
+        psk: &[u8],
+        hash: crate::key_schedule::Hash,
+    ) -> Result<(), HelloError> {
+        let hash_len = hash.output_len();
+        let binders_len = match self.extensions.last_mut() {
+            Some(Extension {
+                body: ExtensionBody::PreSharedKey { binders, .. },
+            }) if !binders.is_empty() => {
+                binders[0].resize(hash_len, 0);
+                2 + binders.iter().map(|b| 1 + b.len()).sum::<usize>()
+            }
+            _ => return Ok(()),
+        };
         let serialized = self.serialize()?;
-        // Truncate right before `PskBinderEntry binders<33..2^16-1>`:
-        // 2-byte binders vector length + 1-byte binder length + hash_len.
-        let binders_len = 2 + 1 + hash_len;
+        // Truncate right before `PskBinderEntry binders<33..2^16-1>`.
         let truncated = &serialized[..serialized.len().saturating_sub(binders_len)];
-        let transcript = crate::key_schedule::transcript_hash(hash, truncated);
+        let mut full_input = Vec::with_capacity(transcript_prefix.len() + truncated.len());
+        full_input.extend_from_slice(transcript_prefix);
+        full_input.extend_from_slice(truncated);
+        let transcript = crate::key_schedule::transcript_hash(hash, &full_input);
 
         let zeros = vec![0u8; hash_len];
         let early = crate::key_schedule::Secret::extract(&zeros, psk, hash);
@@ -536,6 +593,7 @@ impl ClientHello {
         if let Some(Extension {
             body: ExtensionBody::PreSharedKey { binders, .. },
         }) = self.extensions.last_mut()
+            && !binders.is_empty()
         {
             binders[0] = binder;
         }
@@ -1246,11 +1304,19 @@ impl ClientHelloBlueprint {
         let mut padding_index = None;
         for slot in slots {
             match slot {
-                ExtensionSlot::ServerName => extensions.push(Extension {
-                    body: ExtensionBody::ServerName {
-                        name: params.server_name.to_owned(),
-                    },
-                }),
+                ExtensionSlot::ServerName => {
+                    // RFC 6066 §3: literal IPv4/IPv6 addresses and empty host
+                    // names are not permitted in the SNI HostName extension.
+                    if !params.server_name.is_empty()
+                        && params.server_name.parse::<std::net::IpAddr>().is_err()
+                    {
+                        extensions.push(Extension {
+                            body: ExtensionBody::ServerName {
+                                name: params.server_name.to_owned(),
+                            },
+                        });
+                    }
+                }
                 ExtensionSlot::EcPointFormats => extensions.push(Extension {
                     body: ExtensionBody::EcPointFormats {
                         formats: vec![0x00],

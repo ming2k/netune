@@ -34,16 +34,17 @@ use aws_lc_rs::hmac;
 use aws_lc_rs::signature::{UnparsedPublicKey, VerificationAlgorithm};
 
 use crate::cert::subject_public_key_info;
-use crate::hello::{ClientHello, ExtensionBody, HelloError, KeyShareEntry};
+use crate::hello::{ClientHello, Extension, ExtensionBody, HelloError, KeyShareEntry};
 use crate::key_exchange::{self, AgreementError, ClientKeyShare};
 use crate::key_schedule::{self, Hash, ScheduleError, Secret};
 use crate::record::{
     CONTENT_ALERT, CONTENT_APPLICATION_DATA, CONTENT_CHANGE_CIPHER_SPEC, CONTENT_HANDSHAKE,
-    LEGACY_VERSION_TLS12, LEGACY_VERSION_TLS13, MAX_CIPHERTEXT_LEN, RECORD_HEADER_LEN, RecordError,
-    RecordHeader, RecordProtector12, RecordProtector13, RecordUnprotector12, RecordUnprotector13,
-    unprotected_record,
+    LEGACY_VERSION_TLS12, LEGACY_VERSION_TLS13, MAX_CIPHERTEXT_LEN, MAX_PLAINTEXT_LEN,
+    RECORD_HEADER_LEN, RecordError, RecordHeader, RecordProtector12, RecordProtector13,
+    RecordUnprotector12, RecordUnprotector13, unprotected_record,
 };
 use crate::tls12::{self, Suite12Params};
+use crate::wire::EXT_COOKIE;
 
 /// The only handshake message a TLS 1.3 client may see in the clear:
 /// `server_hello`, which is also how a HelloRetryRequest arrives.
@@ -53,6 +54,8 @@ pub(crate) const NEW_SESSION_TICKET: u8 = 4;
 const COMPRESSED_CERTIFICATE: u8 = 25;
 /// `key_update` (TLS 1.3 §4.6.3).
 pub(crate) const KEY_UPDATE: u8 = 24;
+/// `message_hash` synthetic handshake message for HRR transcripts (RFC 8446 §4.4.1).
+const MESSAGE_HASH: u8 = 254;
 /// `encrypted_extensions`.
 const ENCRYPTED_EXTENSIONS: u8 = 8;
 /// `certificate`.
@@ -85,11 +88,14 @@ const CERTIFICATE_VERIFY_PAD: [u8; 64] = [b' '; 64];
 /// The server-side context string of a CertificateVerify.
 const SERVER_CERTIFICATE_VERIFY_CONTEXT: &[u8] = b"TLS 1.3, server CertificateVerify";
 
-/// The raw record reassembly bound: one maximum record plus its header.
-const RECORD_BUFFER_LIMIT: usize = RECORD_HEADER_LEN + MAX_CIPHERTEXT_LEN;
 /// The reassembled handshake-flight bound. The reference server flight is
 /// under a kilobyte; the bound turns an unbounded peer stream into a refusal.
-const MAX_FLIGHT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_FLIGHT_BYTES: usize = 256 * 1024;
+/// The raw record reassembly bound across coalesced TCP reads. Each individual
+/// record header is still checked against [`MAX_CIPHERTEXT_LEN`] in
+/// `take_record`, while the buffer as a whole is bounded by [`MAX_FLIGHT_BYTES`]
+/// so two 16 KiB socket reads that straddle a record boundary never fail.
+const RECORD_BUFFER_LIMIT: usize = MAX_FLIGHT_BYTES;
 /// The HelloRetryRequest limit: one retry is the protocol's shape; two is a
 /// loop.
 const MAX_HELLO_RETRIES: u8 = 1;
@@ -220,10 +226,17 @@ pub struct Established {
     /// TLS 1.3 `resumption_master_secret` (RFC 8446 §7.1) for deriving
     /// single-use PSKs from `NewSessionTicket` messages.
     pub(crate) resumption_master: Option<Secret>,
+    /// TLS 1.3 client application traffic secret (for RFC 8446 §4.6.3 `KeyUpdate`).
+    pub(crate) client_ap_secret: Option<Secret>,
+    /// TLS 1.3 server application traffic secret (for RFC 8446 §4.6.3 `KeyUpdate`).
+    pub(crate) server_ap_secret: Option<Secret>,
     /// Transcript hash of the negotiated cipher suite.
     pub(crate) hash: Hash,
     /// Negotiated wire cipher suite.
     pub(crate) cipher_suite: Option<u16>,
+    /// Maximum plaintext payload per outgoing record (RFC 8449 `record_size_limit`,
+    /// bounded by [`MAX_PLAINTEXT_LEN`]).
+    pub(crate) max_write_plaintext: usize,
 }
 
 /// The record protection pair of an established connection.
@@ -316,6 +329,7 @@ pub struct ClientHandshake<V: ServerCertVerifier> {
     tls12_server_finished_hash: Option<Vec<u8>>,
     tls12_write: Option<RecordProtector12>,
     tls12_write_seq: u64,
+    tls12_pending_read: Option<RecordUnprotector12>,
     tls12_read: Option<RecordUnprotector12>,
     tls12_read_seq: u64,
     hash: Hash,
@@ -332,12 +346,17 @@ pub struct ClientHandshake<V: ServerCertVerifier> {
     offered_psk: Option<Vec<u8>>,
     resumed: bool,
     resumption_master: Option<Secret>,
+    client_ap_secret: Option<Secret>,
+    server_ap_secret: Option<Secret>,
     protectors: Option<Protectors>,
     client_hs_secret: Option<Secret>,
     server_hs_secret: Option<Secret>,
     handshake_secret: Option<Secret>,
     server_sent_ccs: bool,
     hrr_count: u8,
+    hrr_suite: Option<u16>,
+    hrr_group: Option<u16>,
+    max_write_plaintext: usize,
     pending_output: Vec<u8>,
 }
 
@@ -420,6 +439,7 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
             tls12_server_finished_hash: None,
             tls12_write: None,
             tls12_write_seq: 0,
+            tls12_pending_read: None,
             tls12_read: None,
             tls12_read_seq: 0,
             hash: Hash::Sha256, // replaced at the ServerHello
@@ -436,18 +456,34 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
             offered_psk,
             resumed: false,
             resumption_master: None,
+            client_ap_secret: None,
+            server_ap_secret: None,
             protectors: None,
             client_hs_secret: None,
             server_hs_secret: None,
             handshake_secret: None,
             server_sent_ccs: false,
             hrr_count: 0,
+            hrr_suite: None,
+            hrr_group: None,
+            max_write_plaintext: MAX_PLAINTEXT_LEN,
             pending_output: unprotected_record(
                 CONTENT_HANDSHAKE,
                 LEGACY_VERSION_TLS12,
                 &hello_bytes,
             ),
         })
+    }
+
+    /// Override the expected server name used during certificate verification.
+    ///
+    /// Needed when targeting a literal IPv4 or IPv6 address: RFC 6066 §3 forbids
+    /// IP literals inside the wire SNI extension, so the hello omits `server_name`
+    /// while verification still checks the peer certificate against the target IP.
+    #[must_use]
+    pub fn with_verified_server_name(mut self, server_name: impl Into<String>) -> Self {
+        self.server_name = server_name.into();
+        self
     }
 
     /// The bytes the transport should write next.
@@ -512,8 +548,11 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                             }
                         })?,
                         resumption_master: self.resumption_master.take(),
+                        client_ap_secret: self.client_ap_secret.take(),
+                        server_ap_secret: self.server_ap_secret.take(),
                         hash: self.hash,
                         cipher_suite: self.negotiated_suite,
+                        max_write_plaintext: self.max_write_plaintext,
                     };
                     return Ok(HandshakeProgress::Established(Box::new(established)));
                 }
@@ -526,6 +565,12 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
             return Ok(None);
         }
         let header = RecordHeader::parse(&self.record_buffer)?;
+        if usize::from(header.payload_len) > MAX_CIPHERTEXT_LEN {
+            return Err(HandshakeError::Record(RecordError::RecordTooLarge {
+                len: usize::from(header.payload_len),
+                max: MAX_CIPHERTEXT_LEN,
+            }));
+        }
         let total = RECORD_HEADER_LEN + usize::from(header.payload_len);
         if self.record_buffer.len() < total {
             return Ok(None);
@@ -538,6 +583,11 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
         let payload = &record[RECORD_HEADER_LEN..];
         match header.content_type {
             CONTENT_HANDSHAKE => {
+                if payload.is_empty() {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "empty handshake record fragment (RFC 8446 §5.1)".into(),
+                    });
+                }
                 self.flight.extend_from_slice(payload);
                 if self.flight.len() > MAX_FLIGHT_BYTES {
                     return Err(HandshakeError::FlightBufferExceeded {
@@ -565,9 +615,22 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                         while let Some((kind, message)) = take_message(&mut self.flight) {
                             self.process_tls12_message(kind, &message)?;
                             if matches!(self.state, State::Established) {
+                                if !self.flight.is_empty() {
+                                    return Err(HandshakeError::ProtocolViolation {
+                                        reason:
+                                            "handshake messages must not span the Finished boundary"
+                                                .into(),
+                                    });
+                                }
                                 break;
                             }
                         }
+                    } else if !self.flight.is_empty() {
+                        // RFC 8446 §5.1: ServerHello / HelloRetryRequest must
+                        // align with a record boundary.
+                        return Err(HandshakeError::ProtocolViolation {
+                            reason: "handshake messages must not span a ServerHello or HelloRetryRequest record boundary".into(),
+                        });
                     }
                     if !matches!(self.state, State::ExpectServerHello) {
                         break;
@@ -576,6 +639,16 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                 Ok(())
             }
             CONTENT_CHANGE_CIPHER_SPEC => {
+                if !self.flight.is_empty() {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "a handshake message straddled ChangeCipherSpec".into(),
+                    });
+                }
+                if payload != [0x01] {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "malformed change_cipher_spec record".into(),
+                    });
+                }
                 self.server_sent_ccs = true;
                 Ok(())
             }
@@ -590,17 +663,39 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
     fn consume_flight_record(&mut self, record: Vec<u8>) -> Result<(), HandshakeError> {
         let header = RecordHeader::parse(&record)?;
         match header.content_type {
-            CONTENT_CHANGE_CIPHER_SPEC => Ok(()),
+            CONTENT_CHANGE_CIPHER_SPEC => {
+                if !self.flight.is_empty() {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "a handshake message straddled ChangeCipherSpec".into(),
+                    });
+                }
+                if record[RECORD_HEADER_LEN..] != [0x01] {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "malformed change_cipher_spec record".into(),
+                    });
+                }
+                Ok(())
+            }
             CONTENT_APPLICATION_DATA => {
                 let unprotector = self.read_unprotector.as_ref().ok_or_else(|| {
                     HandshakeError::ProtocolViolation {
                         reason: "a protected record arrived before handshake keys exist".into(),
                     }
                 })?;
+                let next_seq = self.read_seq.checked_add(1).ok_or_else(|| {
+                    HandshakeError::ProtocolViolation {
+                        reason: "handshake read sequence overflow".into(),
+                    }
+                })?;
                 let (inner, payload) = unprotector.open(self.read_seq, &record)?;
-                self.read_seq += 1;
+                self.read_seq = next_seq;
                 match inner {
                     CONTENT_HANDSHAKE => {
+                        if payload.is_empty() {
+                            return Err(HandshakeError::ProtocolViolation {
+                                reason: "empty handshake record fragment (RFC 8446 §5.1)".into(),
+                            });
+                        }
                         self.flight.extend_from_slice(&payload);
                         if self.flight.len() > MAX_FLIGHT_BYTES {
                             return Err(HandshakeError::FlightBufferExceeded {
@@ -611,13 +706,17 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                         while let Some((kind, message)) = take_message(&mut self.flight) {
                             self.process_flight_message(kind, &message)?;
                             if matches!(self.state, State::Established) {
+                                if !self.flight.is_empty() {
+                                    return Err(HandshakeError::ProtocolViolation {
+                                        reason: "handshake messages must not span the Finished key-change boundary".into(),
+                                    });
+                                }
                                 break;
                             }
                         }
                         Ok(())
                     }
                     CONTENT_ALERT => Err(alert_error(&payload)),
-                    CONTENT_CHANGE_CIPHER_SPEC => Ok(()),
                     got => Err(HandshakeError::UnexpectedRecord {
                         state: "expect_server_flight",
                         got,
@@ -676,78 +775,125 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
         let offered_alpn = self.offered_alpn.clone();
         let mut selected_version = None;
         let mut server_share: Option<(u16, Vec<u8>)> = None;
+        let mut cookie: Option<Vec<u8>> = None;
         let mut renegotiation_info_seen = false;
         let mut extended_master_secret_seen = false;
         let mut server_alpn: Option<Vec<u8>> = None;
+        let mut server_record_size_limit: Option<usize> = None;
         let mut selected_psk_identity: Option<u16> = None;
-        for_each_extension(rest, |kind, payload| {
-            match kind {
-                0x0005 => {} // status_request: no stapled response is fine
-                0x000b => {} // ec_point_formats: uncompressed is assumed
-                0x0010 => {
-                    let protocols = alpn_protocols(payload)?;
-                    let Some(selected) = protocols.first() else {
-                        return Err(HandshakeError::ProtocolViolation {
-                            reason: "the server sent an empty ALPN list".into(),
-                        });
-                    };
-                    if !offered_alpn.iter().any(|protocol| protocol == selected) {
-                        return Err(HandshakeError::ProtocolViolation {
-                            reason: format!(
-                                "the server selected ALPN {:?}, which was not offered",
-                                String::from_utf8_lossy(selected)
-                            ),
-                        });
+        let mut ext_kinds: Vec<u16> = Vec::new();
+        if !rest.is_empty() {
+            for_each_extension(rest, |kind, payload| {
+                ext_kinds.push(kind);
+                match kind {
+                    0x0005 => {} // status_request: no stapled response is fine in TLS 1.2
+                    0x000b => {} // ec_point_formats: uncompressed is assumed in TLS 1.2
+                    0x0010 => {
+                        let protocols = alpn_protocols(payload)?;
+                        if protocols.len() != 1 {
+                            return Err(HandshakeError::ProtocolViolation {
+                                reason:
+                                    "the server ALPN extension must select exactly one protocol"
+                                        .into(),
+                            });
+                        }
+                        let Some(selected) = protocols.first() else {
+                            return Err(HandshakeError::ProtocolViolation {
+                                reason: "the server sent an empty ALPN list".into(),
+                            });
+                        };
+                        if !offered_alpn.iter().any(|protocol| protocol == selected) {
+                            return Err(HandshakeError::ProtocolViolation {
+                                reason: format!(
+                                    "the server selected ALPN {:?}, which was not offered",
+                                    String::from_utf8_lossy(selected)
+                                ),
+                            });
+                        }
+                        server_alpn = Some(selected.clone());
                     }
-                    server_alpn = Some(selected.clone());
-                }
-                0x0017 => extended_master_secret_seen = true,
-                0x0029 => {
-                    if payload.len() == 2 {
-                        selected_psk_identity = Some(u16::from_be_bytes([payload[0], payload[1]]));
-                    } else {
-                        return Err(HandshakeError::ProtocolViolation {
-                            reason: "malformed ServerHello pre_shared_key extension".into(),
-                        });
+                    0x0017 => extended_master_secret_seen = true,
+                    0x001c => {
+                        if payload.len() != 2 {
+                            return Err(HandshakeError::ProtocolViolation {
+                                reason: "malformed ServerHello record_size_limit extension".into(),
+                            });
+                        }
+                        let limit = u16::from_be_bytes([payload[0], payload[1]]);
+                        if limit < 64 {
+                            return Err(HandshakeError::ProtocolViolation {
+                                reason: "record_size_limit is below the 64-byte RFC 8449 minimum"
+                                    .into(),
+                            });
+                        }
+                        server_record_size_limit = Some(usize::from(limit).min(MAX_PLAINTEXT_LEN));
                     }
+                    0x0029 => {
+                        if payload.len() == 2 {
+                            selected_psk_identity =
+                                Some(u16::from_be_bytes([payload[0], payload[1]]));
+                        } else {
+                            return Err(HandshakeError::ProtocolViolation {
+                                reason: "malformed ServerHello pre_shared_key extension".into(),
+                            });
+                        }
+                    }
+                    0x002b => selected_version = Some(selected_version_of(payload)?),
+                    EXT_COOKIE => cookie = Some(parse_cookie_extension(payload)?),
+                    0x0033 => server_share = Some(single_key_share(payload)?),
+                    0xff01 => renegotiation_info_seen = true,
+                    _ => {}
                 }
-                0x002b => selected_version = selected_version_of(payload),
-                0x0033 => server_share = single_key_share(payload),
-                0xff01 => renegotiation_info_seen = true,
-                _ => {}
-            }
-            Ok(())
-        })?;
-        if let Some(alpn) = server_alpn {
-            // ALPN in the ServerHello is the TLS 1.2 shape; TLS 1.3
-            // negotiates it in the EncryptedExtensions.
-            self.negotiated_alpn = Some(alpn);
+                Ok(())
+            })?;
         }
-
-        if *random == HELLO_RETRY_RANDOM {
-            return self.process_hello_retry(
-                message,
-                selected_version,
-                server_share,
-                session_id,
-                suite,
-                compression,
-            );
-        }
-
         if legacy_version != LEGACY_VERSION_TLS13 {
             return Err(HandshakeError::NegotiationFailed {
                 reason: format!("the ServerHello legacy version is {legacy_version:#06x}"),
             });
         }
-        self.server_random = Some(*random);
+
+        if *random == HELLO_RETRY_RANDOM {
+            if let Some(&bad) = ext_kinds
+                .iter()
+                .find(|&&kind| !matches!(kind, 0x002b | EXT_COOKIE | 0x0033))
+            {
+                return Err(HandshakeError::ProtocolViolation {
+                    reason: format!(
+                        "HelloRetryRequest carries forbidden extension {bad:#06x} (RFC 8446 §4.1.4)"
+                    ),
+                });
+            }
+            return self.process_hello_retry(HelloRetryRequest {
+                message,
+                selected_version,
+                server_share,
+                cookie,
+                session_id,
+                suite,
+                compression,
+            });
+        }
+        if cookie.is_some() {
+            return Err(HandshakeError::ProtocolViolation {
+                reason: "a ServerHello unexpectedly carries a cookie extension".into(),
+            });
+        }
         if selected_version.is_none() {
+            if server_share.is_some() || selected_psk_identity.is_some() {
+                return Err(HandshakeError::ProtocolViolation {
+                    reason: "a TLS 1.2 ServerHello carries TLS 1.3 extensions".into(),
+                });
+            }
             return self.process_server_hello12(
                 message,
                 legacy_version,
+                *random,
                 suite,
                 renegotiation_info_seen,
                 extended_master_secret_seen,
+                server_alpn,
+                server_record_size_limit,
             );
         }
         if selected_version != Some(TLS13_VERSION) {
@@ -755,6 +901,16 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                 reason: format!(
                     "the server selected version {:?}, which was not offered",
                     selected_version
+                ),
+            });
+        }
+        if let Some(&bad) = ext_kinds
+            .iter()
+            .find(|&&kind| !matches!(kind, 0x0029 | 0x002b | 0x0033))
+        {
+            return Err(HandshakeError::ProtocolViolation {
+                reason: format!(
+                    "TLS 1.3 ServerHello carries extension {bad:#06x} outside supported_versions/key_share/pre_shared_key (RFC 8446 §4.1.3)"
                 ),
             });
         }
@@ -766,6 +922,13 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
         if compression != 0x00 {
             return Err(HandshakeError::ProtocolViolation {
                 reason: "the ServerHello offers compression other than null".into(),
+            });
+        }
+        if let Some(hrr_suite) = self.hrr_suite
+            && suite != hrr_suite
+        {
+            return Err(HandshakeError::ProtocolViolation {
+                reason: "the ServerHello cipher suite disagrees with the HelloRetryRequest".into(),
             });
         }
         let (algorithm, hash, key_len) =
@@ -782,6 +945,14 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                 reason: "the ServerHello carries no key_share extension".into(),
             });
         };
+        if let Some(hrr_group) = self.hrr_group
+            && group != hrr_group
+        {
+            return Err(HandshakeError::ProtocolViolation {
+                reason: "the ServerHello key_share group disagrees with the HelloRetryRequest"
+                    .into(),
+            });
+        }
         let share = self
             .shares
             .iter()
@@ -790,6 +961,7 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                 reason: format!("the server selected group {group:#06x}, which was not offered"),
             })?;
         let shared_secret = share.agree(&peer_share)?;
+        self.server_random = Some(*random);
         self.transcript.extend_from_slice(message);
         self.hash = hash;
         self.negotiated_suite = Some(suite);
@@ -803,6 +975,12 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                         reason: "the server selected a PSK that was not offered".into(),
                     });
                 };
+                if psk.len() != hash.output_len() {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "the server selected a PSK whose hash does not match the suite"
+                            .into(),
+                    });
+                }
                 self.resumed = true;
                 Secret::extract(&zeros, psk, hash)
             }
@@ -852,92 +1030,186 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
         Ok(())
     }
 
-    fn process_hello_retry(
-        &mut self,
-        message: &[u8],
-        selected_version: Option<u16>,
-        server_share: Option<(u16, Vec<u8>)>,
-        session_id: Vec<u8>,
-        suite: u16,
-        compression: u8,
-    ) -> Result<(), HandshakeError> {
+    fn process_hello_retry(&mut self, hrr: HelloRetryRequest<'_>) -> Result<(), HandshakeError> {
+        let HelloRetryRequest {
+            message,
+            selected_version,
+            server_share,
+            cookie,
+            session_id,
+            suite,
+            compression,
+        } = hrr;
         if selected_version != Some(TLS13_VERSION) {
             return Err(HandshakeError::ProtocolViolation {
                 reason: "a HelloRetryRequest must offer TLS 1.3".into(),
             });
         }
-        let Some((group, peer_share)) = server_share else {
+        if server_share.is_none() && cookie.is_none() {
             return Err(HandshakeError::ProtocolViolation {
-                reason: "a HelloRetryRequest carries no key_share extension".into(),
-            });
-        };
-        if !peer_share.is_empty() {
-            return Err(HandshakeError::ProtocolViolation {
-                reason: "a HelloRetryRequest's key share must be empty".into(),
+                reason: "a HelloRetryRequest carries neither a key_share nor a cookie extension"
+                    .into(),
             });
         }
-        if suite != 0x1301 || compression != 0x00 || session_id != self.hello.session_id {
+        if compression != 0x00 || session_id != self.hello.session_id {
             return Err(HandshakeError::ProtocolViolation {
                 reason: "a HelloRetryRequest must echo the first flight's parameters".into(),
             });
         }
-        // The selected group must be one the first flight offered and one
-        // the engine implements ([INV-TLS-06]).
-        if !self.hello.extensions.iter().any(|extension| {
-            matches!(&extension.body,
-                ExtensionBody::SupportedGroups { groups } if groups.contains(&group))
-        }) {
+        let (_, hash, _) =
+            suite_params(suite).ok_or_else(|| HandshakeError::NegotiationFailed {
+                reason: format!(
+                    "the HelloRetryRequest selected suite {suite:#06x}, which is not implemented"
+                ),
+            })?;
+        if !self.hello.cipher_suites.contains(&suite) {
             return Err(HandshakeError::NegotiationFailed {
                 reason: format!(
-                    "the HelloRetryRequest selected group {group:#06x}, which was not offered"
+                    "the HelloRetryRequest selected suite {suite:#06x}, which was not offered"
                 ),
             });
         }
-        if !key_exchange::offerable_group(group) {
-            return Err(HandshakeError::NegotiationFailed {
-                reason: format!(
-                    "the HelloRetryRequest selected group {group:#06x}, which the engine cannot complete"
-                ),
-            });
-        }
+        let selected_group = if let Some((group, peer_share)) = server_share {
+            if !peer_share.is_empty() {
+                return Err(HandshakeError::ProtocolViolation {
+                    reason: "a HelloRetryRequest's key share must be empty".into(),
+                });
+            }
+            // The selected group must be one the first flight offered and one
+            // the engine implements ([INV-TLS-06]).
+            if !self.hello.extensions.iter().any(|extension| {
+                matches!(&extension.body,
+                    ExtensionBody::SupportedGroups { groups } if groups.contains(&group))
+            }) {
+                return Err(HandshakeError::NegotiationFailed {
+                    reason: format!(
+                        "the HelloRetryRequest selected group {group:#06x}, which was not offered"
+                    ),
+                });
+            }
+            if !key_exchange::offerable_group(group) {
+                return Err(HandshakeError::NegotiationFailed {
+                    reason: format!(
+                        "the HelloRetryRequest selected group {group:#06x}, which the engine cannot complete"
+                    ),
+                });
+            }
+            // RFC 8446 §4.2.8: the server must not request a retry for a group
+            // whose share was already sent in ClientHello1.
+            if self.shares.iter().any(|share| share.group == group) {
+                return Err(HandshakeError::ProtocolViolation {
+                    reason: format!(
+                        "the HelloRetryRequest selected group {group:#06x}, which was already shared"
+                    ),
+                });
+            }
+            Some(group)
+        } else {
+            None
+        };
         self.hrr_count += 1;
         if self.hrr_count > MAX_HELLO_RETRIES {
             return Err(HandshakeError::TooManyRetries {
                 max: MAX_HELLO_RETRIES,
             });
         }
+        self.hrr_suite = Some(suite);
+        self.hrr_group = selected_group;
 
-        // Rebuild the hello with one fresh share for the selected group;
-        // everything else stays exactly as the first flight sent it.
-        let replacement = ClientKeyShare::generate(&[group])?.remove(0);
+        // RFC 8446 §4.4.1: replace ClientHello1 in the transcript with
+        // `message_hash || 0x00 0x00 Hash.length || Hash(ClientHello1)`.
+        let ch1_hash = key_schedule::transcript_hash(hash, &self.transcript);
+        self.transcript.clear();
+        self.transcript.push(MESSAGE_HASH);
+        self.transcript
+            .extend_from_slice(&[0x00, 0x00, ch1_hash.len() as u8]);
+        self.transcript.extend_from_slice(&ch1_hash);
+        self.transcript.extend_from_slice(message);
+
+        // Rebuild the hello for ClientHello2: swap key_share if requested,
+        // echo cookie before trailing padding/pre_shared_key (RFC 8446 §4.2.2),
+        // and strip or rebind any pre_shared_key extension.
         let mut hello = self.hello.clone();
-        for extension in &mut hello.extensions {
-            if let ExtensionBody::KeyShare { shares } = &mut extension.body {
-                *shares = vec![KeyShareEntry {
-                    group,
-                    share: replacement.share.clone(),
-                }];
+        if let Some(group) = selected_group {
+            let replacement = ClientKeyShare::generate(&[group])?.remove(0);
+            for extension in &mut hello.extensions {
+                if let ExtensionBody::KeyShare { shares } = &mut extension.body {
+                    *shares = vec![KeyShareEntry {
+                        group,
+                        share: replacement.share.clone(),
+                    }];
+                }
+            }
+            self.shares = vec![replacement];
+        }
+        hello.extensions.retain(|ext| {
+            !matches!(
+                ext.body,
+                ExtensionBody::Raw {
+                    kind: EXT_COOKIE,
+                    ..
+                }
+            )
+        });
+        if let Some(cookie) = cookie {
+            let insert_at = hello
+                .extensions
+                .iter()
+                .position(|ext| {
+                    matches!(
+                        ext.body,
+                        ExtensionBody::Padding { .. } | ExtensionBody::PreSharedKey { .. }
+                    )
+                })
+                .unwrap_or(hello.extensions.len());
+            hello.extensions.insert(
+                insert_at,
+                Extension {
+                    body: ExtensionBody::Raw {
+                        kind: EXT_COOKIE,
+                        body: cookie,
+                    },
+                },
+            );
+        }
+        if let Some(psk) = self.offered_psk.as_deref()
+            && hello
+                .extensions
+                .iter()
+                .any(|ext| matches!(ext.body, ExtensionBody::PreSharedKey { .. }))
+        {
+            if psk.len() != hash.output_len() {
+                hello
+                    .extensions
+                    .retain(|ext| !matches!(ext.body, ExtensionBody::PreSharedKey { .. }));
+                self.offered_psk = None;
+            } else {
+                hello.rebind_psk_with_prefix(&self.transcript, psk, hash)?;
             }
         }
         let hello_bytes = hello.serialize()?;
-        self.transcript.extend_from_slice(message);
         self.transcript.extend_from_slice(&hello_bytes);
         self.pending_output.extend_from_slice(&unprotected_record(
             CONTENT_HANDSHAKE,
             LEGACY_VERSION_TLS12,
             &hello_bytes,
         ));
-        self.shares = vec![replacement];
         self.hello = hello;
         Ok(())
     }
 
     fn process_encrypted_extensions(&mut self, message: &[u8]) -> Result<(), HandshakeError> {
         let mut negotiated = None;
+        let mut negotiated_record_size_limit = None;
         let offered = self.offered_alpn.clone();
         for_each_extension(&message[4..], |kind, payload| {
             if kind == 0x0010 {
                 let protocols = alpn_protocols(payload)?;
+                if protocols.len() != 1 {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "the server ALPN extension must select exactly one protocol".into(),
+                    });
+                }
                 let Some(selected) = protocols.first() else {
                     return Err(HandshakeError::ProtocolViolation {
                         reason: "the server sent an empty ALPN list".into(),
@@ -952,10 +1224,27 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                     });
                 }
                 negotiated = Some(selected.clone());
+            } else if kind == crate::wire::EXT_RECORD_SIZE_LIMIT {
+                if payload.len() != 2 {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "malformed EncryptedExtensions record_size_limit".into(),
+                    });
+                }
+                let limit = u16::from_be_bytes([payload[0], payload[1]]);
+                if limit < 64 {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "record_size_limit is below the 64-byte RFC 8449 minimum".into(),
+                    });
+                }
+                // RFC 8449 §4: in TLS 1.3 the limit includes the 1-byte inner content type.
+                negotiated_record_size_limit = Some(usize::from(limit - 1).min(MAX_PLAINTEXT_LEN));
             }
             Ok(())
         })?;
         self.negotiated_alpn = negotiated;
+        if let Some(limit) = negotiated_record_size_limit {
+            self.max_write_plaintext = limit;
+        }
         self.transcript.extend_from_slice(message);
         self.flight_stage = if self.resumed {
             FlightStage::AwaitFinished
@@ -975,7 +1264,6 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
     fn process_compressed_certificate(&mut self, message: &[u8]) -> Result<(), HandshakeError> {
         let (algorithm, rest) = take_u16(&message[4..])?;
         let (uncompressed_len, rest) = take_u24(rest)?;
-        let uncompressed_len = usize::from(uncompressed_len);
         if uncompressed_len > MAX_FLIGHT_BYTES {
             return Err(HandshakeError::FlightBufferExceeded {
                 len: uncompressed_len,
@@ -983,7 +1271,7 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
             });
         }
         let (compressed_len, rest) = take_u24(rest)?;
-        if usize::from(compressed_len) != rest.len() {
+        if compressed_len != rest.len() {
             return Err(HandshakeError::ProtocolViolation {
                 reason: "the CompressedCertificate payload length does not match its bytes".into(),
             });
@@ -1040,7 +1328,7 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
             });
         }
         let (chain_len, rest) = take_u24(rest)?;
-        if usize::from(chain_len) != rest.len() {
+        if chain_len != rest.len() {
             return Err(HandshakeError::ProtocolViolation {
                 reason: "the certificate chain length does not match its entries".into(),
             });
@@ -1052,7 +1340,7 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
         // (RFC 8446 §4.4.2); there is no per-entry length.
         while !rest.is_empty() {
             let (cert_len, tail) = take_u24(rest)?;
-            let Some((der, tail)) = tail.split_at_checked(usize::from(cert_len)) else {
+            let Some((der, tail)) = tail.split_at_checked(cert_len) else {
                 return Err(HandshakeError::ProtocolViolation {
                     reason: "a certificate entry is truncated".into(),
                 });
@@ -1215,6 +1503,8 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
             })?;
         let write_keys = client_ap.traffic_keys(key_len)?;
         let read_keys = server_ap.traffic_keys(key_len)?;
+        self.client_ap_secret = Some(client_ap);
+        self.server_ap_secret = Some(server_ap);
         self.protectors = Some(Protectors::Tls13 {
             write: RecordProtector13::new(algorithm, &write_keys.key, write_keys.iv)?,
             read: RecordUnprotector13::new(algorithm, &read_keys.key, read_keys.iv)?,
@@ -1233,13 +1523,17 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
     /// A server that drops either is refusing a protection the hello asked
     /// for, and that is a refusal, not a soft downgrade
     /// (RFC 5746 §3.4, triple-handshake protection).
+    #[allow(clippy::too_many_arguments)]
     fn process_server_hello12(
         &mut self,
         message: &[u8],
         legacy_version: u16,
+        random: [u8; 32],
         suite: u16,
         renegotiation_info_seen: bool,
         extended_master_secret_seen: bool,
+        server_alpn: Option<Vec<u8>>,
+        server_record_size_limit: Option<usize>,
     ) -> Result<(), HandshakeError> {
         if legacy_version != LEGACY_VERSION_TLS13 {
             return Err(HandshakeError::NegotiationFailed {
@@ -1267,6 +1561,13 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
             });
         }
 
+        self.server_random = Some(random);
+        if let Some(alpn) = server_alpn {
+            self.negotiated_alpn = Some(alpn);
+        }
+        if let Some(limit) = server_record_size_limit {
+            self.max_write_plaintext = limit;
+        }
         self.transcript.extend_from_slice(message);
         self.negotiated_suite12 = Some(params);
         self.state12 = Some(State12::Certificate);
@@ -1283,9 +1584,36 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
         // plaintext.
         let protected = self.tls12_read.is_some();
         match header.content_type {
-            CONTENT_CHANGE_CIPHER_SPEC => Ok(()),
+            CONTENT_CHANGE_CIPHER_SPEC if !protected => {
+                if record[RECORD_HEADER_LEN..] != [0x01] {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "malformed TLS 1.2 change_cipher_spec record".into(),
+                    });
+                }
+                if !self.flight.is_empty() {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "a TLS 1.2 handshake message straddled ChangeCipherSpec".into(),
+                    });
+                }
+                let pending =
+                    self.tls12_pending_read
+                        .take()
+                        .ok_or(HandshakeError::UnexpectedRecord {
+                            state: "expect_tls12_flight",
+                            got: CONTENT_CHANGE_CIPHER_SPEC,
+                        })?;
+                self.tls12_read = Some(pending);
+                self.tls12_read_seq = 0;
+                Ok(())
+            }
             CONTENT_HANDSHAKE if !protected => {
-                self.flight.extend_from_slice(&record[RECORD_HEADER_LEN..]);
+                let payload = &record[RECORD_HEADER_LEN..];
+                if payload.is_empty() {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "empty TLS 1.2 handshake record fragment".into(),
+                    });
+                }
+                self.flight.extend_from_slice(payload);
                 if self.flight.len() > MAX_FLIGHT_BYTES {
                     return Err(HandshakeError::FlightBufferExceeded {
                         len: self.flight.len(),
@@ -1295,6 +1623,12 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                 while let Some((kind, message)) = take_message(&mut self.flight) {
                     self.process_tls12_message(kind, &message)?;
                     if matches!(self.state, State::Established) {
+                        if !self.flight.is_empty() {
+                            return Err(HandshakeError::ProtocolViolation {
+                                reason: "handshake messages must not span the Finished boundary"
+                                    .into(),
+                            });
+                        }
                         break;
                     }
                 }
@@ -1308,10 +1642,20 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                         .ok_or_else(|| HandshakeError::ProtocolViolation {
                             reason: "a protected record arrived without read keys".into(),
                         })?;
+                let next_seq = self.tls12_read_seq.checked_add(1).ok_or_else(|| {
+                    HandshakeError::ProtocolViolation {
+                        reason: "TLS 1.2 handshake read sequence overflow".into(),
+                    }
+                })?;
                 let (inner, payload) = unprotector.open(self.tls12_read_seq, &record)?;
-                self.tls12_read_seq += 1;
+                self.tls12_read_seq = next_seq;
                 match inner {
                     CONTENT_HANDSHAKE => {
+                        if payload.is_empty() {
+                            return Err(HandshakeError::ProtocolViolation {
+                                reason: "empty TLS 1.2 handshake record fragment".into(),
+                            });
+                        }
                         self.flight.extend_from_slice(&payload);
                         if self.flight.len() > MAX_FLIGHT_BYTES {
                             return Err(HandshakeError::FlightBufferExceeded {
@@ -1322,13 +1666,19 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                         while let Some((kind, message)) = take_message(&mut self.flight) {
                             self.process_tls12_message(kind, &message)?;
                             if matches!(self.state, State::Established) {
+                                if !self.flight.is_empty() {
+                                    return Err(HandshakeError::ProtocolViolation {
+                                        reason:
+                                            "handshake messages must not span the Finished boundary"
+                                                .into(),
+                                    });
+                                }
                                 break;
                             }
                         }
                         Ok(())
                     }
                     CONTENT_ALERT => Err(alert_error(&payload)),
-                    CONTENT_CHANGE_CIPHER_SPEC => Ok(()),
                     got => Err(HandshakeError::UnexpectedRecord {
                         state: "expect_tls12_flight",
                         got,
@@ -1361,6 +1711,11 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                 self.send_tls12_client_flight()?;
             }
             (NEW_SESSION_TICKET, State12::ServerFinished) => {
+                if self.tls12_read.is_some() {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "TLS 1.2 NewSessionTicket arrived after ChangeCipherSpec".into(),
+                    });
+                }
                 // RFC 5077 §3.3: when session_ticket is negotiated, the server
                 // sends NewSessionTicket before ChangeCipherSpec and Finished;
                 // it enters the transcript.
@@ -1368,6 +1723,11 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                 self.state12 = Some(State12::ServerFinished);
             }
             (FINISHED, State12::ServerFinished) => {
+                if self.tls12_read.is_none() {
+                    return Err(HandshakeError::ProtocolViolation {
+                        reason: "TLS 1.2 server Finished arrived before ChangeCipherSpec".into(),
+                    });
+                }
                 self.process_tls12_server_finished(message)?;
             }
             (0x00, _) => {
@@ -1396,7 +1756,7 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
     /// certificate with no extensions, in the clear (RFC 5246 §7.4.2).
     fn process_certificate12(&mut self, message: &[u8]) -> Result<(), HandshakeError> {
         let (chain_len, rest) = take_u24(&message[4..])?;
-        if usize::from(chain_len) != rest.len() {
+        if chain_len != rest.len() {
             return Err(HandshakeError::ProtocolViolation {
                 reason: "the certificate chain length does not match its entries".into(),
             });
@@ -1405,7 +1765,7 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
         let mut rest = rest;
         while !rest.is_empty() {
             let (cert_len, tail) = take_u24(rest)?;
-            let Some((der, tail)) = tail.split_at_checked(usize::from(cert_len)) else {
+            let Some((der, tail)) = tail.split_at_checked(cert_len) else {
                 return Err(HandshakeError::ProtocolViolation {
                     reason: "a certificate entry is truncated".into(),
                 });
@@ -1536,13 +1896,17 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
         // ClientKeyExchange: the client's ephemeral public key — the same
         // share the hello advertised (Go generates one key pair up front).
         let point = share.share.clone();
+        let point_len =
+            u8::try_from(point.len()).map_err(|_| HandshakeError::ProtocolViolation {
+                reason: "TLS 1.2 client key share exceeds u8 point length".into(),
+            })?;
         let mut exchange = Vec::with_capacity(4 + 1 + point.len());
         exchange.push(CLIENT_KEY_EXCHANGE);
-        let body_len = 1 + point.len();
+        let body_len = 1 + usize::from(point_len);
         exchange.push((body_len >> 16) as u8);
         exchange.push((body_len >> 8) as u8);
         exchange.push(body_len as u8);
-        exchange.push(point.len() as u8);
+        exchange.push(point_len);
         exchange.extend_from_slice(&point);
         self.transcript.extend_from_slice(&exchange);
 
@@ -1603,7 +1967,7 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
         self.tls12_write_seq += 1;
         self.pending_output.extend_from_slice(&record);
         self.tls12_write = Some(write_protector);
-        self.tls12_read = Some(RecordUnprotector12::new(server_cipher)?);
+        self.tls12_pending_read = Some(RecordUnprotector12::new(server_cipher)?);
         self.tls12_read_seq = 0;
         self.state12 = Some(State12::ServerFinished);
         Ok(())
@@ -1664,7 +2028,7 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
 }
 
 /// The (AEAD algorithm, transcript hash, key length) of a TLS 1.3 suite.
-fn suite_params(suite: u16) -> Option<(&'static aead::Algorithm, Hash, usize)> {
+pub(crate) fn suite_params(suite: u16) -> Option<(&'static aead::Algorithm, Hash, usize)> {
     match suite {
         0x1301 => Some((&aead::AES_128_GCM, Hash::Sha256, 16)),
         0x1302 => Some((&aead::AES_256_GCM, Hash::Sha384, 32)),
@@ -1738,17 +2102,12 @@ fn take_u16(input: &[u8]) -> Result<(u16, &[u8]), HandshakeError> {
     Ok((u16::from_be_bytes(*value), &input[2..]))
 }
 
-fn take_u24(input: &[u8]) -> Result<(u16, &[u8]), HandshakeError> {
-    // TLS handshake lengths are 24-bit; the engine's messages stay far below
-    // the 16-bit ceiling, and a longer declared length is a truncation.
+fn take_u24(input: &[u8]) -> Result<(usize, &[u8]), HandshakeError> {
     let Some(value) = input.first_chunk::<3>() else {
         return Err(truncated("a three-byte field"));
     };
-    let len = u32::from_be_bytes([0, value[0], value[1], value[2]]);
-    if len > u16::MAX as u32 {
-        return Err(truncated("a declared length over 65,535 bytes"));
-    }
-    Ok((len as u16, &input[3..]))
+    let len = u32::from_be_bytes([0, value[0], value[1], value[2]]) as usize;
+    Ok((len, &input[3..]))
 }
 
 fn take_slice<const N: usize>(input: &[u8]) -> Result<(&[u8; N], &[u8]), HandshakeError> {
@@ -1783,8 +2142,15 @@ fn for_each_extension(
             reason: "an extension block length does not match its bytes".into(),
         });
     }
+    let mut seen = Vec::new();
     while !rest.is_empty() {
         let (kind, tail) = take_u16(rest)?;
+        if seen.contains(&kind) {
+            return Err(HandshakeError::ProtocolViolation {
+                reason: format!("duplicate extension {kind:#06x} in handshake message"),
+            });
+        }
+        seen.push(kind);
         let (len, tail) = take_u16(tail)?;
         let Some((payload, tail)) = tail.split_at_checked(usize::from(len)) else {
             return Err(HandshakeError::ProtocolViolation {
@@ -1797,13 +2163,36 @@ fn for_each_extension(
     Ok(())
 }
 
+struct HelloRetryRequest<'a> {
+    message: &'a [u8],
+    selected_version: Option<u16>,
+    server_share: Option<(u16, Vec<u8>)>,
+    cookie: Option<Vec<u8>>,
+    session_id: Vec<u8>,
+    suite: u16,
+    compression: u8,
+}
+
 /// The `selected_version` of a ServerHello's `supported_versions`
 /// extension — a single version, not the ClientHello's list.
-fn selected_version_of(payload: &[u8]) -> Option<u16> {
+fn selected_version_of(payload: &[u8]) -> Result<u16, HandshakeError> {
     match payload {
-        [hi, lo] => Some(u16::from_be_bytes([*hi, *lo])),
-        _ => None,
+        [hi, lo] => Ok(u16::from_be_bytes([*hi, *lo])),
+        _ => Err(HandshakeError::ProtocolViolation {
+            reason: "malformed ServerHello supported_versions extension".into(),
+        }),
     }
+}
+
+/// Parse a HelloRetryRequest `cookie` extension (`Cookie { opaque cookie<1..2^16-1>; }`).
+fn parse_cookie_extension(payload: &[u8]) -> Result<Vec<u8>, HandshakeError> {
+    let (len, rest) = take_u16(payload)?;
+    if len == 0 || usize::from(len) != rest.len() {
+        return Err(HandshakeError::ProtocolViolation {
+            reason: "malformed HelloRetryRequest cookie extension".into(),
+        });
+    }
+    Ok(payload.to_vec())
 }
 
 /// The single `key_share` entry of a ServerHello or HelloRetryRequest.
@@ -1813,22 +2202,24 @@ fn selected_version_of(payload: &[u8]) -> Option<u16> {
 /// HelloRetryRequest's entry has an empty share, which stacks encode two
 /// ways — the bare group (a 2-byte body; rustls's and BoringSSL's shape) or
 /// the length-prefixed empty vector (a 4-byte body) — and both are accepted.
-fn single_key_share(payload: &[u8]) -> Option<(u16, Vec<u8>)> {
-    let (&group_hi, rest) = payload.split_first()?;
-    let (&group_lo, rest) = rest.split_first()?;
-    let group = u16::from_be_bytes([group_hi, group_lo]);
+fn single_key_share(payload: &[u8]) -> Result<(u16, Vec<u8>), HandshakeError> {
+    let (group, rest) = take_u16(payload)?;
     if rest.is_empty() {
         // The bare-group HRR shape: an empty share by omission.
-        return Some((group, Vec::new()));
+        return Ok((group, Vec::new()));
     }
-    let (&share_len_hi, rest) = rest.split_first()?;
-    let (&share_len_lo, rest) = rest.split_first()?;
-    let (share, rest) =
-        rest.split_at_checked(u16::from_be_bytes([share_len_hi, share_len_lo]) as usize)?;
+    let (share_len, rest) = take_u16(rest)?;
+    let (share, rest) = rest
+        .split_at_checked(usize::from(share_len))
+        .ok_or_else(|| HandshakeError::ProtocolViolation {
+            reason: "malformed ServerHello key_share extension".into(),
+        })?;
     if !rest.is_empty() {
-        return None;
+        return Err(HandshakeError::ProtocolViolation {
+            reason: "trailing bytes in ServerHello key_share extension".into(),
+        });
     }
-    Some((group, share.to_vec()))
+    Ok((group, share.to_vec()))
 }
 
 /// The protocols of an `alpn` extension payload (RFC 7301).

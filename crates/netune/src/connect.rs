@@ -13,7 +13,7 @@ use netune_trace::{
 };
 
 use crate::dns::{DnsResolver, SystemResolver};
-use crate::error::NetError;
+use crate::error::{ConnectError, ConnectErrorKind, NetError, ResolveError};
 use crate::profile::ProfileId;
 use crate::socket::SocketConfig;
 
@@ -167,40 +167,87 @@ impl Target {
     /// Keeps the HTTP stack's URL parsing in one place: callers migrating from
     /// a raw client should not each hand-roll scheme/authority/path handling.
     pub fn from_url(url: &str) -> Result<(Self, String), NetError> {
-        let (scheme, rest) = url
-            .split_once("://")
-            .ok_or_else(|| NetError::Connect(format!("url has no scheme: {url}")))?;
+        let (scheme, rest) = url.split_once("://").ok_or_else(|| {
+            NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Dispatch,
+                format!("url has no scheme: {url}"),
+            ))
+        })?;
         let (authority, path) = match rest.find('/') {
             Some(index) => (&rest[..index], &rest[index..]),
             None => (rest, "/"),
         };
         if authority.is_empty() {
-            return Err(NetError::Connect(format!("url has no host: {url}")));
+            return Err(NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Dispatch,
+                format!("url has no host: {url}"),
+            )));
         }
         let default_port = if scheme == "https" { 443 } else { 80 };
-        let has_port = authority
-            .rsplit_once(':')
-            .is_some_and(|(_, port)| port.chars().all(|character| character.is_ascii_digit()));
-        let authority = if has_port {
-            authority.to_string()
-        } else {
-            format!("{authority}:{default_port}")
-        };
+        let authority = normalize_authority(authority, default_port);
         let target = match scheme {
             "https" => {
-                let host = authority
-                    .rsplit_once(':')
-                    .map_or(authority.as_str(), |(host, _)| host)
-                    .to_string();
+                let host = authority_host(&authority).to_string();
                 Self::tls(authority, host)
             }
             "http" => Self::plain(authority),
             other => {
-                return Err(NetError::Connect(format!("unsupported scheme: {other}")));
+                return Err(NetError::Connect(ConnectError::config(
+                    DiagnosticPhase::Dispatch,
+                    format!("unsupported scheme: {other}"),
+                )));
             }
         };
         Ok((target, path.to_string()))
     }
+}
+
+/// Append `:{default_port}` to `raw` if it does not already carry an explicit
+/// `:port` suffix (respecting both bracketed and bare IPv6 literals).
+pub(crate) fn normalize_authority(raw: &str, default_port: u16) -> String {
+    if let Some(after_bracket) = raw.strip_prefix('[') {
+        let has_port = after_bracket
+            .split_once(']')
+            .and_then(|(_, rest)| rest.strip_prefix(':'))
+            .is_some_and(|port| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()));
+        return if has_port {
+            raw.to_string()
+        } else {
+            let host = raw.strip_suffix(':').unwrap_or(raw);
+            format!("{host}:{default_port}")
+        };
+    }
+    if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V6(_) => format!("[{raw}]:{default_port}"),
+            std::net::IpAddr::V4(_) => format!("{raw}:{default_port}"),
+        };
+    }
+    let has_port = raw
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()));
+    if has_port {
+        raw.to_string()
+    } else {
+        let host = raw.strip_suffix(':').unwrap_or(raw);
+        format!("{host}:{default_port}")
+    }
+}
+
+/// Extract the unbracketed host or IP literal from an `authority` (`host:port`,
+/// `[ipv6]:port`, or bare IP literal) for certificate verification and header derivation.
+pub(crate) fn authority_host(authority: &str) -> &str {
+    if let Some(after_bracket) = authority.strip_prefix('[')
+        && let Some((host, _)) = after_bracket.split_once(']')
+    {
+        return host;
+    }
+    if authority.parse::<std::net::IpAddr>().is_ok() {
+        return authority;
+    }
+    authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, _)| host)
 }
 
 /// A freshly established connection.
@@ -335,20 +382,235 @@ impl<R: DnsResolver> TcpConnector<R> {
     }
 }
 
-/// Splits an `authority` into host and port, defaulting the port when absent.
+const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
+
+/// Parses `host:port`, `[ipv6]:port`, `[ipv6]`, `ipv6`, or `host` into `(host, Option<port>)`.
+///
+/// The returned `host` is always unbracketed so both `SystemResolver` and literal
+/// `IpAddr` parsers consume it directly.
+pub(crate) fn parse_authority(authority: &str) -> Result<(&str, Option<u16>), &'static str> {
+    if authority.is_empty() {
+        return Err("empty authority");
+    }
+    if let Some(after_bracket) = authority.strip_prefix('[') {
+        let Some((host, rest)) = after_bracket.split_once(']') else {
+            return Err("unclosed IPv6 bracket");
+        };
+        if host.is_empty() {
+            return Err("empty IPv6 host");
+        }
+        if rest.is_empty() {
+            return Ok((host, None));
+        }
+        let Some(port_str) = rest.strip_prefix(':') else {
+            return Err("unexpected characters after ']'");
+        };
+        let port = port_str.parse::<u16>().map_err(|_| "invalid port")?;
+        return Ok((host, Some(port)));
+    }
+    if authority.parse::<std::net::IpAddr>().is_ok() {
+        return Ok((authority, None));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port_str)) => {
+            if host.is_empty() {
+                return Err("empty host");
+            }
+            if host.contains(':') || host.contains('[') || host.contains(']') {
+                return Err("IPv6 literals with a port must be bracketed");
+            }
+            let port = port_str.parse::<u16>().map_err(|_| "invalid port")?;
+            Ok((host, Some(port)))
+        }
+        None => {
+            if authority.contains('[') || authority.contains(']') {
+                return Err("malformed IPv6 bracket");
+            }
+            Ok((authority, None))
+        }
+    }
+}
+
+/// Splits an `authority` into unbracketed host and port, defaulting the port to `80` when absent.
 ///
 /// Shared by the TCP and datagram paths so both read a node authority the same
 /// way; a disagreement here would make `host:port` mean two things depending on
 /// which transport a caller happened to use.
 pub(crate) fn split_target_authority(authority: &str) -> Result<(&str, u16), NetError> {
-    match authority.rsplit_once(':') {
-        Some((host, port)) => {
-            let port = port.parse::<u16>().map_err(|error| {
-                NetError::Resolve(format!("invalid port in authority: {error}"))
-            })?;
-            Ok((host, port))
+    let (host, port) = parse_authority(authority).map_err(|reason| {
+        NetError::Resolve(ResolveError::invalid_authority(
+            authority,
+            format!("invalid authority {authority:?}: {reason}"),
+        ))
+    })?;
+    Ok((host, port.unwrap_or(80)))
+}
+
+/// Interleave IPv6 and IPv4 candidates per RFC 8305 while preserving resolver order within each family.
+pub(crate) fn order_happy_eyeballs(
+    addresses: &[std::net::SocketAddr],
+) -> Vec<std::net::SocketAddr> {
+    if addresses.len() <= 1 {
+        return addresses.to_vec();
+    }
+    let first_is_v6 = addresses[0].is_ipv6();
+    let mut primary = Vec::with_capacity(addresses.len());
+    let mut secondary = Vec::new();
+    for &addr in addresses {
+        if addr.is_ipv6() == first_is_v6 {
+            primary.push(addr);
+        } else {
+            secondary.push(addr);
         }
-        None => Ok((authority, 80)),
+    }
+    let mut ordered = Vec::with_capacity(addresses.len());
+    let mut p = primary.into_iter();
+    let mut s = secondary.into_iter();
+    loop {
+        match (p.next(), s.next()) {
+            (Some(a), Some(b)) => {
+                ordered.push(a);
+                ordered.push(b);
+            }
+            (Some(a), None) => ordered.push(a),
+            (None, Some(b)) => ordered.push(b),
+            (None, None) => break,
+        }
+    }
+    ordered
+}
+
+async fn connect_happy_eyeballs_with<S, F, Fut>(
+    ordered: &[std::net::SocketAddr],
+    deadline: Option<tokio::time::Instant>,
+    connect_timeout: Option<Duration>,
+    stagger_delay: Duration,
+    target_authority: &str,
+    mut dial: F,
+) -> Result<(std::net::SocketAddr, S), NetError>
+where
+    S: Send + 'static,
+    F: FnMut(std::net::SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<S>> + Send + 'static,
+{
+    if let Some(deadline) = deadline
+        && tokio::time::Instant::now() >= deadline
+    {
+        return Err(NetError::Connect(ConnectError::timeout(
+            DiagnosticPhase::Tcp,
+            target_authority,
+            "TCP connect",
+            connect_timeout.unwrap_or_default(),
+        )));
+    }
+
+    if ordered.len() == 1 {
+        let addr = ordered[0];
+        let fut = dial(addr);
+        let outcome = match deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline, fut).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return Err(NetError::Connect(ConnectError::timeout(
+                        DiagnosticPhase::Tcp,
+                        addr.to_string(),
+                        "TCP connect",
+                        connect_timeout.unwrap_or_default(),
+                    )));
+                }
+            },
+            None => fut.await,
+        };
+        return outcome.map(|stream| (addr, stream)).map_err(|error| {
+            NetError::Connect(ConnectError::io(
+                DiagnosticPhase::Tcp,
+                addr.to_string(),
+                error,
+            ))
+        });
+    }
+
+    let mut join_set = tokio::task::JoinSet::new();
+    let first = ordered[0];
+    let first_fut = dial(first);
+    join_set.spawn(async move { (first, first_fut.await) });
+    let mut next_idx = 1usize;
+    let mut stagger = Box::pin(tokio::time::sleep(stagger_delay));
+    let mut last_error: Option<(std::net::SocketAddr, std::io::Error)> = None;
+
+    let race = async {
+        loop {
+            tokio::select! {
+                joined = join_set.join_next(), if !join_set.is_empty() => {
+                    match joined {
+                        Some(Ok((addr, Ok(stream)))) => {
+                            join_set.abort_all();
+                            return Ok((addr, stream));
+                        }
+                        Some(Ok((addr, Err(error)))) => {
+                            last_error = Some((addr, error));
+                            if next_idx < ordered.len() {
+                                let candidate = ordered[next_idx];
+                                next_idx += 1;
+                                let fut = dial(candidate);
+                                join_set.spawn(async move { (candidate, fut.await) });
+                                stagger.as_mut().reset(tokio::time::Instant::now() + stagger_delay);
+                            } else if join_set.is_empty() {
+                                if let Some((fail_addr, fail_err)) = last_error.take() {
+                                    return Err(NetError::Connect(ConnectError::io(
+                                        DiagnosticPhase::Tcp,
+                                        fail_addr.to_string(),
+                                        fail_err,
+                                    )));
+                                }
+                                break;
+                            }
+                        }
+                        Some(Err(join_err)) => {
+                            if join_set.is_empty() && next_idx >= ordered.len() {
+                                return Err(NetError::Connect(
+                                    ConnectError::new(
+                                        DiagnosticPhase::Tcp,
+                                        ConnectErrorKind::Protocol,
+                                        format!("connect task aborted for {target_authority}: {join_err}"),
+                                    )
+                                    .with_peer(target_authority),
+                                ));
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                () = &mut stagger, if next_idx < ordered.len() => {
+                    let candidate = ordered[next_idx];
+                    next_idx += 1;
+                    let fut = dial(candidate);
+                    join_set.spawn(async move { (candidate, fut.await) });
+                    stagger.as_mut().reset(tokio::time::Instant::now() + stagger_delay);
+                }
+            }
+        }
+        Err(NetError::Connect(
+            ConnectError::new(
+                DiagnosticPhase::Tcp,
+                ConnectErrorKind::Protocol,
+                format!("no connect attempts remained for {target_authority}"),
+            )
+            .with_peer(target_authority),
+        ))
+    };
+
+    match deadline {
+        Some(deadline) => match tokio::time::timeout_at(deadline, race).await {
+            Ok(result) => result,
+            Err(_) => Err(NetError::Connect(ConnectError::timeout(
+                DiagnosticPhase::Tcp,
+                target_authority,
+                "TCP connect",
+                connect_timeout.unwrap_or_default(),
+            ))),
+        },
+        None => race.await,
     }
 }
 
@@ -362,35 +624,29 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
         target: &Target,
         recorder: &TraceCollector,
     ) -> Result<Established, NetError> {
+        let deadline = self
+            .connect_timeout
+            .map(|timeout| tokio::time::Instant::now() + timeout);
         let (host, port) = match split_target_authority(&target.authority) {
             Ok(parts) => parts,
             Err(error) => {
-                recorder.record_error(
-                    DiagnosticRecord::new(DiagnosticCode::EGRESS_DNS_FAILED)
-                        .with_phase(DiagnosticPhase::Dns)
-                        .with_message(error.to_string()),
-                );
+                recorder.record_error(error.diagnostic());
                 return Err(error);
             }
         };
 
         recorder.mark(EventKind::DnsStart, 0, 0);
         let resolve = self.resolver.resolve(host, port);
-        let addresses = match self.connect_timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, resolve).await {
+        let addresses = match deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline, resolve).await {
                 Ok(result) => result,
                 Err(_) => {
-                    let message = format!(
-                        "DNS resolution for {host} exceeded the {}s connect timeout",
-                        timeout.as_secs()
-                    );
-                    recorder.record_error(
-                        DiagnosticRecord::new(DiagnosticCode::EGRESS_DNS_FAILED)
-                            .with_phase(DiagnosticPhase::Dns)
-                            .with_message(message.clone())
-                            .with_public_field("host", host),
-                    );
-                    return Err(NetError::Resolve(message));
+                    let error = NetError::Resolve(ResolveError::timeout(
+                        host,
+                        self.connect_timeout.unwrap_or_default(),
+                    ));
+                    recorder.record_error(error.diagnostic().with_public_field("host", host));
+                    return Err(error);
                 }
             },
             None => resolve.await,
@@ -403,16 +659,15 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
             }
         };
         recorder.mark(EventKind::DnsEnd, addresses.len() as u32, 0);
-        let Some(address) = addresses.first().copied() else {
-            let message = format!("no addresses for {}", target.authority);
+        if addresses.is_empty() {
+            let error = NetError::Resolve(ResolveError::empty(&target.authority));
             recorder.record_error(
-                DiagnosticRecord::new(DiagnosticCode::EGRESS_DNS_FAILED)
-                    .with_phase(DiagnosticPhase::Dns)
-                    .with_message(message.clone())
+                error
+                    .diagnostic()
                     .with_public_field("authority", &target.authority),
             );
-            return Err(NetError::Resolve(message));
-        };
+            return Err(error);
+        }
 
         if self.confinement == EgressConfinement::StrictPublic {
             for addr in &addresses {
@@ -433,39 +688,32 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
             }
         }
 
+        let ordered = order_happy_eyeballs(&addresses);
         recorder.mark(EventKind::TcpStart, 0, 0);
-        let dial = crate::socket::connect(address, &self.socket_config);
-        let stream = match self.connect_timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, dial).await {
-                Ok(result) => result,
-                Err(_) => {
-                    let message = format!(
-                        "TCP connect to {address} exceeded the {}s connect timeout",
-                        timeout.as_secs()
-                    );
-                    recorder.record_error(
-                        DiagnosticRecord::new(DiagnosticCode::EGRESS_TIMEOUT)
-                            .with_phase(DiagnosticPhase::Tcp)
-                            .with_message(message.clone())
-                            .with_public_field("address", address.to_string()),
-                    );
-                    return Err(NetError::Connect(message));
-                }
+        let (address, stream) = match connect_happy_eyeballs_with(
+            &ordered,
+            deadline,
+            self.connect_timeout,
+            HAPPY_EYEBALLS_DELAY,
+            &target.authority,
+            |addr| {
+                let config = self.socket_config.clone();
+                async move { crate::socket::connect(addr, &config).await }
             },
-            None => dial.await,
-        };
-        let stream = match stream {
-            Ok(stream) => stream,
+        )
+        .await
+        {
+            Ok(connected) => connected,
             Err(error) => {
-                let message = error.to_string();
-                recorder.record_error(
-                    DiagnosticRecord::new(DiagnosticCode::EGRESS_TCP_FAILED)
-                        .with_phase(DiagnosticPhase::Tcp)
-                        .with_message(message.clone())
-                        .with_public_field("address", address.to_string())
-                        .with_field("kind", format!("{:?}", error.kind())),
-                );
-                return Err(NetError::Connect(message));
+                let mut record = error.diagnostic();
+                if let Some(peer) = error.connect_error().and_then(|c| c.peer.as_deref()) {
+                    record = record.with_public_field("address", peer);
+                }
+                if let Some(kind) = error.io_error_kind() {
+                    record = record.with_field("kind", format!("{kind:?}"));
+                }
+                recorder.record_error(record);
+                return Err(error);
             }
         };
         if let Err(error) = self.socket_config.apply(&stream) {
@@ -475,7 +723,11 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
                     .with_phase(DiagnosticPhase::Tcp)
                     .with_message(message.clone()),
             );
-            return Err(NetError::Connect(message));
+            return Err(NetError::Connect(
+                ConnectError::config(DiagnosticPhase::Tcp, message)
+                    .with_peer(address.to_string())
+                    .with_source(error),
+            ));
         }
         let local_port = stream.local_addr().ok().map(|address| address.port());
         recorder.mark(EventKind::TcpEnd, 0, 0);
@@ -613,6 +865,184 @@ mod tests {
         assert!(
             error.to_string().contains("connect timeout"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn from_url_handles_ipv6_literals_and_empty_ports() {
+        let (target, path) = Target::from_url("https://[::1]/v1/chat").expect("ipv6 default port");
+        assert_eq!(path, "/v1/chat");
+        assert_eq!(target.authority, "[::1]:443");
+        assert_eq!(target.tls_server_name(), Some("::1"));
+
+        let (target, path) =
+            Target::from_url("https://[2001:db8::1234]:8443/x").expect("ipv6 explicit port");
+        assert_eq!(path, "/x");
+        assert_eq!(target.authority, "[2001:db8::1234]:8443");
+        assert_eq!(target.tls_server_name(), Some("2001:db8::1234"));
+
+        let (target, path) = Target::from_url("https://example.com:/a").expect("empty port");
+        assert_eq!(path, "/a");
+        assert_eq!(target.authority, "example.com:443");
+        assert_eq!(target.tls_server_name(), Some("example.com"));
+
+        assert_eq!(normalize_authority("::1", 443), "[::1]:443");
+        assert_eq!(normalize_authority("2001:db8::", 443), "[2001:db8::]:443");
+        assert_eq!(authority_host("::1"), "::1");
+        assert_eq!(authority_host("2001:db8::"), "2001:db8::");
+    }
+
+    #[test]
+    fn split_target_authority_handles_ipv6_literals_and_defaults() {
+        assert_eq!(
+            split_target_authority("[::1]:8443").expect("bracketed ipv6 with port"),
+            ("::1", 8443)
+        );
+        assert_eq!(
+            split_target_authority("[::1]").expect("bracketed ipv6 default port"),
+            ("::1", 80)
+        );
+        assert_eq!(
+            split_target_authority("::1").expect("bare ipv6 default port"),
+            ("::1", 80)
+        );
+        let invalid =
+            split_target_authority("2001:db8::zz:8080").expect_err("unbracketed invalid + port");
+        assert!(!invalid.is_retryable());
+        assert_eq!(invalid.diagnostic().code, DiagnosticCode::EGRESS_CONFIG);
+    }
+
+    #[test]
+    fn happy_eyeballs_interleaves_address_families() {
+        let v6_a: std::net::SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        let v6_b: std::net::SocketAddr = "[2001:db8::2]:443".parse().unwrap();
+        let v4_a: std::net::SocketAddr = "198.51.100.1:443".parse().unwrap();
+        let v4_b: std::net::SocketAddr = "198.51.100.2:443".parse().unwrap();
+        let ordered = order_happy_eyeballs(&[v6_a, v6_b, v4_a, v4_b]);
+        assert_eq!(ordered, vec![v6_a, v4_a, v6_b, v4_b]);
+    }
+
+    #[tokio::test]
+    async fn connector_falls_back_when_first_address_refuses() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_port = listener.local_addr().unwrap().port();
+        let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_port = closed_listener.local_addr().unwrap().port();
+        drop(closed_listener);
+
+        #[derive(Debug)]
+        struct TwoAddrResolver(std::net::SocketAddr, std::net::SocketAddr);
+        impl crate::dns::DnsResolver for TwoAddrResolver {
+            fn resolve<'a>(
+                &'a self,
+                _host: &'a str,
+                _port: u16,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<Vec<std::net::SocketAddr>, NetError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                let addrs = vec![self.0, self.1];
+                Box::pin(async move { Ok(addrs) })
+            }
+        }
+
+        let resolver = Arc::new(TwoAddrResolver(
+            std::net::SocketAddr::from(([127, 0, 0, 1], closed_port)),
+            std::net::SocketAddr::from(([127, 0, 0, 1], live_port)),
+        ));
+        let connector = TcpConnector::with_resolver(resolver)
+            .with_connect_timeout(Some(Duration::from_secs(2)));
+        let recorder = TraceCollector::start(64);
+        let target = Target::plain("dual.example:443");
+        let (accepted, established) =
+            tokio::join!(listener.accept(), connector.connect(&target, &recorder));
+        assert!(accepted.is_ok());
+        assert!(established.is_ok());
+    }
+
+    #[tokio::test]
+    async fn happy_eyeballs_stagger_recovers_from_stalling_primary_address() {
+        let first: std::net::SocketAddr = "198.51.100.1:443".parse().unwrap();
+        let second: std::net::SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        let started = tokio::time::Instant::now();
+        let result = connect_happy_eyeballs_with(
+            &[first, second],
+            Some(started + Duration::from_secs(5)),
+            Some(Duration::from_secs(5)),
+            Duration::from_millis(40),
+            "example.com:443",
+            |addr| async move {
+                if addr == first {
+                    std::future::pending::<std::io::Result<&'static str>>().await
+                } else {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Ok("connected")
+                }
+            },
+        )
+        .await;
+        let (winner, payload) = result.expect("secondary address must win before full timeout");
+        assert_eq!(winner, second);
+        assert_eq!(payload, "connected");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "expected ~50ms staggered winner, got {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn single_deadline_spans_dns_and_tcp_without_doubling() {
+        #[derive(Debug)]
+        struct SlowResolver;
+        impl crate::dns::DnsResolver for SlowResolver {
+            fn resolve<'a>(
+                &'a self,
+                _host: &'a str,
+                port: u16,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<Vec<std::net::SocketAddr>, NetError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))])
+                })
+            }
+        }
+
+        // Resolve consumes 150ms of the 220ms budget, leaving only 70ms for TCP.
+        let started = tokio::time::Instant::now();
+        let total_budget = Duration::from_millis(220);
+        let deadline = started + total_budget;
+
+        let resolve_res = tokio::time::timeout_at(deadline, SlowResolver.resolve("example", 443))
+            .await
+            .expect("resolve fits inside 220ms budget")
+            .expect("addrs");
+        let err = connect_happy_eyeballs_with::<(), _, _>(
+            &resolve_res,
+            Some(deadline),
+            Some(total_budget),
+            HAPPY_EYEBALLS_DELAY,
+            "example:443",
+            |_| async move { std::future::pending::<std::io::Result<()>>().await },
+        )
+        .await
+        .expect_err("remaining budget must bound TCP dial");
+
+        let elapsed = started.elapsed();
+        assert!(err.is_timeout(), "expected timeout error, got {err}");
+        assert_eq!(err.diagnostic().code, DiagnosticCode::EGRESS_TIMEOUT);
+        assert!(
+            elapsed < Duration::from_millis(360),
+            "expected combined DNS+TCP timeout near 220ms, not doubled 440ms; got {elapsed:?}"
         );
     }
 }

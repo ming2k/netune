@@ -15,7 +15,7 @@ use netune_ws::{
     Opcode, Role, generate_mask,
 };
 
-use crate::error::NetError;
+use crate::error::{ConnectError, NetError};
 
 /// Re-exported from the codec: frame/message size ceilings live with the
 /// framing logic that enforces them.
@@ -308,7 +308,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                 .stream
                 .read_buf(&mut self.read_buf)
                 .await
-                .map_err(|e| NetError::Connect(format!("WebSocket read failed: {e}")))?;
+                .map_err(|e| {
+                    NetError::Connect(ConnectError::io(DiagnosticPhase::WebSocket, "websocket", e))
+                })?;
 
             if bytes_read == 0 {
                 if self.closed {
@@ -344,14 +346,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
         let mask = Some(generate_mask());
         self.write_buf.clear();
         FrameEncoder::encode(frame, mask, &mut self.write_buf);
-        self.stream
-            .write_all(&self.write_buf)
-            .await
-            .map_err(|e| NetError::Connect(format!("WebSocket write failed: {e}")))?;
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| NetError::Connect(format!("WebSocket flush failed: {e}")))?;
+        self.stream.write_all(&self.write_buf).await.map_err(|e| {
+            NetError::Connect(ConnectError::io(DiagnosticPhase::WebSocket, "websocket", e))
+        })?;
+        self.stream.flush().await.map_err(|e| {
+            NetError::Connect(ConnectError::io(DiagnosticPhase::WebSocket, "websocket", e))
+        })?;
         Ok(())
     }
 }

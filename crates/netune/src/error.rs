@@ -5,19 +5,305 @@
 //! transport recorded. A failure without evidence is not a reviewable failure.
 
 use std::ops::Deref;
+use std::time::Duration;
 
 use netune_http1::HttpError;
 use netune_trace::{
     Diagnose, DiagnosticCode, DiagnosticPhase, DiagnosticRecord, RetryVerdict, TraceSnapshot,
 };
 
+/// Specific reason authority parsing or DNS resolution failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResolveErrorKind {
+    /// Authority syntax or port was invalid (non-retryable configuration error).
+    InvalidAuthority,
+    /// DNS resolution exceeded the connection deadline (retryable).
+    Timeout,
+    /// DNS resolution returned zero usable addresses (retryable).
+    Empty,
+    /// Underlying resolver or OS lookup failure (retryable).
+    Failed,
+}
+
+/// Structured failure from authority parsing or DNS resolution.
+#[derive(Debug)]
+pub struct ResolveError {
+    pub kind: ResolveErrorKind,
+    pub host: String,
+    pub message: String,
+    pub source: Option<std::io::Error>,
+}
+
+impl ResolveError {
+    /// Construct a resolution failure with explicit kind, target host, and detail message.
+    pub fn new(
+        kind: ResolveErrorKind,
+        host: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            host: host.into(),
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Attach the underlying OS I/O error.
+    #[must_use]
+    pub fn with_source(mut self, source: std::io::Error) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// Authority syntax or port could not be parsed.
+    pub fn invalid_authority(authority: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(ResolveErrorKind::InvalidAuthority, authority, message)
+    }
+
+    /// DNS resolution exceeded the allowed connection deadline.
+    pub fn timeout(host: impl Into<String>, limit: Duration) -> Self {
+        let host = host.into();
+        let message = format!(
+            "DNS resolution for {host} exceeded the {} ms connect timeout",
+            limit.as_millis()
+        );
+        Self::new(ResolveErrorKind::Timeout, host, message)
+    }
+
+    /// DNS resolution yielded no addresses for `host`.
+    pub fn empty(host: impl Into<String>) -> Self {
+        let host = host.into();
+        let message = format!("no addresses found for {host}");
+        Self::new(ResolveErrorKind::Empty, host, message)
+    }
+
+    /// Underlying OS/resolver I/O error.
+    pub fn io(host: impl Into<String>, error: std::io::Error) -> Self {
+        let host = host.into();
+        let message = format!("{host}: {error}");
+        Self::new(ResolveErrorKind::Failed, host, message).with_source(error)
+    }
+
+    /// Whether resolution failed because the deadline expired.
+    pub fn is_timeout(&self) -> bool {
+        self.kind == ResolveErrorKind::Timeout
+            || self
+                .source
+                .as_ref()
+                .is_some_and(|err| err.kind() == std::io::ErrorKind::TimedOut)
+    }
+
+    /// Whether another attempt could plausibly succeed.
+    pub fn is_retryable(&self) -> bool {
+        !matches!(self.kind, ResolveErrorKind::InvalidAuthority)
+    }
+
+    /// Diagnostic code and retry verdict matching this resolution failure.
+    pub const fn diagnostic_code(&self) -> DiagnosticCode {
+        match self.kind {
+            ResolveErrorKind::InvalidAuthority => DiagnosticCode::EGRESS_CONFIG,
+            ResolveErrorKind::Timeout => DiagnosticCode::EGRESS_TIMEOUT,
+            ResolveErrorKind::Empty | ResolveErrorKind::Failed => DiagnosticCode::EGRESS_DNS_FAILED,
+        }
+    }
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ResolveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|error| error as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// Category of connection-establishment failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnectErrorKind {
+    /// Timed out waiting for socket connect or handshake completion.
+    Timeout,
+    /// Socket or stream I/O failure (`std::io::ErrorKind` preserved).
+    Io(std::io::ErrorKind),
+    /// Invalid configuration, URL, authority, or unknown profile/engine.
+    Config,
+    /// TLS handshake, verifier, or session parameter failure.
+    Tls,
+    /// Proxy tunnel negotiation or relay failure.
+    Proxy,
+    /// Higher-level handshake or stream failure during connect/upgrade.
+    Protocol,
+}
+
+/// Structured failure from connection establishment (TCP, TLS, proxy, or handshake).
+#[derive(Debug)]
+pub struct ConnectError {
+    pub phase: DiagnosticPhase,
+    pub kind: ConnectErrorKind,
+    pub peer: Option<String>,
+    pub message: String,
+    pub source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+}
+
+impl ConnectError {
+    /// Construct a connection-establishment failure.
+    pub fn new(phase: DiagnosticPhase, kind: ConnectErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            phase,
+            kind,
+            peer: None,
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Attach the peer/authority string associated with this failure.
+    #[must_use]
+    pub fn with_peer(mut self, peer: impl Into<String>) -> Self {
+        self.peer = Some(peer.into());
+        self
+    }
+
+    /// Attach the underlying error cause.
+    #[must_use]
+    pub fn with_source<E>(mut self, source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        self.source = Some(Box::new(source));
+        self
+    }
+
+    /// Handshake or socket connect exceeded its timeout budget.
+    pub fn timeout(
+        phase: DiagnosticPhase,
+        peer: impl Into<String>,
+        phase_label: &str,
+        limit: Duration,
+    ) -> Self {
+        let peer = peer.into();
+        let message = format!(
+            "{phase_label} with {peer} exceeded {} ms",
+            limit.as_millis()
+        );
+        Self::new(phase, ConnectErrorKind::Timeout, message).with_peer(peer)
+    }
+
+    /// OS or transport I/O error during connection establishment.
+    pub fn io(phase: DiagnosticPhase, peer: impl Into<String>, error: std::io::Error) -> Self {
+        let peer = peer.into();
+        let kind = ConnectErrorKind::Io(error.kind());
+        let message = format!("{peer}: {error}");
+        Self::new(phase, kind, message)
+            .with_peer(peer)
+            .with_source(error)
+    }
+
+    /// Configuration, profile, or URL validation error.
+    pub fn config(phase: DiagnosticPhase, message: impl Into<String>) -> Self {
+        Self::new(phase, ConnectErrorKind::Config, message)
+    }
+
+    /// TLS handshake or cryptographic preparation error.
+    pub fn tls(peer: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(DiagnosticPhase::Tls, ConnectErrorKind::Tls, message).with_peer(peer)
+    }
+
+    /// Proxy tunnel or SOCKS5 association error.
+    pub fn proxy(peer: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(DiagnosticPhase::Proxy, ConnectErrorKind::Proxy, message).with_peer(peer)
+    }
+
+    /// Higher-level handshake or protocol error during establishment.
+    pub fn protocol(
+        phase: DiagnosticPhase,
+        peer: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(phase, ConnectErrorKind::Protocol, message).with_peer(peer)
+    }
+
+    /// Underlying `std::io::ErrorKind`, when this failure originated in OS I/O.
+    pub fn io_kind(&self) -> Option<std::io::ErrorKind> {
+        match self.kind {
+            ConnectErrorKind::Io(kind) => Some(kind),
+            _ => self
+                .source
+                .as_deref()
+                .and_then(|err| err.downcast_ref::<std::io::Error>())
+                .map(std::io::Error::kind),
+        }
+    }
+
+    /// Whether the failure was a timeout (explicit deadline or OS `ETIMEDOUT`).
+    pub fn is_timeout(&self) -> bool {
+        matches!(
+            self.kind,
+            ConnectErrorKind::Timeout | ConnectErrorKind::Io(std::io::ErrorKind::TimedOut)
+        )
+    }
+
+    /// Whether another attempt could plausibly succeed.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self.kind,
+            ConnectErrorKind::Timeout | ConnectErrorKind::Io(_) | ConnectErrorKind::Proxy
+        )
+    }
+
+    /// Diagnostic code aligned with [`netune_trace::DiagnosticCode`].
+    pub const fn diagnostic_code(&self) -> DiagnosticCode {
+        match self.kind {
+            ConnectErrorKind::Timeout | ConnectErrorKind::Io(std::io::ErrorKind::TimedOut) => {
+                DiagnosticCode::EGRESS_TIMEOUT
+            }
+            ConnectErrorKind::Config => DiagnosticCode::EGRESS_CONFIG,
+            ConnectErrorKind::Tls => DiagnosticCode::EGRESS_TLS_FAILED,
+            ConnectErrorKind::Proxy => DiagnosticCode::EGRESS_PROXY_FAILED,
+            ConnectErrorKind::Protocol => match self.phase {
+                DiagnosticPhase::WebSocket => DiagnosticCode::EGRESS_WS_FAILED,
+                DiagnosticPhase::Http2 => DiagnosticCode::EGRESS_HTTP2_PROTOCOL,
+                _ => DiagnosticCode::EGRESS_PROTOCOL,
+            },
+            ConnectErrorKind::Io(_) => match self.phase {
+                DiagnosticPhase::Proxy => DiagnosticCode::EGRESS_PROXY_FAILED,
+                DiagnosticPhase::Tls => DiagnosticCode::EGRESS_TLS_FAILED,
+                DiagnosticPhase::WebSocket => DiagnosticCode::EGRESS_WS_FAILED,
+                DiagnosticPhase::Http2 => DiagnosticCode::EGRESS_HTTP2_HANDSHAKE,
+                DiagnosticPhase::Dns => DiagnosticCode::EGRESS_DNS_FAILED,
+                DiagnosticPhase::Tcp => DiagnosticCode::EGRESS_TCP_FAILED,
+                _ => DiagnosticCode::EGRESS_IO,
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ConnectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|error| error as &(dyn std::error::Error + 'static))
+    }
+}
+
 /// Why a request could not be completed at the transport layer.
 #[derive(Debug)]
 pub enum NetError {
-    /// The authority could not be resolved.
-    Resolve(String),
-    /// TCP (or TLS) could not be established.
-    Connect(String),
+    /// The authority could not be parsed or resolved.
+    Resolve(ResolveError),
+    /// TCP, proxy tunnel, TLS, or handshake establishment failed.
+    Connect(ConnectError),
     /// The peer spoke broken HTTP, exceeded a limit, or the stream ended early.
     Http(HttpError),
     /// The transport failed.
@@ -41,6 +327,44 @@ pub enum NetError {
 }
 
 impl NetError {
+    /// Structured DNS / authority resolution failure, when this error is one.
+    pub fn resolve_error(&self) -> Option<&ResolveError> {
+        match self {
+            Self::Resolve(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    /// Structured connection-establishment failure, when this error is one.
+    pub fn connect_error(&self) -> Option<&ConnectError> {
+        match self {
+            Self::Connect(error) => Some(error),
+            _ => None,
+        }
+    }
+
+    /// Whether this failure is a timeout (deadline expiry or OS `ETIMEDOUT`).
+    pub fn is_timeout(&self) -> bool {
+        match self {
+            Self::Resolve(error) => error.is_timeout(),
+            Self::Connect(error) => error.is_timeout(),
+            Self::Io(error) => error.kind() == std::io::ErrorKind::TimedOut,
+            Self::Http(HttpError::Io(error)) => error.kind() == std::io::ErrorKind::TimedOut,
+            _ => false,
+        }
+    }
+
+    /// Underlying `std::io::ErrorKind`, when an OS I/O error caused this failure.
+    pub fn io_error_kind(&self) -> Option<std::io::ErrorKind> {
+        match self {
+            Self::Resolve(error) => error.source.as_ref().map(std::io::Error::kind),
+            Self::Connect(error) => error.io_kind(),
+            Self::Io(error) => Some(error.kind()),
+            Self::Http(HttpError::Io(error)) => Some(error.kind()),
+            _ => None,
+        }
+    }
+
     /// Stable classification for retry policy and telemetry.
     pub fn class(&self) -> &'static str {
         match self {
@@ -59,13 +383,14 @@ impl NetError {
     /// Whether another attempt could plausibly succeed.
     ///
     /// A broken HTTP peer will speak the same broken HTTP again, a corrupt body
-    /// will decode to garbage again, and an unsupported encoding will stay
-    /// unsupported: only resolution, connect and transport failures are worth
-    /// retrying. This mirrors the retry discipline the previous client derived
-    /// from `reqwest`'s error kinds.
+    /// will decode to garbage again, an invalid configuration/profile stays
+    /// invalid, and an unsupported encoding will stay unsupported: only transient
+    /// resolution, connect and transport failures are worth retrying.
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Resolve(_) | Self::Connect(_) | Self::Io(_) => true,
+            Self::Resolve(error) => error.is_retryable(),
+            Self::Connect(error) => error.is_retryable(),
+            Self::Io(_) => true,
             Self::Http(error) => error.is_retryable(),
             Self::RetryableProtocol(_) => true,
             Self::UnsupportedEncoding(_)
@@ -153,6 +478,8 @@ impl std::fmt::Display for NetError {
 impl std::error::Error for NetError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Resolve(error) => Some(error),
+            Self::Connect(error) => Some(error),
             Self::Http(error) => Some(error),
             Self::Io(error) => Some(error),
             _ => None,
@@ -163,8 +490,8 @@ impl std::error::Error for NetError {
 impl Diagnose for NetError {
     fn diagnostic(&self) -> DiagnosticRecord {
         let (code, phase) = match self {
-            Self::Resolve(_) => (DiagnosticCode::EGRESS_DNS_FAILED, DiagnosticPhase::Dns),
-            Self::Connect(_) => (DiagnosticCode::EGRESS_TCP_FAILED, DiagnosticPhase::Tcp),
+            Self::Resolve(error) => (error.diagnostic_code(), DiagnosticPhase::Dns),
+            Self::Connect(error) => (error.diagnostic_code(), error.phase),
             Self::Http(error) => match error.class() {
                 "protocol" => (
                     DiagnosticCode::EGRESS_HTTP1_PROTOCOL,
@@ -314,5 +641,72 @@ impl From<HttpError> for NetError {
 impl From<std::io::Error> for NetError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as _;
+
+    #[test]
+    fn connect_error_preserves_phase_timeout_io_kind_and_source() {
+        let err = NetError::Connect(ConnectError::timeout(
+            DiagnosticPhase::Tls,
+            "example.com:443",
+            "TLS handshake",
+            Duration::from_secs(5),
+        ));
+        assert!(err.is_timeout());
+        assert!(err.is_retryable());
+        assert_eq!(err.class(), "connect");
+        let diag = err.diagnostic();
+        assert_eq!(diag.code, DiagnosticCode::EGRESS_TIMEOUT);
+        assert_eq!(diag.phase, DiagnosticPhase::Tls);
+
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        let err = NetError::Connect(ConnectError::io(
+            DiagnosticPhase::Tcp,
+            "127.0.0.1:8080",
+            refused,
+        ));
+        assert!(!err.is_timeout());
+        assert!(err.is_retryable());
+        assert_eq!(
+            err.io_error_kind(),
+            Some(std::io::ErrorKind::ConnectionRefused)
+        );
+        let src = err.source().expect("ConnectError source");
+        assert!(
+            src.source().is_some(),
+            "underlying io::Error source preserved"
+        );
+        assert_eq!(err.diagnostic().code, DiagnosticCode::EGRESS_TCP_FAILED);
+    }
+
+    #[test]
+    fn config_and_tls_connect_errors_are_non_retryable() {
+        let cfg = NetError::Connect(ConnectError::config(DiagnosticPhase::Tls, "bad profile"));
+        assert!(!cfg.is_retryable());
+        assert_eq!(cfg.diagnostic().code, DiagnosticCode::EGRESS_CONFIG);
+
+        let tls = NetError::Connect(ConnectError::tls("example.com", "bad cert"));
+        assert!(!tls.is_retryable());
+        assert_eq!(tls.diagnostic().code, DiagnosticCode::EGRESS_TLS_FAILED);
+
+        let resolve_cfg = NetError::Resolve(ResolveError::invalid_authority("bad:port", "bad"));
+        assert!(!resolve_cfg.is_retryable());
+        assert_eq!(resolve_cfg.diagnostic().code, DiagnosticCode::EGRESS_CONFIG);
+
+        let resolve_timeout = NetError::Resolve(ResolveError::timeout(
+            "slow.example",
+            Duration::from_secs(2),
+        ));
+        assert!(resolve_timeout.is_timeout());
+        assert!(resolve_timeout.is_retryable());
+        assert_eq!(
+            resolve_timeout.diagnostic().code,
+            DiagnosticCode::EGRESS_TIMEOUT
+        );
     }
 }

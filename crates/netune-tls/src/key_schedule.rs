@@ -205,6 +205,16 @@ impl Secret {
         self.hkdf_expand_label("finished", &[], self.hash.output_len())
     }
 
+    /// Derive `application_traffic_secret_N+1` from `application_traffic_secret_N`
+    /// for a TLS 1.3 `KeyUpdate` (RFC 8446 §7.2):
+    /// `HKDF-Expand-Label(Secret, "traffic upd", "", Hash.length)`.
+    ///
+    /// # Errors
+    /// [`ScheduleError::Expand`] when the primitive refuses the length.
+    pub fn next_traffic_secret(&self) -> Result<Secret, ScheduleError> {
+        self.derive_secret("traffic upd", &[])
+    }
+
     /// HKDF-Expand (RFC 5869 §2.3) through `aws_lc_rs::hkdf`.
     ///
     /// # Errors

@@ -383,6 +383,12 @@ impl RecordUnprotector12 {
     /// failures, and [`RecordError::Crypto`] when the primitive refuses do.
     pub fn open(&self, sequence: u64, record: &[u8]) -> Result<(u8, Vec<u8>), RecordError> {
         let header = RecordHeader::parse(record)?;
+        if usize::from(header.payload_len) > MAX_CIPHERTEXT_LEN {
+            return Err(RecordError::RecordTooLarge {
+                len: usize::from(header.payload_len),
+                max: MAX_CIPHERTEXT_LEN,
+            });
+        }
         match &self.cipher {
             RecordCipher12::AesGcm {
                 key,
@@ -490,6 +496,9 @@ impl RecordUnprotector12 {
                     return Err(RecordError::TruncatedHeader { got: record.len() });
                 };
                 let ciphertext = &record[RECORD_HEADER_LEN + 16..];
+                if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
+                    return Err(RecordError::DecryptionFailed);
+                }
                 let decrypted = cbc_transform(bits, write_key, record_iv, ciphertext, false)
                     .map_err(|_| RecordError::DecryptionFailed)?;
 
@@ -561,10 +570,10 @@ impl RecordProtector12 {
         content_type: u8,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, RecordError> {
-        if plaintext.len() > MAX_CIPHERTEXT_LEN {
+        if plaintext.len() > MAX_PLAINTEXT_LEN {
             return Err(RecordError::RecordTooLarge {
                 len: plaintext.len(),
-                max: MAX_CIPHERTEXT_LEN,
+                max: MAX_PLAINTEXT_LEN,
             });
         }
         match &self.cipher {
@@ -708,10 +717,10 @@ fn cbc_transform(
     input: &[u8],
     encrypting: bool,
 ) -> Result<Vec<u8>, Unspecified> {
-    debug_assert!(
-        input.len().is_multiple_of(16),
-        "CBC input must be block-aligned"
-    );
+    if input.is_empty() || !input.len().is_multiple_of(16) {
+        return Err(Unspecified);
+    }
+    let input_len = i32::try_from(input.len()).map_err(|_| Unspecified)?;
     let cipher = match (bits, encrypting) {
         (128, true) => unsafe { EVP_aes_128_cbc() },
         (256, true) => unsafe { EVP_aes_256_cbc() },
@@ -769,7 +778,7 @@ fn cbc_transform(
                 output.as_mut_ptr(),
                 &mut written,
                 input.as_ptr(),
-                input.len() as i32,
+                input_len,
             ) != 1
             {
                 return Err(Unspecified);
@@ -915,6 +924,12 @@ impl RecordUnprotector13 {
         if header.content_type != CONTENT_APPLICATION_DATA {
             return Err(RecordError::OuterTypeNotApplicationData {
                 got: header.content_type,
+            });
+        }
+        if usize::from(header.payload_len) > MAX_CIPHERTEXT_LEN {
+            return Err(RecordError::RecordTooLarge {
+                len: usize::from(header.payload_len),
+                max: MAX_CIPHERTEXT_LEN,
             });
         }
         if record.len() != RECORD_HEADER_LEN + usize::from(header.payload_len) {

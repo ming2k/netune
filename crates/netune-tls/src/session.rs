@@ -142,28 +142,24 @@ pub struct ParsedNewSessionTicket {
 /// handshake header). Returns `None` if malformed or violating RFC 8446 §4.6.1.
 #[must_use]
 pub fn parse_new_session_ticket(body: &[u8]) -> Option<ParsedNewSessionTicket> {
-    if body.len() < 9 {
-        return None;
-    }
-    let lifetime_secs = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+    let (lifetime_bytes, rest) = body.split_at_checked(4)?;
+    let lifetime_secs = u32::from_be_bytes(lifetime_bytes.try_into().ok()?);
     if lifetime_secs > MAX_TICKET_LIFETIME_SECS {
         return None;
     }
-    let age_add = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
-    let nonce_len = usize::from(body[8]);
-    let rest = body.get(9..)?;
-    if rest.len() < nonce_len + 2 {
+    let (age_add_bytes, rest) = rest.split_at_checked(4)?;
+    let age_add = u32::from_be_bytes(age_add_bytes.try_into().ok()?);
+    let (&nonce_len_byte, rest) = rest.split_first()?;
+    let (nonce, rest) = rest.split_at_checked(usize::from(nonce_len_byte))?;
+    let (ticket_len_bytes, rest) = rest.split_at_checked(2)?;
+    let ticket_len = usize::from(u16::from_be_bytes(ticket_len_bytes.try_into().ok()?));
+    if ticket_len == 0 {
         return None;
     }
-    let (nonce, rest) = rest.split_at(nonce_len);
-    let ticket_len = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
-    let rest = rest.get(2..)?;
-    if ticket_len == 0 || rest.len() < ticket_len + 2 {
-        return None;
-    }
-    let (ticket, rest) = rest.split_at(ticket_len);
-    let ext_len = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
-    if rest.len() != 2 + ext_len {
+    let (ticket, rest) = rest.split_at_checked(ticket_len)?;
+    let (ext_len_bytes, rest) = rest.split_at_checked(2)?;
+    let ext_len = usize::from(u16::from_be_bytes(ext_len_bytes.try_into().ok()?));
+    if rest.len() != ext_len {
         return None;
     }
     Some(ParsedNewSessionTicket {
@@ -172,4 +168,47 @@ pub fn parse_new_session_ticket(body: &[u8]) -> Option<ParsedNewSessionTicket> {
         nonce: nonce.to_vec(),
         ticket: ticket.to_vec(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_new_session_ticket_handles_valid_and_malformed_inputs_without_panicking() {
+        let mut valid = Vec::new();
+        valid.extend_from_slice(&3600u32.to_be_bytes());
+        valid.extend_from_slice(&0x1234_5678u32.to_be_bytes());
+        valid.push(2);
+        valid.extend_from_slice(&[0xaa, 0xbb]);
+        valid.extend_from_slice(&3u16.to_be_bytes());
+        valid.extend_from_slice(b"tkt");
+        valid.extend_from_slice(&1u16.to_be_bytes());
+        valid.push(0x99);
+        let parsed = parse_new_session_ticket(&valid).expect("valid ticket");
+        assert_eq!(parsed.lifetime_secs, 3600);
+        assert_eq!(parsed.age_add, 0x1234_5678);
+        assert_eq!(parsed.nonce, vec![0xaa, 0xbb]);
+        assert_eq!(parsed.ticket, b"tkt");
+
+        for len in 0..valid.len() {
+            assert!(
+                parse_new_session_ticket(&valid[..len]).is_none(),
+                "truncated at {len} must return None"
+            );
+        }
+
+        let mut over_lifetime = valid.clone();
+        over_lifetime[..4].copy_from_slice(&(MAX_TICKET_LIFETIME_SECS + 1).to_be_bytes());
+        assert!(parse_new_session_ticket(&over_lifetime).is_none());
+
+        // Zero-length ticket is illegal per RFC 8446 §4.6.1.
+        let mut zero_ticket = Vec::new();
+        zero_ticket.extend_from_slice(&60u32.to_be_bytes());
+        zero_ticket.extend_from_slice(&1u32.to_be_bytes());
+        zero_ticket.push(0);
+        zero_ticket.extend_from_slice(&0u16.to_be_bytes());
+        zero_ticket.extend_from_slice(&0u16.to_be_bytes());
+        assert!(parse_new_session_ticket(&zero_ticket).is_none());
+    }
 }

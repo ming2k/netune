@@ -64,8 +64,10 @@ impl<C: Connector> H2Client<C> {
 
         let mut h2 = crate::handshake::bound(
             self.handshake_timeout,
+            netune_trace::DiagnosticPhase::Http2,
             "HTTP/2 handshake",
             authority,
+            recorder,
             H2ClientConnection::handshake(established.stream, self.fingerprint.clone()),
         )
         .await?

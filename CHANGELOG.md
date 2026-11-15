@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.29] - 2026-11-15
+
 ### Added
+
+- **Declarative ClientHello blueprints & TLS 1.3 PSK session resumption (ADR-0048).**
+  `netune-tls::hello` and `netune::TlsProfile` move cleanly to declarative
+  `ClientHelloBlueprint`s supporting arbitrary extension ordering, seeded
+  extension permutation, RFC 8701 GREASE, RFC 7685 dynamic padding,
+  independent `key_share` vs `supported_groups`, `alps`, `record_size_limit`,
+  `post_handshake_auth`, `session_ticket`, and RFC 8879 `compress_certificate`
+  (`zlib` and `brotli` decompression in `netune-tls::handshake`), alongside
+  `go-standard`, `chrome-current`, `firefox-current`, and `safari-current`
+  presets (`[INV-TLS-06]`, `[INV-TLS-11]`). `netune-tls::session` and
+  `TlsRouterConnector` also cache incoming `NewSessionTicket` messages per
+  `(server_name, profile_name, alpn)` and perform single-use TLS 1.3 PSK
+  resumption with RFC 8446 §4.2.11.2 binder signing.
 
 - **Owned egress TLS engine begins (ADR-0045).** New leaf crate `netune-tls`
   owns the egress TCP-TLS handshake: the TLS wire constants and framing

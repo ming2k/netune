@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "netune"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "base64",
  "brotli",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "netune-diagnostics"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "netune-trace",
  "serde",
@@ -821,11 +821,11 @@ dependencies = [
 
 [[package]]
 name = "netune-egress"
-version = "0.0.28"
+version = "0.0.29"
 
 [[package]]
 name = "netune-http1"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "bytes",
  "http",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http2"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "bytes",
  "http",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http3"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "bytes",
  "h3",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "netune-io"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "netune-trace",
  "tokio",
@@ -873,14 +873,14 @@ dependencies = [
 
 [[package]]
 name = "netune-probe"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "netune-quic"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "netune-server"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "bytes",
  "http",
@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "netune-test-support"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "rcgen",
  "rustls",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "netune-tls"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "aws-lc-rs",
  "aws-lc-sys",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "netune-trace"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "serde",
  "serde_json",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "netune-webtransport"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "bytes",
  "http",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "netune-workspace-tests"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "brotli",
  "bytes",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "netune-ws"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "base64",
  "bytes",

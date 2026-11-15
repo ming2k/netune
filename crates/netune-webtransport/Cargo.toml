@@ -10,15 +10,15 @@ description = "Owned WebTransport over HTTP/3 (draft-ietf-webtrans-http3-17) for
 [dependencies]
 bytes = { workspace = true }
 http = { workspace = true }
-netune-http3 = { path = "../netune-http3", version = "0.0.31" }
-netune-quic = { path = "../netune-quic", version = "0.0.31" }
+netune-http3 = { path = "../netune-http3", version = "0.0.32" }
+netune-quic = { path = "../netune-quic", version = "0.0.32" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 rcgen = { workspace = true }
 rustls = { workspace = true }
-test-support = { path = "../test-support", version = "0.0.31" }
+test-support = { path = "../test-support", version = "0.0.32" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]

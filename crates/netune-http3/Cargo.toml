@@ -11,8 +11,8 @@ readme = false
 [dependencies]
 bytes = { workspace = true }
 http = { workspace = true }
-netune-quic = { path = "../netune-quic", version = "0.0.31" }
-netune-trace = { path = "../netune-trace", version = "0.0.31" }
+netune-quic = { path = "../netune-quic", version = "0.0.32" }
+netune-trace = { path = "../netune-trace", version = "0.0.32" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "time", "sync"] }
 
@@ -23,7 +23,7 @@ h3-quinn = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 quinn = { workspace = true }
-test-support = { path = "../test-support", version = "0.0.31" }
+test-support = { path = "../test-support", version = "0.0.32" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

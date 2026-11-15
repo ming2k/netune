@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.32] - 2026-11-16
+
+### Fixed
+
+- `netune-tls`: Eliminated out-of-bounds slice panics in the async TLS driver and hardened TLS 1.2/1.3 handshake, record, certificate, session, and `ClientHello` state-machine handling across edge-case framing and partial I/O paths.
+
+### Changed
+
+- `netune`: Replaced untyped connection and DNS resolution error strings with structured `ConnectError` and `ResolveError` types and updated TCP/UDP/proxy/TLS/WebSocket connect paths.
+
 ## [0.0.31] - 2026-11-15
 
 ### Added

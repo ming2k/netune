@@ -215,10 +215,10 @@ fn the_rfc_8448_handshake_completes_end_to_end() {
 
 #[test]
 fn the_go_identity_completes_against_a_rustls_server() {
-    use netune_test_support::tls::identity;
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::sync::Arc;
+    use test_support::tls::identity;
 
     let identity = identity(&["localhost"], &[b"http/1.1"]);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -355,10 +355,10 @@ fn the_go_identity_completes_against_a_rustls_server() {
 
 #[test]
 fn the_go_identity_completes_tls_1_2_against_a_rustls_server() {
-    use netune_test_support::tls::identity;
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::sync::Arc;
+    use test_support::tls::identity;
 
     // Both PRFs the GCM suites use: SHA-256 (c02b) and SHA-384 (c02c).
     for suite in [
@@ -524,7 +524,7 @@ fn chrome_firefox_safari_and_go_standard_blueprints_complete_against_rustls() {
     use std::net::TcpListener;
     use std::sync::Arc;
 
-    let identity = netune_test_support::tls::identity(&["localhost"], &[b"h2", b"http/1.1"]);
+    let identity = test_support::tls::identity(&["localhost"], &[b"h2", b"http/1.1"]);
     let provider = rustls::crypto::aws_lc_rs::default_provider();
     let mut server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
@@ -627,7 +627,7 @@ fn chrome_firefox_safari_and_go_standard_blueprints_complete_against_rustls() {
 fn compressed_certificate_decompresses_zlib_and_brotli_and_hashes_wire_message() {
     use std::io::Write as _;
 
-    let identity = netune_test_support::tls::identity(&["localhost"], &[b"http/1.1"]);
+    let identity = test_support::tls::identity(&["localhost"], &[b"http/1.1"]);
     let der = identity.certificate.as_ref();
     // Construct a TLS 1.3 Certificate message body:
     // context_len(1)=0, chain_len(3), entry_cert_len(3), der, entry_ext_len(2)=0

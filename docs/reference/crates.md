@@ -8,21 +8,21 @@ This document provides a factual overview of all crates comprising the `netune` 
 
 | Crate | Directory | Current Version | Primary Responsibility |
 | :--- | :--- | :--- | :--- |
-| `netune-trace` | `crates/netune-trace` | `0.0.29` | Zero-allocation trace ring buffer, pure timing derivations, JA3/JA4 TLS ClientHello parser |
-| `netune-http1` | `crates/netune-http1` | `0.0.29` | HTTP/1.1 line protocol parser and serializer, differential-tested against `hyper` |
-| `netune-http2` | `crates/netune-http2` | `0.0.29` | HTTP/2 wire protocol (RFC 9113) in both roles, HPACK header compression (RFC 7541), and Akamai fingerprint impersonation |
-| `netune-ws` | `crates/netune-ws` | `0.0.29` | Pure RFC 6455 WebSocket codec: frame encoder/decoder, role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys |
-| `netune-io` | `crates/netune-io` | `0.0.29` | Byte-path transport adapters shared by both orchestrators: the `TimedIo` syscall tap and the `FaultIo` chaos twin. No socket, no policy |
-| `netune-diagnostics` | `crates/netune-diagnostics` | `0.0.29` | Native diagnostic sinks and review bundles: stderr/JSONL output, redaction, manifest + trace + diagnosis artifacts. No socket, no orchestrator |
-| `netune-egress` | `crates/netune-egress` | `0.0.29` | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the single source of truth every outbound transport (TCP, UDP, QUIC) confines with. No I/O, no socket |
-| `netune-tls` | `crates/netune-tls` | `0.0.29` | Owned egress TLS engine (ADR-0045 complete): byte-exact ClientHello wire model and forge, TLS 1.2/1.3 handshake and record layer, async driver, `webpki` chain validation. Primitives from `aws-lc`; rustls is a dev-only oracle. No socket |
-| `netune` | `crates/netune` | `0.0.29` | **Egress** orchestrator: DNS, TCP, TLS (owned engine), **UDP datagrams**, pool, proxy (incl. SOCKS5 UDP associate), egress confinement, and client request orchestration |
-| `netune-server` | `crates/netune-server` | `0.0.29` | **Ingress** orchestrator: TCP accept loop, admission control, slow-peer bounds, per-connection ingress tracing, graceful drain, HTTP/1.1 + HTTP/2 + optional HTTP/3 over one handler |
-| `netune-quic` | `crates/netune-quic` | `0.0.29` | First-class QUIC transport (RFC 9000, RFC 9221) with `QuicProfile` handshake shaping, per-connection `QuicUdpSocketFactory`/`CongestionControllerFactory` consumer seams, keep-alive/idle policy and verified peer-certificate access, and unified `aws-lc-rs` crypto (`[INV-QUIC-01..04]`, `[INV-QUIC-18..22]`) |
-| `netune-http3` | `crates/netune-http3` | `0.0.29` | Owned HTTP/3 client and server transport (RFC 9114), owned dynamic QPACK (RFC 9204), and typed SETTINGS profiles |
-| `netune-webtransport` | `crates/netune-webtransport` | `0.0.29` | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, control/flow capsules, reliable reset, GOAWAY teardown and Adversarial request admission (browser interop still outstanding) |
-| `netune-probe` | `crates/netune-probe` | `0.0.29` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
-| `netune-test-support` | `crates/netune-test-support` | `0.0.29` | Test-only shared fixtures: scripted I/O, loopback pairs, HTTP/1.1 wire constants and self-signed TLS identities. Never published, never a production dependency |
+| `netune-trace` | `crates/netune-trace` | `0.0.30` | Zero-allocation trace ring buffer, pure timing derivations, JA3/JA4 TLS ClientHello parser |
+| `netune-http1` | `crates/netune-http1` | `0.0.30` | HTTP/1.1 line protocol parser and serializer, differential-tested against `hyper` |
+| `netune-http2` | `crates/netune-http2` | `0.0.30` | HTTP/2 wire protocol (RFC 9113) in both roles, HPACK header compression (RFC 7541), and Akamai fingerprint impersonation |
+| `netune-ws` | `crates/netune-ws` | `0.0.30` | Pure RFC 6455 WebSocket codec: frame encoder/decoder, role-enforced masking, fragmented-message reassembly, SHA-1 handshake keys |
+| `netune-io` | `crates/netune-io` | `0.0.30` | Byte-path transport adapters shared by both orchestrators: the `TimedIo` syscall tap and the `FaultIo` chaos twin. No socket, no policy |
+| `netune-diagnostics` | `crates/netune-diagnostics` | `0.0.30` | Native diagnostic sinks and review bundles: stderr/JSONL output, redaction, manifest + trace + diagnosis artifacts. No socket, no orchestrator |
+| `netune-egress` | `crates/netune-egress` | `0.0.30` | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the single source of truth every outbound transport (TCP, UDP, QUIC) confines with. No I/O, no socket |
+| `netune-tls` | `crates/netune-tls` | `0.0.30` | Owned egress TLS engine (ADR-0045 complete): byte-exact ClientHello wire model and forge, TLS 1.2/1.3 handshake and record layer, async driver, `webpki` chain validation. Primitives from `aws-lc`; rustls is a dev-only oracle. No socket |
+| `netune` | `crates/netune` | `0.0.30` | **Egress** orchestrator: DNS, TCP, TLS (owned engine), **UDP datagrams**, pool, proxy (incl. SOCKS5 UDP associate), egress confinement, and client request orchestration |
+| `netune-server` | `crates/netune-server` | `0.0.30` | **Ingress** orchestrator: TCP accept loop, admission control, slow-peer bounds, per-connection ingress tracing, graceful drain, HTTP/1.1 + HTTP/2 + optional HTTP/3 over one handler |
+| `netune-quic` | `crates/netune-quic` | `0.0.30` | First-class QUIC transport (RFC 9000, RFC 9221) with `QuicProfile` handshake shaping, per-connection `QuicUdpSocketFactory`/`CongestionControllerFactory` consumer seams, keep-alive/idle policy and verified peer-certificate access, and unified `aws-lc-rs` crypto (`[INV-QUIC-01..04]`, `[INV-QUIC-18..22]`) |
+| `netune-http3` | `crates/netune-http3` | `0.0.30` | Owned HTTP/3 client and server transport (RFC 9114), owned dynamic QPACK (RFC 9204), and typed SETTINGS profiles |
+| `netune-webtransport` | `crates/netune-webtransport` | `0.0.30` | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, control/flow capsules, reliable reset, GOAWAY teardown and Adversarial request admission (browser interop still outstanding) |
+| `netune-probe` | `crates/netune-probe` | `0.0.30` | Pure L2 Ethernet/IPv4/TCP frame builder and opt-in wire injector |
+| `test-support` | `crates/test-support` | `0.0.30` | Test-only shared fixtures: scripted I/O, loopback pairs, HTTP/1.1 wire constants, self-signed TLS identities and deterministic byte-stream fuzzing. Never published, never a production dependency |
 
 ---
 
@@ -90,7 +90,7 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `EgressConfinement`: `Unrestricted` (default) or `StrictPublic`, with `check(ip)` as the one call site every transport uses.
 - **Why a crate**: `netune`'s TCP connector, `netune`'s datagram sessions, and `netune-quic`'s QUIC connector must refuse the same address classes. `netune-quic` may not depend on the egress orchestrator ([ARCH-003]/[ADR-0003](../adr/0003-workspace-decomposition-privilege-boundaries.md)), so the predicate lives here — one definition, no copies to drift ([INV-EGRESS-01](../adr/0002-egress-confinement-policy.md), [INV-QUIC-02](../adr/0016-quic-and-http3-transport.md)).
 
-### `netune-test-support`
+### `test-support`
 - **Dependencies**: `tokio`, `rustls`, `rcgen` only. No workspace crate, no socket policy, no product API.
 - **Key Types**:
   - `ScriptedIo`: `AsyncRead`/`AsyncWrite` in memory; `chunked` and `from_slices` make a decoder see exact byte boundaries and `written()` exposes what a writer emitted.
@@ -233,7 +233,7 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `error_code`: WebTransport application-error range mapping with reserved HTTP/3 codepoints skipped.
 - **Adversarial controls**: request admission, Origin policy, client URI/status validation, invalid session-ID `H3_ID_ERROR`, and terminal close/drain/flow-control state are covered by `tests/e2e/webtransport_security.rs` (ADR-0039).
 - **Architecture**: separate product leaf; H3/QUIC expose generic seams and never depend on this crate (ADR-0033). H3 exposes extra SETTINGS, peer SETTINGS, generic extension stream routing and an optional identifier validator; `0x54`/`0x41` are installed by this crate.
-- **Interop**: `interop/webtransport-go/` runs the independent `quic-go/webtransport-go` peer; `scripts/webtransport-go-interop.sh` is the non-Rust gate. Browser interop is still blocked because Chrome 157/159 do not advertise `reset_stream_at` (Chrome 159 still advertises the draft-02 legacy setting) (ADR-0038).
+- **Interop**: `crates/netune-webtransport/tests/differential.rs` drives an independent raw-H3 wire peer in both directions ([ADR-0038](../adr/0038-webtransport-external-interoperability.md), [ADR-0049](../adr/0049-in-workspace-fuzzing-and-differential-webtransport-gate.md)). Browser interop is still blocked because Chrome 157/159 do not advertise `reset_stream_at` (Chrome 159 still advertises the draft-02 legacy setting).
 
 ### `netune-probe`
 - **Privilege Separation**:

@@ -4,9 +4,7 @@
 
 use http::{HeaderMap, Method, StatusCode};
 use netune_http1::{BodyKind, Http1Reader, HttpError, Limits};
-use netune_test_support::{
-    CHUNKED_RESPONSE, CONTENT_LENGTH_RESPONSE, ScriptedIo, UNTIL_CLOSE_RESPONSE,
-};
+use test_support::{CHUNKED_RESPONSE, CONTENT_LENGTH_RESPONSE, ScriptedIo, UNTIL_CLOSE_RESPONSE};
 
 async fn read_all(
     data: &[u8],

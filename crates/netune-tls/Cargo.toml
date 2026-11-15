@@ -42,10 +42,10 @@ flate2 = { workspace = true }
 [dev-dependencies]
 # Differential oracle + fingerprint cross-check: `rustls` (peer handshake)
 # and `netune-trace` (ClientHello parser, JA3/JA4) are test-only. Neither
-# ships ([INV-TLS-04]). `netune-test-support` provides the self-signed
+# ships ([INV-TLS-04]). `test-support` provides the self-signed
 # identity for the live loopback handshake.
 netune-trace = { path = "../netune-trace", version = "0.0.30" }
-netune-test-support = { path = "../netune-test-support", version = "0.0.30" }
+test-support = { path = "../test-support", version = "0.0.30" }
 rustls = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
 

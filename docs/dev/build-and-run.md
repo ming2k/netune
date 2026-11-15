@@ -31,7 +31,7 @@ cargo build -p netune-probe
 The ingress and egress suites use a real loopback client/server pair:
 
 ```bash
-cargo nextest run -p netune-workspace-tests --test e2e -E 'test(interop::)'
+cargo nextest run -p workspace-tests --test e2e -E 'test(interop::)'
 ```
 
 To fetch from an origin you have started yourself, use the typed-error example

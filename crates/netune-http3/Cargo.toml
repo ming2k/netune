@@ -23,6 +23,7 @@ h3-quinn = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 quinn = { workspace = true }
+test-support = { path = "../test-support", version = "0.0.30" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

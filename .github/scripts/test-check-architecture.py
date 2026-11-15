@@ -63,13 +63,13 @@ BASE_FILES: dict[str, str] = {
         version = "1.2.3"
 
         [package]
-        name = "netune-workspace-tests"
+        name = "workspace-tests"
         version.workspace = true
         publish = false
         autotests = false
 
         [dev-dependencies]
-        netune-test-support = { path = "crates/netune-test-support", version = "1.2.3" }
+        test-support = { path = "crates/test-support", version = "1.2.3" }
 
         [[test]]
         name = "integration"
@@ -80,7 +80,7 @@ BASE_FILES: dict[str, str] = {
         path = "tests/e2e/main.rs"
     """,
     "crates/netune-trace/Cargo.toml": manifest(name="netune-trace"),
-    "crates/netune-test-support/Cargo.toml": manifest(name="netune-test-support"),
+    "crates/test-support/Cargo.toml": manifest(name="test-support"),
     "crates/netune-io/Cargo.toml": manifest(
         name="netune-io",
         dependencies="""
@@ -291,7 +291,7 @@ def test_test_support_is_a_dev_only_leaf() -> None:
     # The shared test infrastructure may be named by any crate's
     # `dev-dependencies`; its empty allowed edge set is what rejects a
     # production dependency (ARCH-001 below).
-    expect_clean("ARCH-001", BASE_FILES, message="netune-test-support as dev infrastructure")
+    expect_clean("ARCH-001", BASE_FILES, message="test-support as dev infrastructure")
 
 
 def test_production_dependency_on_test_support_is_reported() -> None:
@@ -302,7 +302,7 @@ def test_production_dependency_on_test_support_is_reported() -> None:
                 "crates/netune/Cargo.toml": manifest(
                     name="netune",
                     dependencies="""
-                        netune-test-support = { path = "../netune-test-support", version = "1.2.3" }
+                        test-support = { path = "../test-support", version = "1.2.3" }
                     """,
                 )
             }
@@ -324,7 +324,7 @@ def test_root_harness_with_production_dependencies_is_reported() -> None:
                     version = "1.2.3"
 
                     [package]
-                    name = "netune-workspace-tests"
+                    name = "workspace-tests"
                     version.workspace = true
                     publish = false
 
@@ -358,7 +358,7 @@ def test_root_harness_without_an_e2e_entry_is_reported() -> None:
                     version = "1.2.3"
 
                     [package]
-                    name = "netune-workspace-tests"
+                    name = "workspace-tests"
                     version.workspace = true
                     publish = false
 
@@ -518,6 +518,24 @@ def test_vendored_h3_tree_is_reported() -> None:
         "ARCH-010",
         merged(**{"vendor/h3/Cargo.toml": "[package]\nname = \"h3\"\nversion = \"0.0.8\"\n"}),
         message="a vendored H3 runtime tree",
+    )
+
+
+def test_out_of_workspace_fuzz_or_interop_tree_is_reported() -> None:
+    expect(
+        "ARCH-014",
+        merged(**{"fuzz/Cargo.toml": "[package]\nname = \"netune-fuzz\"\nversion = \"0.0.0\"\n"}),
+        message="an out-of-workspace fuzz tree (ADR-0049)",
+    )
+    expect(
+        "ARCH-014",
+        merged(**{"interop/webtransport-go/go.mod": "module interop\n"}),
+        message="an out-of-workspace interop tree (ADR-0049)",
+    )
+    expect(
+        "ARCH-014",
+        merged(**{"scripts/run.sh": "#!/usr/bin/env bash\n"}),
+        message="a top-level shell runner directory (ADR-0049)",
     )
 
 

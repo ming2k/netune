@@ -21,7 +21,7 @@ use hyper_util::rt::TokioIo;
 use netune_http1::{
     BodyKind, Http1ServerReader, Limits, ReasonPhrase, ResponseHead, ResponseWriter, TargetForm,
 };
-use netune_test_support::ScriptedIo;
+use test_support::ScriptedIo;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 

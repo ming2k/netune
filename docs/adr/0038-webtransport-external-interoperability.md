@@ -18,8 +18,11 @@ superseded_by: null
 
 ---
 
-> Implementation status: the non-Rust half of ADR-0037 Gate 4 now passes
-> against `quic-go/webtransport-go` for bidirectional streams, unidirectional
+> Implementation status: the wire-role half of ADR-0037 Gate 4 passes in
+> `crates/netune-webtransport/tests/differential.rs` (amended by
+> [ADR-0049](0049-in-workspace-fuzzing-and-differential-webtransport-gate.md) to
+> replace the out-of-workspace Go harness with an in-process pure-Rust
+> differential peer) for bidirectional streams, unidirectional
 > streams and datagrams. The browser half remains blocked: Chrome 157 stable
 > and Chrome 159 unstable do not advertise the `reset_stream_at` QUIC transport
 > parameter required by draft-ietf-webtrans-http3-17. Chrome 159's H3 SETTINGS
@@ -85,16 +88,18 @@ QUIC `reset_stream_at`, H3 datagram and extended CONNECT requirements.
 This is a wire-negotiation decision, not a claim of draft-16 feature
 completeness. Neither the draft pin nor the public API moves.
 
-`[INV-WT-07]` is enforced by the settings round-trip test and the Go interop
-harness.
+`[INV-WT-07]` is enforced by the settings round-trip test and the differential
+suite in `crates/netune-webtransport/tests/differential.rs`.
 
 ### 4. An independent peer is a required executable gate
 
-`interop/webtransport-go` runs `quic-go/webtransport-go` against the example
-WebTransport origin. The harness must complete a bidirectional stream, a
-unidirectional stream in each direction and a datagram exchange in both
-directions. It runs locally through `scripts/webtransport-go-interop.sh` and in
-the `WebTransport non-Rust interop (Go)` CI job.
+Amended by [ADR-0049](0049-in-workspace-fuzzing-and-differential-webtransport-gate.md):
+`crates/netune-webtransport/tests/differential.rs` drives an independent raw-H3
+wire peer in both roles under `cargo nextest`, replacing the earlier
+`interop/webtransport-go` and `scripts/webtransport-go-interop.sh` harness. The
+suite completes a bidirectional stream, a unidirectional stream in each
+direction, a datagram exchange in both directions, and session-close capsule
+teardown against both draft-16 and draft-17 SETTINGS peers.
 
 The browser half of ADR-0037 Gate 4 stays explicitly open until an installed
 browser advertises `reset_stream_at`. A failing browser harness is not checked

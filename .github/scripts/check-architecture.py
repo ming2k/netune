@@ -21,13 +21,14 @@ Rules, each mapped to the standard that states it:
     ARCH-011  production code never emits a contentless diagnostic event
     ARCH-012  the root test harness is test-only
     ARCH-013  no third-party TLS engine outside the ADR-0015/0028 paths (ADR-0045)
+    ARCH-014  no out-of-workspace fuzz, interop or shell-runner tree (ADR-0049)
 
 The distinction that matters is production vs. dev: an oracle (`hyper`,
 `tungstenite`, `h3`) is allowed as a `dev-dependency`, because a differential
 test compares owned bytes against it and never links it into the artifact that
 ships. `ARCH-005`/`ARCH-006` therefore read `[dependencies]` only, which is the
 question "what ships", not "what the test suite resolves". The same rule makes
-`netune-test-support` a dev-only leaf: it is declared in the topology with no
+`test-support` a dev-only leaf: it is declared in the topology with no
 allowed outgoing edge, so any `[dependencies]` entry naming it is ARCH-001.
 
 Usage:
@@ -71,7 +72,7 @@ ALLOWED_EDGES: dict[str, set[str]] = {
     # test-only infrastructure: scripted I/O, loopback pairs and self-signed
     # TLS identities. It links no workspace crate, and the empty edge set is
     # what makes a production dependency on it an ARCH-001 violation.
-    "netune-test-support": set(),
+    "test-support": set(),
     # pure codecs: caller-provided buffers, no sibling, no orchestrator.
     "netune-http1": set(),
     "netune-http2": set(),
@@ -142,7 +143,7 @@ FORBIDDEN_TLS_RUNTIME = {
 ALLOWED_TLS_RUNTIME_DEPS: dict[str, set[str]] = {
     "netune-server": {"rustls", "tokio-rustls"},
     "netune-quic": {"rustls", "tokio-rustls"},
-    "netune-test-support": {"rustls", "tokio-rustls"},
+    "test-support": {"rustls", "tokio-rustls"},
 }
 FORBIDDEN_WS_RUNTIME = {
     "tungstenite",
@@ -441,6 +442,16 @@ class Workspace:
                     f"{name} exists; H3/QPACK is owned by netune-http3 (ADR-0027)",
                 )
 
+    def check_out_of_workspace_trees(self) -> None:
+        """ADR-0049: fuzzing and differential interop live inside the Cargo workspace."""
+        for name in ("fuzz", "interop", "scripts"):
+            if (self.root / name).exists():
+                self.report(
+                    "ARCH-014",
+                    name,
+                    f"top-level `{name}/` exists; all fuzz and interop suites belong to the Cargo workspace (ADR-0049)",
+                )
+
     # -- ARCH-012: the root harness is test-only ---------------------------
 
     def check_test_harness(self) -> None:
@@ -494,6 +505,7 @@ class Workspace:
         self.check_versions()
         self.check_transmit_path()
         self.check_vendor_tree()
+        self.check_out_of_workspace_trees()
         self.check_diagnostic_producers()
         self.check_test_harness()
         return sorted(set(self.violations))

@@ -78,7 +78,7 @@ pub use key_schedule::{
 pub use record::{
     CONTENT_ALERT, CONTENT_APPLICATION_DATA, CONTENT_CHANGE_CIPHER_SPEC, CONTENT_HANDSHAKE,
     LEGACY_VERSION_TLS12, LEGACY_VERSION_TLS13, MAX_CIPHERTEXT_LEN, MAX_PLAINTEXT_LEN,
-    RECORD_HEADER_LEN, RecordError,
-    RecordHeader, RecordProtector13, RecordUnprotector13, unprotected_record,
+    RECORD_HEADER_LEN, RecordError, RecordHeader, RecordProtector13, RecordUnprotector13,
+    unprotected_record,
 };
 pub use verifier::{ChainError, Verifier};

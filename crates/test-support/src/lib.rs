@@ -13,6 +13,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+pub mod fuzz;
 pub mod http1;
 pub mod net;
 pub mod scripted;

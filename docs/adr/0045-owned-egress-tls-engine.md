@@ -197,7 +197,7 @@ that has not passed its gate is not the production path.
 6. Removal: rustls and `tokio-rustls` leave `netune`'s egress dependency set;
    `check-architecture.py` rejects them for `netune` and for `netune-tls`
    while whitelisting them only for the ADR-0015/0028 consumers
-   (`netune-server`, `netune-quic`, `netune-test-support`).
+   (`netune-server`, `netune-quic`, `test-support`).
 
 ### 5. Differential tests are the acceptance criterion
 

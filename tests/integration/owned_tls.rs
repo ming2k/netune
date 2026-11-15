@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use netune::{Connector, TlsRouterConnector};
-use netune_test_support::tls::identity;
+use test_support::tls::identity;
 
 fn drive_server(
     listener: std::net::TcpListener,

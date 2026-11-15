@@ -9,7 +9,7 @@ resolver = "2"
 # (ARCH-012) enforces that it stays test-only: no library, no binary and no
 # production dependencies.
 [package]
-name = "netune-workspace-tests"
+name = "workspace-tests"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -51,7 +51,7 @@ netune-http3 = { path = "crates/netune-http3", version = "0.0.30" }
 netune-quic = { path = "crates/netune-quic", version = "0.0.30" }
 netune-server = { path = "crates/netune-server", version = "0.0.30", default-features = false }
 netune-tls = { path = "crates/netune-tls", version = "0.0.30" }
-netune-test-support = { path = "crates/netune-test-support", version = "0.0.30" }
+test-support = { path = "crates/test-support", version = "0.0.30" }
 netune-trace = { path = "crates/netune-trace", version = "0.0.30" }
 netune-webtransport = { path = "crates/netune-webtransport", version = "0.0.30" }
 netune-ws = { path = "crates/netune-ws", version = "0.0.30" }

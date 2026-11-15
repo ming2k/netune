@@ -93,7 +93,7 @@ A rule may be elevated to a system invariant only if **all three** hold:
 | `[INV-QUIC-23]` | A failed incoming handshake is reported exactly once as `AcceptError::Handshake`, never as a connection and never as endpoint shutdown. | ADR-0035 |
 | `[INV-QUIC-24]` | A path MTU is raised only by an ACKed probe packet; probes never carry application frames, never exceed the local/peer ceiling, and a lost/black-holed probe leaves the validated MTU unchanged. | ADR-0036 |
 | `[INV-QUIC-25]` | A server Initial uses the client's source connection ID as its destination CID, including a zero-length value, and chooses an independent non-zero local source CID. | ADR-0038 |
-| `[INV-TEST-01..04]` | Nextest owns executable-test discovery and policy (doctests are the one `cargo test` gate); test infrastructure is dev-only; the root harness is test-only with exactly one integration and one e2e entry point; external tests compile one binary per tier. | ADR-0044 |
+| `[INV-TEST-01..06]` | Nextest owns executable-test discovery and policy (doctests are the one `cargo test` gate); test infrastructure is dev-only; the root harness is test-only with exactly one integration and one e2e entry point; external tests compile one binary per tier; all verification, differential and parser-fuzz suites live in the single Cargo workspace with no top-level `fuzz/`, `interop/` or `scripts/` trees; parser crates own dual-tier PR and soak fuzz targets. | ADR-0044, ADR-0049 |
 
 The authoritative wording of each invariant lives in its ADR. This table is an index, not a second source of truth; if the two disagree, the ADR wins and this table is corrected.
 

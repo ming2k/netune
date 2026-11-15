@@ -19,6 +19,7 @@ http = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "sync", "time", "macros", "rt"] }
 
 [dev-dependencies]
+test-support = { path = "../test-support", version = "0.0.30" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
 
 [lints]

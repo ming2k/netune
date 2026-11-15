@@ -26,7 +26,7 @@ This guide defines how `netune` is tested, what each test tier is for, and the r
 | Tier | Location | Runs against |
 | :--- | :--- | :--- |
 | 1. Unit | `#[cfg(test)]` inline modules in `src/`, or `src/<module>/tests.rs` when the module's tests outgrew the file | Pure functions, state machines |
-| 2. Differential | `crates/*/tests/differential.rs`, `crates/*/tests/golden.rs`, `crates/netune-http3/tests/h3_interop.rs`, `crates/netune-quic/tests/owned_handshake.rs` | A battle-tested oracle as a **dev-dependency only**; H3 against `h3`/`h3-quinn` and QUIC against `quinn` in both directions |
+| 2. Differential | `crates/*/tests/differential.rs`, `crates/*/tests/golden.rs`, `crates/netune-http3/tests/h3_interop.rs`, `crates/netune-quic/tests/owned_handshake.rs` | A battle-tested oracle as a **dev-dependency only** or an independent raw-wire peer (`netune-webtransport`); H3 against `h3`/`h3-quinn` and QUIC against `quinn` in both directions |
 | 3. Integration | `tests/integration/main.rs` plus its modules | Loopback mock origins, TLS fixtures, `FaultIo`; ingress shedding, slow-peer bounds, drain; codec-to-orchestrator integration |
 | 4. End-to-end | `tests/e2e/main.rs` plus its modules | A full client lifecycle over a real socket; our H1/H2/H3 client against our server; QUIC and WebTransport sessions over a real handshake |
 
@@ -64,7 +64,7 @@ names the production module and nothing has to become public for a test.
 
 ### 1.2 Shared test infrastructure
 
-`crates/netune-test-support` is the one home for fixtures that are not about a
+`crates/test-support` is the one home for fixtures that are not about a
 single crate: scripted byte transports, loopback pairs, HTTP/1.1 wire constants
 and generated self-signed TLS identities. It is a `dev-dependency` everywhere
 it appears, declares `publish = false`, and depends on no workspace crate. The
@@ -76,7 +76,7 @@ belongs in the owning crate's tests instead. The rule is
 
 ### 1.3 External test entry points
 
-The workspace root is a test-only package (`netune-workspace-tests`) because a
+The workspace root is a test-only package (`workspace-tests`) because a
 virtual workspace cannot own a `tests/` directory:
 
 ```text
@@ -157,14 +157,14 @@ cargo nextest run -p netune-probe --features inject
 cargo nextest run -p netune-ws
 
 # One external tier, complete feature posture
-cargo nextest run -p netune-workspace-tests --test integration --all-features
-cargo nextest run -p netune-workspace-tests --test e2e --all-features
+cargo nextest run -p workspace-tests --test integration --all-features
+cargo nextest run -p workspace-tests --test e2e --all-features
 
 # H3/QPACK differential interop against the dev-only h3 oracle
 cargo nextest run -p netune-http3 --test h3_interop
 
 # WebTransport admission, Origin, session-ID and control adversarial suite
-cargo nextest run -p netune-workspace-tests -E 'test(webtransport_security::)'
+cargo nextest run -p workspace-tests -E 'test(webtransport_security::)'
 
 # Owned QUIC engine (ADR-0028): wire, packet protection, handshake and streams
 cargo nextest run -p netune-quic
@@ -185,42 +185,48 @@ The benchmark gate is intentionally separate from `cargo nextest run --workspace
 measures instructions, not wall time, and fails a regression against a baseline
 generated in the same CI run (`ir=0%`).
 
-### 4.1 Independent WebTransport interop
+### 4.1 Independent WebTransport wire-role differential interop
 
-`scripts/webtransport-go-interop.sh` starts the owned WebTransport origin and
-runs the independent Go peer in `interop/webtransport-go/`. The peer must
-complete a bidirectional stream, a unidirectional stream in each direction and
-a datagram exchange in both directions against `netune-webtransport`. The same
-script is the `WebTransport non-Rust interop (Go)` CI job:
+`crates/netune-webtransport/tests/differential.rs` drives an independent raw-H3
+wire peer in both directions under `cargo nextest`
+([ADR-0038](../adr/0038-webtransport-external-interoperability.md),
+[ADR-0049](../adr/0049-in-workspace-fuzzing-and-differential-webtransport-gate.md)).
+The peer must complete a bidirectional stream, a unidirectional stream in each
+direction, a datagram exchange in both directions and session-close capsule
+teardown against `netune-webtransport`, including when the client omits
+server-only `SETTINGS_ENABLE_CONNECT_PROTOCOL` and `SETTINGS_WT_ENABLED` and
+when the server advertises only draft-16 (`0x2c7cf000`) or draft-17
+(`0x20b8933b`):
 
 ```bash
-./scripts/webtransport-go-interop.sh
+cargo nextest run -p netune-webtransport --test differential
 ```
 
-The harness uses loopback only. `go run` may fetch the pinned Go modules on its
-first invocation; that is tool acquisition, not a live network test.
-
-The browser half of ADR-0037 Gate 4 is not automated yet: Chrome 157 does not
+The browser half of ADR-0037 Gate 4 is not automated yet: Chrome 157/159 do not
 advertise the `reset_stream_at` transport parameter that draft-17 requires, so a
-browser run fails before the first WebTransport session. Do not treat the Go
-harness as browser interoperability.
+browser run fails before the first WebTransport session.
 
 ### 4.2 Fuzzing and soak
 
-The network parsers have `cargo-fuzz` targets under `fuzz/` (`quic_frames`,
-`quic_packets`, `h3_qpack`, `http2_frames`, `http1_target`,
-`webtransport_capsules`). They run in the
-scheduled `Fuzz and soak` workflow, not on every pull request. The long-running
-QUIC echo/keep-alive test is ignored by default and is run by the same workflow:
+Every wire parser crate owns an in-workspace `tests/fuzz.rs` target backed by
+`test_support::fuzz` (`crates/netune-http1/tests/fuzz.rs`,
+`crates/netune-http2/tests/fuzz.rs`, `crates/netune-http3/tests/fuzz.rs`,
+`crates/netune-quic/tests/fuzz.rs`,
+`crates/netune-webtransport/tests/fuzz.rs`)
+(`[INV-TEST-05..06]`, [ADR-0049](../adr/0049-in-workspace-fuzzing-and-differential-webtransport-gate.md)).
+Each target runs a fast deterministic corpus, truncation and mutation pass on
+every pull request as part of `cargo nextest run --workspace`, and exposes an
+`#[ignore]` soak entry point (`soak_fuzz_*`) that runs alongside the
+long-running QUIC echo/keep-alive test in the scheduled `Fuzz and soak`
+workflow:
 
 ```bash
-cargo nextest run -p netune-workspace-tests \
-  -E 'test(soak_echoes_many_streams_under_keepalive)' \
+cargo nextest run --workspace --all-features \
   --run-ignored ignored-only --profile soak
 ```
 
-A fuzz finding is fixed with a minimal reproducer in the owning crate's test
-suite before the corpus is re-run.
+A fuzz finding is added to the crate's `SEEDS` slice and paired with a minimal
+regression test in the owning crate's test suite.
 
 CI additionally sets `RUSTFLAGS="-D warnings"`, so warnings are failures on `main`.
 
@@ -229,7 +235,7 @@ CI additionally sets `RUSTFLAGS="-D warnings"`, so warnings are failures on `mai
 ## 5. Adding a Test
 
 - Unit behaviour → a `#[cfg(test)]` module beside the code, or `src/<module>/tests.rs` when section 1.1's threshold applies.
-- A fixture shared by unrelated crates → `netune-test-support`, never a copy in each suite.
+- A fixture shared by unrelated crates → `test-support`, never a copy in each suite.
 - A decoder or encoder that has a spec → add a differential or golden case, not only a hand-written expectation.
 - A transport failure mode → a module under `tests/integration/`, asserting both the error variant and the recorded events.
 - A full lifecycle over a real socket → a module under `tests/e2e/`.

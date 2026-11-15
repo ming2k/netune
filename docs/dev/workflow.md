@@ -55,6 +55,7 @@ separately so both privilege postures are proven rather than assumed.
 | `ARCH-011` | A production crate emitting `EventKind::Error` directly instead of through `record_error`. |
 | `ARCH-012` | A root test harness that grows a library, a binary, production dependencies, or loses an integration/e2e entry point. |
 | `ARCH-013` | A third-party TLS engine outside the ADR-0015/0028 paths (`netune-tls` is owned; ADR-0045). |
+| `ARCH-014` | A top-level `fuzz/`, `interop/` or `scripts/` tree outside the Cargo workspace (ADR-0049). |
 
 The allowed edges live in one table inside that script, because the real graph
 is not a flat ring: `netune-io` depends on `netune-trace`, since `TimedIo`

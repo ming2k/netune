@@ -20,9 +20,11 @@ superseded_by: null
 > Implementation status: Gates 1-3 have landed — `RESET_STREAM_AT` wire and
 > transport parameter, reliable-prefix delivery, reliable partial reset on the
 > send side, session close/drain/peer-close, GOAWAY session refusal and
-> flow-control rejection. Gate 4 is partially landed: the non-Rust
-> `quic-go/webtransport-go` peer completes bidi, uni and datagram exchanges
-> (ADR-0038), but Chrome 157/159 unstable do not advertise `reset_stream_at`
+> flow-control rejection. Gate 4 is partially landed: the independent wire-role
+> differential peer in `crates/netune-webtransport/tests/differential.rs`
+> completes bidi, uni and datagram exchanges in both roles ([ADR-0038](0038-webtransport-external-interoperability.md),
+> [ADR-0049](0049-in-workspace-fuzzing-and-differential-webtransport-gate.md)),
+> but Chrome 157/159 unstable do not advertise `reset_stream_at`
 > and Chrome 159 advertises the draft-02 `0x2b603742` setting, so the browser
 > half remains blocked. Gate 5 is now exercised by the admission, Origin,
 > session-ID and adversarial control suite in ADR-0039. This ADR does not claim

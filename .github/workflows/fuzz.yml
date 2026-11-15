@@ -3,8 +3,9 @@ name: Fuzz and soak
 on:
   workflow_dispatch:
   schedule:
-    # Weekly hardening, not a per-PR tax. A regression found here is cut
-    # forward with a minimal reproducer in the owning crate.
+    # Weekly hardening, not a per-PR tax. Every parser crate runs a fast
+    # deterministic fuzz pass on every PR; this workflow executes the deep
+    # `--profile soak` mutation campaigns and the long-running QUIC soak suite.
     - cron: "17 3 * * 1"
 
 permissions:
@@ -12,30 +13,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
 
 jobs:
-  fuzz:
-    name: cargo-fuzz (nightly)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [quic_frames, quic_packets, h3_qpack, http2_frames, http1_target, webtransport_capsules]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-      - name: Fuzz ${{ matrix.target }}
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=120 -rss_limit_mb=2048
-        working-directory: fuzz
-
   soak:
-    name: QUIC soak
+    name: Soak fuzzing and QUIC keep-alive
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -43,10 +27,10 @@ jobs:
           toolchain: "1.95.0"
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
-      - name: Repeated stream/keep-alive soak
+      - name: Parser soak fuzzing and QUIC stream/keep-alive soak
         run: >-
           cargo nextest run
-          -p netune-workspace-tests
-          -E 'test(soak_echoes_many_streams_under_keepalive)'
+          --workspace
+          --all-features
           --run-ignored ignored-only
           --profile soak

@@ -74,7 +74,7 @@ responsibility.
 
 ### 2. Shared fixtures live in a dev-only leaf
 
-`crates/netune-test-support` owns scripted byte transports, loopback pairs,
+`crates/test-support` owns scripted byte transports, loopback pairs,
 HTTP/1.1 wire constants and generated self-signed TLS identities. It declares
 `publish = false`, depends on no workspace crate, and is referenced only under
 `[dev-dependencies]`. Its topology entry has an empty allowed edge set, so any
@@ -82,7 +82,7 @@ production dependency on it is `ARCH-001`.
 
 ### 3. The root is a test-only package
 
-`netune-workspace-tests` exists because a virtual workspace cannot own a
+`workspace-tests` exists because a virtual workspace cannot own a
 `tests/` directory. It has no library and no binary, only `dev-dependencies`,
 and exactly two test targets:
 
@@ -108,7 +108,7 @@ the size is the behaviour it implements, not test bloat.
 - **`[INV-TEST-01]`** Nextest is the only test runner for executable tests.
   Doctests are the one deliberate `cargo test` command. Enforced by
   `.config/nextest.toml`, CI and the absence of an `xtask` crate.
-- **`[INV-TEST-02]`** Test infrastructure is dev-only. `netune-test-support`
+- **`[INV-TEST-02]`** Test infrastructure is dev-only. `test-support`
   depends on no workspace crate and no production manifest names it. Enforced
   by `ARCH-001`.
 - **`[INV-TEST-03]`** The root harness is test-only and has exactly the

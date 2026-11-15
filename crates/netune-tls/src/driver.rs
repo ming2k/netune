@@ -677,9 +677,9 @@ mod tests {
     use super::*;
     use crate::hello::{ClientHello, GoIdentity, KeyShareEntry};
     use crate::key_exchange::ClientKeyShare;
-    use netune_test_support::tls::identity;
     use std::io::{Read, Write};
     use std::sync::Arc;
+    use test_support::tls::identity;
 
     struct AcceptAny;
 
@@ -822,7 +822,7 @@ mod tests {
         use std::sync::Arc;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let identity = netune_test_support::tls::identity(&["localhost"], &[b"http/1.1"]);
+        let identity = test_support::tls::identity(&["localhost"], &[b"http/1.1"]);
         let provider = rustls::crypto::aws_lc_rs::default_provider();
         let mut server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -1048,7 +1048,7 @@ mod tests {
     async fn the_driver_fragments_large_writes_and_handles_partial_socket_writes() {
         use crate::hello::{BlueprintBuildParams, ClientHelloBlueprint, KeyShareEntry};
 
-        let identity = netune_test_support::tls::identity(&["localhost"], &[b"http/1.1"]);
+        let identity = test_support::tls::identity(&["localhost"], &[b"http/1.1"]);
         let provider = rustls::crypto::aws_lc_rs::default_provider();
         let mut server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
             .with_protocol_versions(&[&rustls::version::TLS13])
@@ -1089,10 +1089,7 @@ mod tests {
                     socket.write_all(&buffer[..written]).await.expect("write");
                 }
                 if received.len() >= expected_on_server.len() {
-                    connection
-                        .writer()
-                        .write_all(b"OK")
-                        .expect("respond");
+                    connection.writer().write_all(b"OK").expect("respond");
                     while connection.wants_write() {
                         let written = connection
                             .write_tls(&mut &mut buffer[..])

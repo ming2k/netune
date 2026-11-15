@@ -48,12 +48,12 @@ This document codifies the workspace topology, dependency direction, and non-neg
 
 **Dependency rule**: no leaf depends on an orchestrator; `netune` and `netune-server` never depend on each other (`[INV-SERVER-01]`, ADR-0011); `netune-probe` depends on no workspace crate at all. Leaves may depend on other leaves only along the edges the topology table permits (`netune-io → netune-trace`; `netune-diagnostics → netune-trace`; `netune-quic → netune-egress, netune-io, netune-trace`; `netune-http3 → netune-quic, netune-trace`; `netune-webtransport → netune-http3, netune-quic`; `netune-tls → netune-trace`; `netune-server → netune-http3, netune-quic` for the optional H3 ingress). Any edge not in that table — a leaf importing an orchestrator, an orchestrator importing the other orchestrator, or a cycle — is an architectural inversion and is rejected by the gate `.github/scripts/check-architecture.py`.
 
-`netune-test-support` is a separate, test-only leaf: scripted I/O, loopback
+`test-support` is a separate, test-only leaf: scripted I/O, loopback
 pairs and self-signed TLS identities shared by the suites. It depends on no
 workspace crate, is marked `publish = false`, and may only appear under
 `[dev-dependencies]`; its empty edge set makes a production dependency an
 `ARCH-001` violation. The workspace root is the complementary test-only
-package (`netune-workspace-tests`) that owns `tests/integration` and
+package (`workspace-tests`) that owns `tests/integration` and
 `tests/e2e`; `ARCH-012` rejects a library, binary or production dependency
 there, and requires both external entry points to exist. The runner, fixture
 and entry-point rules are [ADR-0044](../adr/0044-test-architecture-nextest-and-tiered-entry-points.md)

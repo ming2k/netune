@@ -832,8 +832,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "netune-test-support",
  "serde_json",
+ "test-support",
  "tokio",
 ]
 
@@ -843,6 +843,7 @@ version = "0.0.30"
 dependencies = [
  "bytes",
  "http",
+ "test-support",
  "tokio",
 ]
 
@@ -859,6 +860,7 @@ dependencies = [
  "quinn",
  "rcgen",
  "rustls",
+ "test-support",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -891,6 +893,7 @@ dependencies = [
  "rustls",
  "rustls-platform-verifier",
  "socket2",
+ "test-support",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -915,15 +918,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "netune-test-support"
-version = "0.0.30"
-dependencies = [
- "rcgen",
- "rustls",
- "tokio",
-]
-
-[[package]]
 name = "netune-tls"
 version = "0.0.30"
 dependencies = [
@@ -931,11 +925,11 @@ dependencies = [
  "aws-lc-sys",
  "brotli",
  "flate2",
- "netune-test-support",
  "netune-trace",
  "rustls",
  "rustls-pki-types",
  "rustls-webpki",
+ "test-support",
  "thiserror 2.0.20",
  "tokio",
  "webpki-root-certs",
@@ -959,34 +953,9 @@ dependencies = [
  "netune-quic",
  "rcgen",
  "rustls",
+ "test-support",
  "thiserror 2.0.20",
  "tokio",
-]
-
-[[package]]
-name = "netune-workspace-tests"
-version = "0.0.30"
-dependencies = [
- "brotli",
- "bytes",
- "flate2",
- "http",
- "netune",
- "netune-http1",
- "netune-http2",
- "netune-http3",
- "netune-quic",
- "netune-server",
- "netune-test-support",
- "netune-tls",
- "netune-trace",
- "netune-webtransport",
- "netune-ws",
- "quinn",
- "rcgen",
- "rustls",
- "tokio",
- "tokio-rustls",
 ]
 
 [[package]]
@@ -1569,6 +1538,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-support"
+version = "0.0.30"
+dependencies = [
+ "rcgen",
+ "rustls",
+ "tokio",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2038,6 +2016,32 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "workspace-tests"
+version = "0.0.30"
+dependencies = [
+ "brotli",
+ "bytes",
+ "flate2",
+ "http",
+ "netune",
+ "netune-http1",
+ "netune-http2",
+ "netune-http3",
+ "netune-quic",
+ "netune-server",
+ "netune-tls",
+ "netune-trace",
+ "netune-webtransport",
+ "netune-ws",
+ "quinn",
+ "rcgen",
+ "rustls",
+ "test-support",
+ "tokio",
+ "tokio-rustls",
+]
 
 [[package]]
 name = "x509-parser"

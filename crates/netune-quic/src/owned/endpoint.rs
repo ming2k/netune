@@ -855,6 +855,7 @@ impl Connection {
 }
 
 /// A send half of an owned QUIC stream.
+#[derive(Clone)]
 pub struct SendStream {
     inner: Arc<ConnectionInner>,
     id: u64,
@@ -904,6 +905,7 @@ impl SendStream {
 }
 
 /// A receive half of an owned QUIC stream.
+#[derive(Clone)]
 pub struct RecvStream {
     inner: Arc<ConnectionInner>,
     id: u64,

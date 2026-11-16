@@ -9,6 +9,8 @@ use netune_http1::{BodyKind, IncomingResponse};
 use netune_http3::{H3ClientConfig, H3Error, H3ResponseStream, H3Session};
 use netune_quic::{QuicConnector, QuicError};
 use netune_trace::{ConnectionInfo, DiagnosticPhase, EventKind, TraceCollector};
+use tokio::sync::oneshot;
+use tokio::task::AbortHandle;
 
 use crate::error::{ConnectError, ConnectErrorKind, NetError, ResolveError, ResolveErrorKind};
 use crate::exchange::{Attempt, BodySource, BoxFuture, Exchange, Released, Request, RequestBody};
@@ -108,7 +110,7 @@ pub(super) async fn exchange_on_session(
     };
 
     recorder.mark(EventKind::RequestWriteStart, 0, 0);
-    let mut req_body = session
+    let req_body = session
         .open_request(
             http_request,
             h3_request_profile,
@@ -119,39 +121,68 @@ pub(super) async fn exchange_on_session(
         .await
         .map_err(|error| h3_error_traced("request", error, recorder))?;
 
-    let mut written: u64 = 0;
-    if let Some(mut source) = request.body.take_stream()? {
-        while let Some(chunk) = source.next_chunk().await? {
-            written = written.saturating_add(chunk.len() as u64);
-            req_body
-                .send_data(chunk)
+    let stream_source = request.body.take_stream()?;
+    let buffered = match &request.body {
+        RequestBody::Full(bytes) if !bytes.is_empty() => Some(bytes.clone()),
+        _ => None,
+    };
+    let (mut sender, response_fut) = req_body.split();
+    let recorder_upload = recorder.clone();
+    let (upload_done_tx, mut upload_done_rx) = oneshot::channel();
+    let upload = tokio::spawn(async move {
+        let outcome: Result<(), NetError> = async {
+            let mut written: u64 = 0;
+            if let Some(mut source) = stream_source {
+                while let Some(chunk) = source.next_chunk().await? {
+                    written = written.saturating_add(chunk.len() as u64);
+                    sender
+                        .send_data(chunk)
+                        .await
+                        .map_err(|error| h3_error_traced("request", error, &recorder_upload))?;
+                }
+            } else if let Some(bytes) = buffered {
+                written = bytes.len() as u64;
+                sender
+                    .send_data(bytes)
+                    .await
+                    .map_err(|error| h3_error_traced("request", error, &recorder_upload))?;
+            }
+            sender
+                .close_send()
                 .await
-                .map_err(|error| h3_error_traced("request", error, recorder))?;
+                .map_err(|error| h3_error_traced("request", error, &recorder_upload))?;
+            recorder_upload.mark(
+                EventKind::RequestWriteEnd,
+                u32::try_from(written).unwrap_or(u32::MAX),
+                0,
+            );
+            Ok(())
         }
-    } else if let RequestBody::Full(bytes) = &request.body
-        && !bytes.is_empty()
-    {
-        written = bytes.len() as u64;
-        req_body
-            .send_data(bytes.clone())
-            .await
-            .map_err(|error| h3_error_traced("request", error, recorder))?;
-    }
+        .await;
+        let _ = upload_done_tx.send(outcome);
+    });
+    let mut upload_abort = AbortOnDrop(Some(upload.abort_handle()));
+    let mut head_fut = std::pin::pin!(super::h1::bounded(
+        attempt.config.response_head_timeout,
+        response_fut.await_head()
+    ));
 
-    req_body
-        .close_send()
-        .await
-        .map_err(|error| h3_error_traced("request", error, recorder))?;
-    recorder.mark(
-        EventKind::RequestWriteEnd,
-        u32::try_from(written).unwrap_or(u32::MAX),
-        0,
-    );
-
-    let resp_stream =
-        super::h1::bounded(attempt.config.response_head_timeout, req_body.into_duplex())
-            .await?
-            .map_err(|error| h3_error_traced("request", error, recorder))?;
+    // Await the response head and the upload together. If the origin answers
+    // before the upload finishes, keep the response and cancel the upload on
+    // drop; if the upload finishes first, wait for the head under its bound.
+    let (head, upload_done_rx) = tokio::select! {
+        head = &mut head_fut => (head, Some(upload_done_rx)),
+        done = &mut upload_done_rx => {
+            upload_abort.disarm();
+            match done {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(_) => return Err(NetError::Protocol("HTTP/3 upload task aborted".into())),
+            }
+            (head_fut.await, None)
+        }
+    };
+    let resp_stream = head?.map_err(|error| h3_error_traced("request", error, recorder))?;
 
     let status = resp_stream.head().status();
     let headers = resp_stream.head().headers().clone();
@@ -171,16 +202,62 @@ pub(super) async fn exchange_on_session(
         body: Box::new(Body {
             stream: Some(resp_stream),
             recorder: recorder.clone(),
+            upload_abort,
+            upload_done_rx,
             _in_flight: in_flight.take(),
         }),
         connection: info,
     })
 }
 
+/// Abort an upload task when its response body is dropped before the upload
+/// finishes.
+struct AbortOnDrop(Option<AbortHandle>);
+
+impl AbortOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 struct Body {
     stream: Option<H3ResponseStream>,
     recorder: TraceCollector,
+    upload_abort: AbortOnDrop,
+    upload_done_rx: Option<oneshot::Receiver<Result<(), NetError>>>,
     _in_flight: Option<PoolInFlightPermit>,
+}
+
+impl Body {
+    fn take_upload_error(&mut self) -> Option<NetError> {
+        let rx = self.upload_done_rx.as_mut()?;
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                self.upload_done_rx = None;
+                self.upload_abort.disarm();
+                None
+            }
+            Ok(Err(error)) => {
+                self.upload_done_rx = None;
+                self.upload_abort.disarm();
+                Some(error)
+            }
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.upload_done_rx = None;
+                self.upload_abort.disarm();
+                None
+            }
+            Err(oneshot::error::TryRecvError::Empty) => None,
+        }
+    }
 }
 
 impl BodySource for Body {
@@ -189,10 +266,16 @@ impl BodySource for Body {
             let Some(stream) = self.stream.as_mut() else {
                 return Ok(None);
             };
-            stream
+            let next = stream
                 .next_chunk()
                 .await
-                .map_err(|error| h3_error_traced("body", error, &self.recorder))
+                .map_err(|error| h3_error_traced("body", error, &self.recorder))?;
+            if next.is_none()
+                && let Some(error) = self.take_upload_error()
+            {
+                return Err(error);
+            }
+            Ok(next)
         })
     }
 

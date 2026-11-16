@@ -32,6 +32,14 @@ pub(crate) struct H3Stream {
     trailers_sent: bool,
     writer_done: bool,
     reader_done: bool,
+    /// Whether this view registered the datagram channel and must unregister
+    /// it on drop. A response view borrows the stream's recv half but must not
+    /// tear down the sender's datagram registration.
+    owns_datagrams: bool,
+    /// Whether this view owns the send/recv half and may reset/stop it on drop.
+    /// A split request transfers read ownership to the response view.
+    owns_send: bool,
+    owns_recv: bool,
 }
 
 impl std::fmt::Debug for H3Stream {
@@ -72,11 +80,48 @@ impl H3Stream {
             trailers_sent: false,
             writer_done: false,
             reader_done: false,
+            owns_datagrams: true,
+            owns_send: true,
+            owns_recv: true,
         }
+    }
+
+    /// Transfer read-side ownership to a response view. The request sender
+    /// must not stop the receive half when it is dropped.
+    pub(crate) fn release_read_ownership(&mut self) {
+        self.owns_recv = false;
     }
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// A receive-only view of this stream, sharing the QUIC send/recv halves
+    /// but starting with fresh HTTP/3 reader state.
+    ///
+    /// The request sender keeps the original view; this one exists so a
+    /// client can await the response head while the upload is still running.
+    /// It deliberately does not own the datagram registration.
+    pub(crate) fn response_view(&self) -> Self {
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            shared: Arc::clone(&self.shared),
+            id: self.id,
+            send: self.send.clone(),
+            recv: self.recv.clone(),
+            datagrams: rx,
+            prefix: self.prefix.clone(),
+            capsule_buffer: BytesMut::new(),
+            data_remaining: 0,
+            trailers: None,
+            head_sent: false,
+            trailers_sent: false,
+            writer_done: false,
+            reader_done: false,
+            owns_datagrams: false,
+            owns_send: false,
+            owns_recv: true,
+        }
     }
 
     pub(crate) fn shared(&self) -> &Arc<Shared> {
@@ -388,11 +433,13 @@ impl H3Stream {
 
 impl Drop for H3Stream {
     fn drop(&mut self) {
-        self.shared.unregister_datagrams(self.id);
-        if !self.writer_done {
+        if self.owns_datagrams {
+            self.shared.unregister_datagrams(self.id);
+        }
+        if self.owns_send && !self.writer_done {
             self.send.reset(error_code::H3_REQUEST_CANCELLED);
         }
-        if !self.reader_done {
+        if self.owns_recv && !self.reader_done {
             self.recv.stop(error_code::H3_REQUEST_CANCELLED);
             self.queue_cancellation();
         }

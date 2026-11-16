@@ -723,16 +723,27 @@ async fn unified_client_executes_http3_multiplexed_streaming_and_confinement() {
                 let (req, mut stream) = request.into_parts();
                 let path = req.uri().path().to_string();
                 tokio::spawn(async move {
-                    let mut uploaded = Vec::new();
-                    while let Some(chunk) = stream.recv_data().await.expect("recv data") {
-                        uploaded.extend_from_slice(&chunk);
-                    }
-                    let _ = stream.recv_trailers().await.expect("recv trailers");
                     let response = http::Response::builder()
                         .status(200)
                         .header("content-type", "text/plain")
                         .body(())
                         .expect("response head");
+                    if path == "/early" {
+                        // Answer before reading the request body: the client
+                        // must surface the head and cancel the upload.
+                        stream.send_response(response).await.expect("send response");
+                        stream
+                            .send_data(Bytes::from_static(b"early"))
+                            .await
+                            .expect("send early body");
+                        stream.finish().await.expect("finish early");
+                        return;
+                    }
+                    let mut uploaded = Vec::new();
+                    while let Some(chunk) = stream.recv_data().await.expect("recv data") {
+                        uploaded.extend_from_slice(&chunk);
+                    }
+                    let _ = stream.recv_trailers().await.expect("recv trailers");
                     stream.send_response(response).await.expect("send response");
                     if path == "/upload" {
                         stream
@@ -854,6 +865,27 @@ async fn unified_client_executes_http3_multiplexed_streaming_and_confinement() {
             .iter()
             .any(|e| e.kind == EventKind::RequestWriteEnd && e.a == 9),
         "streamed H3 upload byte count must be recorded"
+    );
+
+    // An early response head must win over a streaming upload that is still
+    // running; the upload is cancelled when the response body is dropped.
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel::<Bytes>(2);
+    upload_tx
+        .send(Bytes::from_static(b"ignored-by-the-server"))
+        .await
+        .expect("early upload chunk");
+    drop(upload_tx);
+    let mut early = client
+        .request(
+            &target,
+            RequestHead::new(Method::POST, "/early"),
+            RequestBody::stream(upload_rx),
+        )
+        .await
+        .expect("early H3 response");
+    assert_eq!(
+        early.body.read_to_end().await.expect("early body").as_ref(),
+        b"early"
     );
 
     let _ = done_tx.send(());

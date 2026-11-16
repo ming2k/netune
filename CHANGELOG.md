@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `netune`: Production defaults are now bounded: `response_head_timeout` 30 s, `body_idle_timeout` 60 s, `request_timeout` 300 s, `max_in_flight_per_authority` 64, `max_in_flight_total` 512. `None` is an explicit opt-out.
 - `netune`: `Decoder::push` / `Decoder::finish` require the remaining decoded-body budget; a compressed chunk can no longer expand past the configured limit before failing.
 - `netune`: HTTP/3 client uploads and body chunks now inherit `request_timeout` / `body_idle_timeout` instead of the previous one-day internal sentinel.
+- `netune-http3`: `H3RequestBody::split` returns a concurrent response-head future and an upload sender; `netune` uses it so an early HTTP/3 response is surfaced and the remaining upload is cancelled instead of stalling behind a server that stopped reading.
 
 ### Fixed
 

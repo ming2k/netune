@@ -65,8 +65,9 @@ sets `None` owns the corresponding liveness/memory risk.
 HTTP/3 is **Preview** until the following are true:
 
 - the H3 client and ingress suites pass against an independent implementation;
-- the client supports early response heads while a streaming request body is
-  still being sent, including cancellation and flow-control release;
+- early response heads during a streaming upload are covered by a regression
+  test, including cancellation and flow-control release (the split sender path
+  landed; broader interop coverage remains);
 - `response_head_timeout`, `body_idle_timeout` and `request_timeout` are
   exercised over real QUIC sessions;
 - the QUIC/H3 fuzz and soak runs are part of the release evidence.
@@ -89,7 +90,7 @@ need an audited TLS implementation.
 
 WebTransport is **Experimental** until:
 
-- `RESET_STREAM_AT` (and the associated close/drain semantics) is implemented;
+- reliable `RESET_STREAM_AT` remains covered by the prefix/reset tests (landed);
 - at least two independent browser engines pass a published interop matrix;
 - draft-version negotiation is tested across the supported browser versions;
 - the Web Platform Tests / external differential scenarios are part of CI.

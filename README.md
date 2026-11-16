@@ -20,7 +20,7 @@ object you can inspect, fingerprint, and change:
 | [`netune-egress`] | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the one predicate every outbound transport (TCP, UDP, QUIC) checks before opening a socket. No I/O. |
 | [`netune`] | **Egress**: DNS, TCP, TLS (rustls by default; owned fingerprint engine opt-in), connection pool (`Pool`), TLS fingerprint presets and routing (`TlsProfile`, `Preset`), proxies (HTTP CONNECT & SOCKS5), egress confinement, redirects, decompression, client WebSocket upgrade (`connect_ws`), safe stale-socket recovery. |
 | [`netune-server`] | **Ingress**: an observable listener serving **HTTP/1.1, HTTP/2 and optional HTTP/3** behind one handler — accept loop, admission control that sheds instead of queueing, separate phase bounds, streaming responses, request validation before dispatch, per-connection ingress traces, graceful drain. HTTP/3 is a peer QUIC listener, not a mode of the TCP server. A transport, not a framework. |
-| [`netune-webtransport`] | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, flow-control/close capsules and multi-session routing. Reliable `RESET_STREAM_AT` and browser interop remain outstanding (ADR-0033). |
+| [`netune-webtransport`] | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, flow-control/close capsules, reliable `RESET_STREAM_AT` and multi-session routing. Browser interoperability and draft-version negotiation remain experimental (ADR-0033). |
 | [`netune-probe`] | The L2 probe: `AF_PACKET` capture of one TCP flow, pure Ethernet/IPv4/TCP parse **and build** (forge), plus an opt-in `inject` feature for frame transmission. |
 
 ## Capability surface

@@ -129,6 +129,27 @@ impl H3RequestBody {
         self.stream.send_capsule(capsule).await
     }
 
+    /// Split the request into a sender and a response-head future.
+    ///
+    /// The sender keeps the original stream view; the future reads a
+    /// receive-only view of the same QUIC stream. They can run concurrently,
+    /// which is what lets an HTTP/3 client observe an early response while a
+    /// streaming upload is still in progress. The response future owns the
+    /// stream permit, so dropping it releases the session slot.
+    pub fn split(mut self) -> (Self, H3ResponseFuture) {
+        let view = self.stream.response_view();
+        self.stream.release_read_ownership();
+        let response = H3ResponseFuture {
+            stream: view,
+            recorder: self.recorder.clone(),
+            context: self.context.take(),
+            config: self.config.clone(),
+            exchange: self.exchange,
+            permit: self.permit.take(),
+        };
+        (self, response)
+    }
+
     /// Read the response head while keeping the request body open.
     ///
     /// This is the full-duplex form used by CONNECT and WebTransport-style
@@ -177,6 +198,43 @@ impl H3RequestBody {
         .await?;
         await_response(
             stream,
+            self.recorder,
+            self.context,
+            self.config,
+            self.exchange,
+            self.permit,
+        )
+        .await
+    }
+}
+
+/// The response-head half of a split HTTP/3 request.
+///
+/// Created by [`H3RequestBody::split`]. Awaiting it does not wait for the
+/// request sender; the two halves use separate QUIC send/receive handles.
+pub struct H3ResponseFuture {
+    stream: H3Stream,
+    recorder: Option<TraceCollector>,
+    context: Option<H3TraceContext>,
+    config: H3ClientConfig,
+    exchange: u32,
+    permit: Option<H3StreamPermit>,
+}
+
+impl std::fmt::Debug for H3ResponseFuture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("H3ResponseFuture")
+            .field("exchange", &self.exchange)
+            .finish_non_exhaustive()
+    }
+}
+
+impl H3ResponseFuture {
+    /// Wait for the response head, retaining the response stream.
+    pub async fn await_head(self) -> Result<H3ResponseStream, H3Error> {
+        await_response(
+            self.stream,
             self.recorder,
             self.context,
             self.config,

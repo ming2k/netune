@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `netune-quic`: `Endpoint::close` is observable by `Connection::wait_established`, `Connection::closed` and `Connection::is_closed` even when the close races the waiter's subscription; the endpoint flag is authoritative, not just the broadcast notification.
+- `netune-http3`: a split request sender and its response future share one `H3StreamPermit`, so neither half can release the session's active-stream slot while the other is still working.
 
 ## [0.0.33] - 2026-11-16
 

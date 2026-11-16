@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.33] - 2026-11-16
+
 ### Added
 
 - `netune`: Introduced protocol-neutral `RoundTrip` seam (`Wire` for real connections, `mock::Mock` for request-level scripted tests and `FaultConnector` for connector fault injection), unified `Body` terminal trace recovery (`Body::trace()`), and post-dispatch `NetError::Timeout` bounds (`response_head_timeout`, `body_idle_timeout`, ADR-0050..0052).

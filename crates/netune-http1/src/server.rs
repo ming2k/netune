@@ -60,6 +60,7 @@ impl<R: AsyncRead + Unpin> Http1ServerReader<R> {
         Self::with_limits(io, Limits::for_ingress())
     }
 
+    /// Wrap `io` with explicit [`Limits`].
     pub fn with_limits(io: R, limits: Limits) -> Self {
         Self::with_limits_and_buffer(io, limits, BytesMut::new())
     }

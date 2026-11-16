@@ -130,6 +130,7 @@
 //! ```
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![deny(missing_docs)]
 
 // The documentation's Rust examples are compiled by doctest; see this module for why, and for the one
 // rule it imposes on how a guide fences its code.

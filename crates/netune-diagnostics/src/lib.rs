@@ -7,8 +7,19 @@
 //!
 //! The sinks are not a logging facade: they receive the same [`TraceMeta`] and
 //! [`Event`] the transport recorded, so a sink cannot invent a second timeline.
+//!
+//! # Example
+//!
+//! ```rust
+//! use netune_diagnostics::RedactionPolicy;
+//!
+//! let prod = RedactionPolicy::public_only();
+//! assert!(!prod.include_internal);
+//! assert!(!prod.include_messages);
+//! ```
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![deny(missing_docs)]
 
 use std::fmt;
 use std::io::{self, Write};
@@ -85,6 +96,7 @@ impl fmt::Debug for JsonLinesSink {
 }
 
 impl JsonLinesSink {
+    /// Create a JSONL sink writing to `writer` with the default production redaction policy.
     pub fn new(writer: impl Write + Send + 'static) -> Self {
         Self {
             writer: Mutex::new(Box::new(writer)),
@@ -92,11 +104,13 @@ impl JsonLinesSink {
         }
     }
 
+    /// Override the redaction policy applied to diagnostics rendered by this sink.
     pub fn with_policy(mut self, policy: RedactionPolicy) -> Self {
         self.policy = policy;
         self
     }
 
+    /// Create a JSONL sink writing directly to `stderr`.
     pub fn stderr() -> Self {
         Self::new(io::stderr())
     }
@@ -170,10 +184,12 @@ pub struct FanoutSink {
 }
 
 impl FanoutSink {
+    /// Construct a fanout sink forwarding events to all sinks in `sinks`.
     pub fn new(sinks: Vec<Arc<dyn TraceSink>>) -> Self {
         Self { sinks }
     }
 
+    /// Append another sink to this fanout list.
     pub fn push(mut self, sink: Arc<dyn TraceSink>) -> Self {
         self.sinks.push(sink);
         self
@@ -207,6 +223,7 @@ impl TraceSink for FanoutSink {
 /// A written review bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceBundle {
+    /// Directory containing the written bundle files.
     pub directory: std::path::PathBuf,
 }
 
@@ -264,6 +281,7 @@ impl TraceBundle {
         Ok(Self { directory })
     }
 
+    /// Return the path to `manifest.json` inside this bundle directory.
     pub fn manifest_path(&self) -> std::path::PathBuf {
         self.directory.join("manifest.json")
     }

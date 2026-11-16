@@ -37,10 +37,7 @@ fn client_on(pool: Pool) -> Client {
     Client::new(
         TcpConnector::new(),
         pool,
-        ClientConfig {
-            enable_http2: true,
-            ..ClientConfig::default()
-        },
+        ClientConfig::default().with_enable_http2(true),
     )
 }
 
@@ -372,11 +369,9 @@ async fn a_peer_that_never_answers_settings_is_bounded() {
     let client = Client::new(
         TcpConnector::new(),
         Pool::default(),
-        ClientConfig {
-            enable_http2: true,
-            h2_handshake_timeout: Some(Duration::from_millis(100)),
-            ..ClientConfig::default()
-        },
+        ClientConfig::default()
+            .with_enable_http2(true)
+            .with_h2_handshake_timeout(Some(Duration::from_millis(100))),
     );
 
     let started = std::time::Instant::now();

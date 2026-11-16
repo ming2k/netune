@@ -27,15 +27,21 @@ use netune_trace::{
 };
 
 use crate::body::{Body, BodyContext};
-use crate::connect::{Connector, HttpProtocol, Target};
+use crate::connect::{Connector, EgressConfinement, HttpProtocol, Target, TcpConnector};
 use crate::decompress::Decoder;
 use crate::error::{AttemptError, NetError};
 use crate::exchange::{Attempt, ObservationLevel, Request, RequestBody, RoundTrip};
-use crate::pool::{Pool, PoolKey};
+use crate::pool::{Pool, PoolConfig, PoolKey};
 use crate::profile::{ConnectionPlan, H1Registry, H1WireProfile, Http2Mode, PlannedTransport};
+#[cfg(any(feature = "http2", feature = "http3"))]
+use crate::profile::ProfileId;
 #[cfg(feature = "http2")]
-use crate::profile::{H2Registry, H2RequestRegistry, ProfileId};
+use crate::profile::{H2Registry, H2RequestRegistry};
+use crate::proxy::{Proxy, ProxyConnector};
 use crate::redirect::{redirect_location, redirect_to_get, resolve_location};
+use crate::socket::SocketConfig;
+use crate::tls::TlsRouterConnector;
+use crate::tls_profile::TlsProfile;
 use crate::wire::Wire;
 #[cfg(feature = "http2")]
 use netune_http2::H2Fingerprint;
@@ -45,6 +51,7 @@ use netune_http2::H2Fingerprint;
 /// The value selects one of three monomorphized taps; the byte path itself never
 /// sees this enum. `Counters` is the default because a production client must be
 /// debuggable at L0 without paying for a ring, a clock or a lock.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub enum Observation {
     /// No clock, no allocation, no event. The pure mode.
@@ -57,9 +64,12 @@ pub enum Observation {
 }
 
 /// Bounds and delivery for a traced attempt.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct TraceConfig {
+    /// Maximum events retained in the attempt's ring buffer.
     pub capacity: usize,
+    /// Optional streaming trace sink for live event delivery.
     pub sink: Option<Arc<dyn TraceSink>>,
     /// Whether this attempt's trace id travels on the wire.
     pub propagation: TracePropagation,
@@ -76,6 +86,7 @@ impl Default for TraceConfig {
 }
 
 impl TraceConfig {
+    /// Create a trace configuration with ring buffer `capacity`.
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -84,12 +95,14 @@ impl TraceConfig {
         }
     }
 
+    /// Stream recorded events to `sink`.
     #[must_use]
     pub fn with_sink(mut self, sink: Arc<dyn TraceSink>) -> Self {
         self.sink = Some(sink);
         self
     }
 
+    /// Configure outbound trace-id propagation.
     #[must_use]
     pub fn with_propagation(mut self, propagation: TracePropagation) -> Self {
         self.propagation = propagation;
@@ -119,8 +132,10 @@ impl Observation {
 }
 
 /// Client policy.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
+    /// HTTP/1.1 parser and decoded-body size limits.
     pub limits: Limits,
     /// Sent as `user-agent` when the caller did not supply one.
     pub user_agent: String,
@@ -186,11 +201,450 @@ impl Default for ClientConfig {
     }
 }
 
+impl ClientConfig {
+    /// Set HTTP/1.1 parser and body limits.
+    #[must_use]
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Set the default `user-agent` header.
+    #[must_use]
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = user_agent.into();
+        self
+    }
+
+    /// Set the maximum redirect hops followed per attempt.
+    #[must_use]
+    pub fn with_max_redirects(mut self, max_redirects: u8) -> Self {
+        self.max_redirects = max_redirects;
+        self
+    }
+
+    /// Enable or disable automatic HTTP/2 upgrade when ALPN negotiates `h2`.
+    #[must_use]
+    pub fn with_enable_http2(mut self, enable_http2: bool) -> Self {
+        self.enable_http2 = enable_http2;
+        self
+    }
+
+    /// Set the HTTP/2 preface and SETTINGS handshake timeout.
+    #[must_use]
+    pub fn with_h2_handshake_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.h2_handshake_timeout = timeout;
+        self
+    }
+
+    /// Set the response-head timeout.
+    #[must_use]
+    pub fn with_response_head_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.response_head_timeout = timeout;
+        self
+    }
+
+    /// Set the body-idle timeout.
+    #[must_use]
+    pub fn with_body_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.body_idle_timeout = timeout;
+        self
+    }
+
+    /// Set the total per-attempt timeout.
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    /// Set the default observation policy for [`Client::request`].
+    #[must_use]
+    pub fn with_observation(mut self, observation: Observation) -> Self {
+        self.observation = observation;
+        self
+    }
+}
+
 /// A parsed response: head plus a decoded, observed body stream.
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct Response {
+    /// Parsed response status line and headers.
     pub head: IncomingResponse,
+    /// Streaming decoded response body and attempt trace handle.
     pub body: Body,
+}
+
+#[derive(Clone)]
+enum BuilderTls {
+    RustlsDefault,
+    RustlsConfig(Box<rustls::ClientConfig>),
+    Owned(netune_tls::Verifier),
+    Disabled,
+}
+
+/// Fluent builder for a production [`Client`].
+///
+/// Defaults to [`TcpConnector`] wrapped in [`TlsRouterConnector::platform_default`]
+/// (rustls with the platform certificate verifier), [`Pool::default`], and
+/// [`ClientConfig::default`]. Calling [`Self::http2(true)`] automatically
+/// configures rustls ALPN `["h2", "http/1.1"]` alongside `enable_http2`.
+pub struct ClientBuilder {
+    config: ClientConfig,
+    pool: Option<Pool>,
+    pool_config: PoolConfig,
+    confinement: EgressConfinement,
+    socket_config: SocketConfig,
+    connect_timeout: Option<Duration>,
+    proxy: Option<Proxy>,
+    tls: BuilderTls,
+    tls_handshake_timeout: Option<Duration>,
+    custom_tls_profiles: Vec<(String, TlsProfile)>,
+    h1_profiles: H1Registry,
+    #[cfg(feature = "http2")]
+    h2_profiles: H2Registry,
+    #[cfg(feature = "http2")]
+    h2_request_profiles: H2RequestRegistry,
+    #[cfg(feature = "http3")]
+    quic_connector: Option<netune_quic::QuicConnector>,
+    #[cfg(feature = "http3")]
+    quic_profiles: netune_quic::profile::QuicProfileRegistry,
+    #[cfg(feature = "http3")]
+    h3_settings_profiles: netune_http3::H3SettingsRegistry,
+    #[cfg(feature = "http3")]
+    h3_request_profiles: netune_http3::H3RequestRegistry,
+}
+
+impl Default for ClientBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ClientBuilder {
+    /// Create a new builder with safe production defaults.
+    pub fn new() -> Self {
+        Self {
+            config: ClientConfig::default(),
+            pool: None,
+            pool_config: PoolConfig::default(),
+            confinement: EgressConfinement::Unrestricted,
+            socket_config: SocketConfig::default(),
+            connect_timeout: Some(crate::connect::CONNECT_TIMEOUT),
+            proxy: None,
+            tls: BuilderTls::RustlsDefault,
+            tls_handshake_timeout: Some(crate::handshake::DEFAULT_HANDSHAKE_TIMEOUT),
+            custom_tls_profiles: Vec::new(),
+            h1_profiles: H1Registry::default(),
+            #[cfg(feature = "http2")]
+            h2_profiles: H2Registry::default(),
+            #[cfg(feature = "http2")]
+            h2_request_profiles: H2RequestRegistry::default(),
+            #[cfg(feature = "http3")]
+            quic_connector: None,
+            #[cfg(feature = "http3")]
+            quic_profiles: netune_quic::profile::QuicProfileRegistry::default(),
+            #[cfg(feature = "http3")]
+            h3_settings_profiles: netune_http3::H3SettingsRegistry::default(),
+            #[cfg(feature = "http3")]
+            h3_request_profiles: netune_http3::H3RequestRegistry::default(),
+        }
+    }
+
+    /// Replace the full [`ClientConfig`].
+    #[must_use]
+    pub fn config(mut self, config: ClientConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Enable or disable automatic HTTP/2 negotiation via ALPN (and align the
+    /// default rustls ALPN offer accordingly).
+    #[must_use]
+    pub fn http2(mut self, enable: bool) -> Self {
+        self.config.enable_http2 = enable;
+        self
+    }
+
+    /// Set the redirect limit.
+    #[must_use]
+    pub fn max_redirects(mut self, max_redirects: u8) -> Self {
+        self.config.max_redirects = max_redirects;
+        self
+    }
+
+    /// Set the default `user-agent` header.
+    #[must_use]
+    pub fn user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.config.user_agent = user_agent.into();
+        self
+    }
+
+    /// Set the default [`Observation`] policy for [`Client::request`].
+    #[must_use]
+    pub fn observation(mut self, observation: Observation) -> Self {
+        self.config.observation = observation;
+        self
+    }
+
+    /// Set HTTP/1.1 parser and body limits.
+    #[must_use]
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.config.limits = limits;
+        self
+    }
+
+    /// Set the overall per-attempt deadline.
+    #[must_use]
+    pub fn request_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.config.request_timeout = timeout;
+        self
+    }
+
+    /// Set the response-head timeout.
+    #[must_use]
+    pub fn response_head_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.config.response_head_timeout = timeout;
+        self
+    }
+
+    /// Set the body-idle timeout.
+    #[must_use]
+    pub fn body_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.config.body_idle_timeout = timeout;
+        self
+    }
+
+    /// Set the HTTP/2 preface + SETTINGS handshake timeout.
+    #[must_use]
+    pub fn h2_handshake_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.config.h2_handshake_timeout = timeout;
+        self
+    }
+
+    /// Share an existing [`Pool`].
+    #[must_use]
+    pub fn pool(mut self, pool: Pool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    /// Configure a fresh [`Pool`] using `config` (ignored if [`Self::pool`] is set).
+    #[must_use]
+    pub fn pool_config(mut self, config: PoolConfig) -> Self {
+        self.pool_config = config;
+        self
+    }
+
+    /// Set the egress confinement policy (e.g. [`EgressConfinement::StrictPublic`]).
+    #[must_use]
+    pub fn confinement(mut self, confinement: EgressConfinement) -> Self {
+        self.confinement = confinement;
+        self
+    }
+
+    /// Configure TCP socket options.
+    #[must_use]
+    pub fn socket_config(mut self, socket_config: SocketConfig) -> Self {
+        self.socket_config = socket_config;
+        self
+    }
+
+    /// Set the DNS + TCP connect timeout.
+    #[must_use]
+    pub fn connect_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Route outbound TCP/TLS connections through an HTTP `CONNECT` or SOCKS5 proxy.
+    #[must_use]
+    pub fn proxy(mut self, proxy: Proxy) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
+    /// Use the default audited rustls + platform verifier TLS path.
+    #[must_use]
+    pub fn tls_rustls(mut self) -> Self {
+        self.tls = BuilderTls::RustlsDefault;
+        self
+    }
+
+    /// Use a caller-supplied [`rustls::ClientConfig`] for plain TLS targets.
+    #[must_use]
+    pub fn tls_rustls_config(mut self, config: rustls::ClientConfig) -> Self {
+        self.tls = BuilderTls::RustlsConfig(Box::new(config));
+        self
+    }
+
+    /// Select the owned `netune-tls` engine with the given verifier.
+    #[must_use]
+    pub fn tls_owned(mut self, verifier: netune_tls::Verifier) -> Self {
+        self.tls = BuilderTls::Owned(verifier);
+        self
+    }
+
+    /// Disable TLS termination on the connector (plaintext TCP / proxy only).
+    #[must_use]
+    pub fn no_tls(mut self) -> Self {
+        self.tls = BuilderTls::Disabled;
+        self
+    }
+
+    /// Set the TLS handshake timeout.
+    #[must_use]
+    pub fn tls_handshake_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.tls_handshake_timeout = timeout;
+        self
+    }
+
+    /// Register or override a named [`TlsProfile`] on the TLS router.
+    #[must_use]
+    pub fn tls_profile(mut self, name: impl Into<String>, profile: TlsProfile) -> Self {
+        self.custom_tls_profiles.push((name.into(), profile));
+        self
+    }
+
+    /// Register or replace an HTTP/1 request-header wire profile.
+    #[must_use]
+    pub fn h1_profile(mut self, profile: H1WireProfile) -> Self {
+        self.h1_profiles = self.h1_profiles.with_profile(profile);
+        self
+    }
+
+    /// Register or replace an HTTP/2 connection profile.
+    #[cfg(feature = "http2")]
+    #[must_use]
+    pub fn h2_profile(mut self, id: impl Into<ProfileId>, profile: H2Fingerprint) -> Self {
+        self.h2_profiles = self.h2_profiles.with_profile(id, profile);
+        self
+    }
+
+    /// Register or replace an HTTP/2 request-header profile.
+    #[cfg(feature = "http2")]
+    #[must_use]
+    pub fn h2_request_profile(
+        mut self,
+        id: impl Into<ProfileId>,
+        profile: netune_http2::H2RequestProfile,
+    ) -> Self {
+        self.h2_request_profiles = self.h2_request_profiles.with_profile(id, profile);
+        self
+    }
+
+    /// Supply a custom [`netune_quic::QuicConnector`] for HTTP/3 targets.
+    #[cfg(feature = "http3")]
+    #[must_use]
+    pub fn quic(mut self, quic: netune_quic::QuicConnector) -> Self {
+        self.quic_connector = Some(quic);
+        self
+    }
+
+    /// Register or replace a QUIC transport profile for HTTP/3 requests.
+    #[cfg(feature = "http3")]
+    #[must_use]
+    pub fn quic_profile(mut self, profile: netune_quic::profile::QuicProfile) -> Self {
+        self.quic_profiles = self.quic_profiles.with_profile(profile);
+        self
+    }
+
+    /// Register or replace an HTTP/3 connection SETTINGS profile.
+    #[cfg(feature = "http3")]
+    #[must_use]
+    pub fn h3_settings_profile(mut self, profile: netune_http3::H3SettingsProfile) -> Self {
+        self.h3_settings_profiles = self.h3_settings_profiles.with_profile(profile);
+        self
+    }
+
+    /// Register or replace an HTTP/3 request-header profile.
+    #[cfg(feature = "http3")]
+    #[must_use]
+    pub fn h3_request_profile(mut self, profile: netune_http3::H3RequestProfile) -> Self {
+        self.h3_request_profiles = self.h3_request_profiles.with_profile(profile);
+        self
+    }
+
+    fn finish_tls<C: Connector + 'static>(self, connector: C, pool: Pool) -> Client {
+        let alpn = if self.config.enable_http2 {
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        } else {
+            vec![b"http/1.1".to_vec()]
+        };
+        let client = match self.tls {
+            BuilderTls::Disabled => {
+                #[allow(unused_mut)]
+                let mut wire = Wire::new(connector, pool);
+                #[cfg(feature = "http3")]
+                if let Some(quic) = self.quic_connector {
+                    wire = wire.with_quic(quic);
+                }
+                Client::with_transport(wire, self.config)
+            }
+            tls => {
+                let mut router = TlsRouterConnector::platform_default(connector)
+                    .with_handshake_timeout(self.tls_handshake_timeout)
+                    .with_rustls_alpn(alpn);
+                match tls {
+                    BuilderTls::RustlsDefault => {}
+                    BuilderTls::RustlsConfig(cfg) => {
+                        router = router.with_rustls_config(*cfg);
+                    }
+                    BuilderTls::Owned(verifier) => {
+                        router = router.with_verifier(verifier);
+                    }
+                    BuilderTls::Disabled => unreachable!(),
+                }
+                for (name, profile) in self.custom_tls_profiles {
+                    router = router.with_profile_named(name, profile);
+                }
+                #[allow(unused_mut)]
+                let mut wire = Wire::new(router, pool);
+                #[cfg(feature = "http3")]
+                if let Some(quic) = self.quic_connector {
+                    wire = wire.with_quic(quic);
+                }
+                Client::with_transport(wire, self.config)
+            }
+        };
+        let mut client = client;
+        client.h1_profiles = self.h1_profiles;
+        #[cfg(feature = "http2")]
+        {
+            client.h2_profiles = self.h2_profiles;
+            client.h2_request_profiles = self.h2_request_profiles;
+        }
+        #[cfg(feature = "http3")]
+        {
+            client.quic_profiles = self.quic_profiles;
+            client.h3_settings_profiles = self.h3_settings_profiles;
+            client.h3_request_profiles = self.h3_request_profiles;
+        }
+        client
+    }
+
+    /// Assemble the configured [`Client`].
+    pub fn build(mut self) -> Client {
+        let pool = self
+            .pool
+            .take()
+            .unwrap_or_else(|| Pool::new(self.pool_config));
+        let mut tcp = match self.confinement {
+            EgressConfinement::Unrestricted => TcpConnector::new(),
+            EgressConfinement::StrictPublic => TcpConnector::strict_public(),
+        };
+        tcp = tcp
+            .with_socket_config(self.socket_config.clone())
+            .with_connect_timeout(self.connect_timeout);
+
+        if let Some(proxy) = self.proxy.take() {
+            let proxied = ProxyConnector::new(tcp, proxy);
+            self.finish_tls(proxied, pool)
+        } else {
+            self.finish_tls(tcp, pool)
+        }
+    }
 }
 
 /// An HTTP client over any [`RoundTrip`].
@@ -212,6 +666,15 @@ pub struct Client {
 }
 
 impl Client {
+    /// Start building a production-configured [`Client`] with TLS enabled via
+    /// the audited rustls platform verifier.
+    ///
+    /// Enabling [`ClientBuilder::http2`] automatically aligns the rustls ALPN
+    /// offer (`["h2", "http/1.1"]`) with `ClientConfig::enable_http2`.
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::new()
+    }
+
     /// A client over real connections: `connector` opens them, `pool` keeps
     /// them.
     pub fn new<C: Connector + 'static>(connector: C, pool: Pool, config: ClientConfig) -> Self {

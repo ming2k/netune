@@ -137,6 +137,7 @@ impl ServerSessionConfig {
 pub struct H2Request {
     /// The stream this request arrived on. It is the exchange identity a trace records.
     pub stream_id: u32,
+    /// HTTP request method.
     pub method: http::Method,
     /// `:path` as bytes; empty for `CONNECT`.
     pub path: Bytes,
@@ -250,7 +251,9 @@ impl H2Body {
 /// The response a handler produces for one stream.
 #[derive(Debug)]
 pub struct H2Response {
+    /// HTTP status code (`:status`).
     pub status: http::StatusCode,
+    /// Response headers.
     pub headers: http::HeaderMap,
     /// The body: bytes for a one-shot answer, a channel for a streamed one.
     pub body: H2ResponseBody,
@@ -346,21 +349,36 @@ pub enum SessionEnd {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamEvent {
     /// A request head was decoded; `payload` bytes.
-    RequestHeadComplete { payload: u32 },
+    RequestHeadComplete {
+        /// Encoded/decoded head size in bytes.
+        payload: u32,
+    },
     /// `payload` bytes of request body were delivered to the handler.
-    RequestBodyChunk { payload: u32 },
+    RequestBodyChunk {
+        /// Chunk payload size in bytes.
+        payload: u32,
+    },
     /// The request body ended.
     RequestBodyEnd,
     /// The handler returned `status`.
-    HandlerEnd { status: u16 },
+    HandlerEnd {
+        /// Numeric HTTP status code returned by the handler.
+        status: u16,
+    },
     /// The response head was written.
     ResponseHeadSent,
     /// `payload` bytes of response body were written.
-    ResponseBodyChunk { payload: u32 },
+    ResponseBodyChunk {
+        /// Chunk payload size in bytes.
+        payload: u32,
+    },
     /// The response ended.
     ResponseEnd,
     /// A stream-level failure, classified by `code`.
-    Failed { code: u32 },
+    Failed {
+        /// Raw HTTP/2 error code.
+        code: u32,
+    },
 }
 
 /// Receives the facts a session observes, tagged with the stream they belong to.

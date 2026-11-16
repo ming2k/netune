@@ -143,10 +143,9 @@ Pass `WsLimits` to bound frame and message sizes for untrusted origins:
 ```rust
 use netune::WsLimits;
 
-let limits = WsLimits {
-    max_frame_bytes: 1024 * 1024,
-    max_message_bytes: 4 * 1024 * 1024,
-};
+let limits = WsLimits::default()
+    .with_max_frame_bytes(1024 * 1024)
+    .with_max_message_bytes(4 * 1024 * 1024);
 ```
 
 A frame that *declares* more than `max_frame_bytes` is refused before its

@@ -53,11 +53,14 @@ pub enum Message {
 /// Description of connection closure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloseReason {
+    /// Numeric WebSocket close code.
     pub code: CloseCode,
+    /// UTF-8 close reason text.
     pub description: String,
 }
 
 impl CloseReason {
+    /// Construct a close reason from code and description.
     pub fn new(code: CloseCode, description: impl Into<String>) -> Self {
         Self {
             code,

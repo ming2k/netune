@@ -14,11 +14,9 @@ use thiserror::Error;
 use aws_lc_rs::aead::{self, Aad, NONCE_LEN, Nonce};
 use aws_lc_rs::error::Unspecified;
 use aws_lc_rs::hmac;
-use aws_lc_sys::{
-    EVP_CIPHER_CTX_free, EVP_CIPHER_CTX_new, EVP_CIPHER_CTX_set_padding, EVP_DecryptFinal_ex,
-    EVP_DecryptInit_ex, EVP_DecryptUpdate, EVP_EncryptFinal_ex, EVP_EncryptInit_ex,
-    EVP_EncryptUpdate, EVP_aes_128_cbc, EVP_aes_256_cbc,
-};
+
+use crate::ffi::cbc_transform;
+use crate::zeroize::wipe;
 
 /// `change_cipher_spec` (the only protected-record exception allowed on the
 /// wire; the handshake layer decides what to do with it).
@@ -218,12 +216,12 @@ impl Drop for RecordCipher12 {
             Self::AesGcm {
                 key, explicit_seed, ..
             } => {
-                key.fill(0);
-                explicit_seed.fill(0);
+                wipe(key);
+                wipe(explicit_seed);
             }
             Self::ChaCha20 { key, iv } => {
-                key.fill(0);
-                iv.fill(0);
+                wipe(key);
+                wipe(iv);
             }
             Self::AesCbcSha1 {
                 mac_key,
@@ -231,9 +229,9 @@ impl Drop for RecordCipher12 {
                 fixed_iv,
                 ..
             } => {
-                mac_key.fill(0);
-                write_key.fill(0);
-                fixed_iv.fill(0);
+                wipe(mac_key);
+                wipe(write_key);
+                wipe(fixed_iv);
             }
         }
     }
@@ -730,96 +728,6 @@ impl RecordProtector12 {
                 Ok(record)
             }
         }
-    }
-}
-
-/// Raw AES-CBC over an already block-aligned buffer, with a caller-chosen
-/// IV, through the `aws-lc` EVP interface — the one primitive the
-/// `aws-lc-rs` facade does not expose with a caller-supplied IV and without
-/// its own padding ([`INV-TLS-05`]).
-fn cbc_transform(
-    bits: u16,
-    key: &[u8],
-    iv: [u8; 16],
-    input: &[u8],
-    encrypting: bool,
-) -> Result<Vec<u8>, Unspecified> {
-    if input.is_empty() || !input.len().is_multiple_of(16) {
-        return Err(Unspecified);
-    }
-    let input_len = i32::try_from(input.len()).map_err(|_| Unspecified)?;
-    let cipher = match (bits, encrypting) {
-        (128, true) => unsafe { EVP_aes_128_cbc() },
-        (256, true) => unsafe { EVP_aes_256_cbc() },
-        (128, false) => unsafe { EVP_aes_128_cbc() },
-        (256, false) => unsafe { EVP_aes_256_cbc() },
-        _ => unreachable!("the suite's key bits were checked at construction"),
-    };
-    // SAFETY: the context is created, driven and freed here; the input and
-    // output buffers live for the duration of the calls, and the padding is
-    // disabled so the buffer transforms verbatim.
-    unsafe {
-        let context = EVP_CIPHER_CTX_new();
-        if context.is_null() {
-            return Err(Unspecified);
-        }
-        let result = (|| {
-            let init = if encrypting {
-                EVP_EncryptInit_ex(
-                    context,
-                    cipher,
-                    core::ptr::null_mut(),
-                    key.as_ptr(),
-                    iv.as_ptr(),
-                )
-            } else {
-                EVP_DecryptInit_ex(
-                    context,
-                    cipher,
-                    core::ptr::null_mut(),
-                    key.as_ptr(),
-                    iv.as_ptr(),
-                )
-            };
-            if init != 1 || EVP_CIPHER_CTX_set_padding(context, 0) != 1 {
-                return Err(Unspecified);
-            }
-            let (update, final_ex): (
-                unsafe extern "C" fn(
-                    *mut aws_lc_sys::EVP_CIPHER_CTX,
-                    *mut u8,
-                    *mut i32,
-                    *const u8,
-                    i32,
-                ) -> i32,
-                unsafe extern "C" fn(*mut aws_lc_sys::EVP_CIPHER_CTX, *mut u8, *mut i32) -> i32,
-            ) = if encrypting {
-                (EVP_EncryptUpdate, EVP_EncryptFinal_ex)
-            } else {
-                (EVP_DecryptUpdate, EVP_DecryptFinal_ex)
-            };
-            let mut output = vec![0u8; input.len() + 16];
-            let mut written = 0i32;
-            if update(
-                context,
-                output.as_mut_ptr(),
-                &mut written,
-                input.as_ptr(),
-                input_len,
-            ) != 1
-            {
-                return Err(Unspecified);
-            }
-            let total = written as usize;
-            if final_ex(context, output.as_mut_ptr().add(total), &mut written) != 1 || written != 0
-            {
-                return Err(Unspecified);
-            }
-            output.truncate(total);
-            Ok(output)
-        })();
-        EVP_CIPHER_CTX_free(context);
-        result
     }
 }
 

@@ -39,8 +39,18 @@
 //! They compose in either order over the same stream, which is what makes
 //! "record the chaos" and "chaos the recording" both expressible without either
 //! type knowing about the other.
+//!
+//! # Example
+//!
+//! ```rust
+//! use netune_io::TimedIo;
+//! use netune_trace::NoTap;
+//!
+//! let _wrapped = TimedIo::new(tokio::io::empty(), NoTap);
+//! ```
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![deny(missing_docs)]
 
 mod fault;
 mod timed;

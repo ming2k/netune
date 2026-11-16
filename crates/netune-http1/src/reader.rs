@@ -29,10 +29,12 @@ pub struct Http1Reader<R> {
 }
 
 impl<R: AsyncRead + Unpin> Http1Reader<R> {
+    /// Wrap `io` with [`Limits::default`].
     pub fn new(io: R) -> Self {
         Self::with_limits(io, Limits::default())
     }
 
+    /// Wrap `io` with explicit [`Limits`].
     pub fn with_limits(io: R, limits: Limits) -> Self {
         Self::with_limits_and_buffer(io, limits, BytesMut::new())
     }

@@ -6,9 +6,19 @@ use crate::frame::CloseCode;
 #[derive(Debug, PartialEq, Eq)]
 pub enum WsError {
     /// A violation of RFC 6455 framing, opcode, masking, or control frame invariants.
-    Protocol { message: String, code: CloseCode },
+    Protocol {
+        /// Diagnostic message describing the violation.
+        message: String,
+        /// Close code corresponding to the protocol error.
+        code: CloseCode,
+    },
     /// A frame or reassembled message exceeded the configured byte ceiling.
-    PayloadTooLarge { length: usize, max: usize },
+    PayloadTooLarge {
+        /// Observed byte length.
+        length: usize,
+        /// Configured ceiling in bytes.
+        max: usize,
+    },
     /// Text frame or close reason is not valid UTF-8.
     InvalidUtf8,
     /// Handshake negotiation failed (non-101 status, invalid headers, or key mismatch).
@@ -39,6 +49,7 @@ impl fmt::Display for WsError {
 impl std::error::Error for WsError {}
 
 impl WsError {
+    /// Construct a [`WsError::Protocol`] with a message and close code.
     pub fn protocol(msg: impl Into<String>, code: CloseCode) -> Self {
         Self::Protocol {
             message: msg.into(),

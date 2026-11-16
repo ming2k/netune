@@ -33,15 +33,25 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Diagnosis {
+    /// Unique trace identifier from `TraceMeta`.
     pub trace_id: String,
+    /// Terminal outcome of the traced attempt or connection.
     pub outcome: Outcome,
+    /// Primary terminal diagnostic record, if any failure occurred.
     pub terminal: Option<DiagnosticRecord>,
+    /// Last transport phase observed in the trace.
     pub last_phase: DiagnosticPhase,
+    /// Overall retry verdict derived from the terminal diagnostic.
     pub retry: RetryVerdict,
+    /// Number of retained events in the log.
     pub event_count: usize,
+    /// Events evicted because the ring buffer filled.
     pub dropped_events: u32,
+    /// Diagnostic records evicted because the diagnostic table filled.
     pub dropped_diagnostics: u32,
+    /// Fidelity level achieved by the trace.
     pub fidelity: Fidelity,
+    /// Actionable diagnostic checks suggested for operators.
     pub next_checks: Vec<String>,
 }
 

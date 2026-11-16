@@ -68,9 +68,13 @@ impl Tap for NoTap {
 /// [`Ring`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counters {
+    /// Total bytes read from the underlying stream.
     pub read_bytes: u64,
+    /// Total bytes written to the underlying stream.
     pub write_bytes: u64,
+    /// Number of read operations that moved at least 1 byte.
     pub reads: u64,
+    /// Number of write operations that moved at least 1 byte.
     pub writes: u64,
 }
 
@@ -109,14 +113,17 @@ impl Tap for Counters {
 pub struct TapLog(EventLog);
 
 impl TapLog {
+    /// Number of retained events in this tap log.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Whether no events were recorded.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Number of events evicted due to ring capacity.
     pub fn dropped(&self) -> u32 {
         self.0.dropped()
     }

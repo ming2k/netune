@@ -181,10 +181,9 @@ async fn guide_trace_what_happened() {
 async fn guide_limits() {
     use netune::WsLimits;
 
-    let limits = WsLimits {
-        max_frame_bytes: 1024 * 1024,
-        max_message_bytes: 4 * 1024 * 1024,
-    };
+    let limits = WsLimits::default()
+        .with_max_frame_bytes(1024 * 1024)
+        .with_max_message_bytes(4 * 1024 * 1024);
     assert_eq!(limits.max_frame_bytes, 1024 * 1024);
 }
 

@@ -164,8 +164,11 @@ impl DatagramTransport for ConnectedUdp {
 /// datagram for the same reason a TCP socket needs it before its `SYN`).
 #[derive(Debug, Clone)]
 pub struct UdpConnector<R: DnsResolver = SystemResolver> {
+    /// Egress confinement policy enforced prior to creating/connecting the UDP socket.
     pub confinement: EgressConfinement,
+    /// DNS resolver used for target hostnames.
     pub resolver: Arc<R>,
+    /// Socket tuning applied before connecting.
     pub socket_config: SocketConfig,
     /// Upper bound on the resolution phase. A datagram has no handshake to
     /// time out on, so only resolution is bounded here; the caller owns the
@@ -180,6 +183,7 @@ impl Default for UdpConnector<SystemResolver> {
 }
 
 impl UdpConnector<SystemResolver> {
+    /// Create a UDP connector with unrestricted confinement and the system DNS resolver.
     pub fn new() -> Self {
         Self {
             confinement: EgressConfinement::Unrestricted,
@@ -189,6 +193,7 @@ impl UdpConnector<SystemResolver> {
         }
     }
 
+    /// Create a UDP connector enforcing [`EgressConfinement::StrictPublic`].
     pub fn strict_public() -> Self {
         Self {
             confinement: EgressConfinement::StrictPublic,
@@ -198,6 +203,7 @@ impl UdpConnector<SystemResolver> {
 }
 
 impl<R: DnsResolver> UdpConnector<R> {
+    /// Create a UDP connector using a custom [`DnsResolver`].
     pub fn with_resolver(resolver: Arc<R>) -> Self {
         Self {
             confinement: EgressConfinement::Unrestricted,
@@ -207,11 +213,13 @@ impl<R: DnsResolver> UdpConnector<R> {
         }
     }
 
+    /// Apply custom [`SocketConfig`] options to newly created UDP sockets.
     pub fn with_socket_config(mut self, config: SocketConfig) -> Self {
         self.socket_config = config;
         self
     }
 
+    /// Bound DNS resolution for UDP targets.
     pub fn with_connect_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.connect_timeout = timeout;
         self

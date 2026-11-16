@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -64,6 +64,13 @@ pub struct TlsRouterConnector<C: Connector> {
     /// A caller-supplied rustls configuration. `None` uses the platform
     /// verifier with safe defaults.
     rustls_config: Option<Arc<rustls::ClientConfig>>,
+    /// ALPN protocols offered when `rustls_config` is `None`. Defaults to
+    /// `["http/1.1"]`; use [`Self::with_rustls_alpn`] (or [`crate::Client::builder`])
+    /// to offer `["h2", "http/1.1"]`.
+    rustls_alpn: Vec<Vec<u8>>,
+    /// Cached platform-verifier `rustls::ClientConfig` built once on demand so
+    /// root store loading and TLS session resumption persist across connections.
+    cached_platform_config: OnceLock<Result<Arc<rustls::ClientConfig>, String>>,
     /// The owned engine was selected explicitly (for example by a pinned
     /// verifier or a profile), so the default rustls path is not used.
     force_owned: bool,
@@ -73,16 +80,42 @@ pub struct TlsRouterConnector<C: Connector> {
 }
 
 impl<C: Connector> TlsRouterConnector<C> {
+    /// Wrap `inner` with the default audited rustls + platform-verifier path
+    /// (offering `http/1.1` ALPN; call [`Self::with_rustls_alpn`] to enable `h2`
+    /// negotiation).
     pub fn new(inner: C) -> Self {
         Self {
             inner,
             custom: HashMap::new(),
             verifier: netune_tls::Verifier::WebpkiRoots,
             rustls_config: None,
+            rustls_alpn: vec![b"http/1.1".to_vec()],
+            cached_platform_config: OnceLock::new(),
             force_owned: false,
             handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
             session_cache: netune_tls::session::SessionCache::new(),
         }
+    }
+
+    /// Construct a [`TlsRouterConnector`] using the audited rustls platform
+    /// verifier with default ALPN (`http/1.1`).
+    ///
+    /// Identical to [`Self::new`], named explicitly for callers documenting
+    /// production trust policy.
+    pub fn platform_default(inner: C) -> Self {
+        Self::new(inner)
+    }
+
+    /// Set the ALPN protocols advertised by the default rustls platform-verifier
+    /// configuration (ignored if [`Self::with_rustls_config`] was supplied).
+    ///
+    /// Pass `vec![b"h2".to_vec(), b"http/1.1".to_vec()]` when pairing with
+    /// [`crate::ClientConfig::enable_http2`] so ALPN can negotiate HTTP/2.
+    #[must_use]
+    pub fn with_rustls_alpn(mut self, alpn: Vec<Vec<u8>>) -> Self {
+        self.rustls_alpn = alpn;
+        self.cached_platform_config = OnceLock::new();
+        self
     }
 
     /// Replace the handshake bound. `None` removes it; only do that when an
@@ -291,23 +324,22 @@ impl<C: Connector> TlsRouterConnector<C> {
 
         let config = match &self.rustls_config {
             Some(config) => Arc::clone(config),
-            None => {
-                let mut config =
-                    rustls::ClientConfig::with_platform_verifier().map_err(|error| {
-                        NetError::Connect(ConnectError::config(
-                            DiagnosticPhase::Tls,
-                            format!("rustls platform verifier: {error}"),
-                        ))
-                    })?;
-                if config.alpn_protocols.is_empty() {
-                    // The connector cannot see ClientConfig::enable_http2, so
-                    // the default must be the conservative H1-only offer. A
-                    // caller that needs h2 supplies a rustls config (or uses
-                    // the owned profile path).
-                    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-                }
-                Arc::new(config)
-            }
+            None => self
+                .cached_platform_config
+                .get_or_init(|| {
+                    rustls::ClientConfig::with_platform_verifier()
+                        .map(|mut config| {
+                            if config.alpn_protocols.is_empty() {
+                                config.alpn_protocols = self.rustls_alpn.clone();
+                            }
+                            Arc::new(config)
+                        })
+                        .map_err(|error| format!("rustls platform verifier: {error}"))
+                })
+                .clone()
+                .map_err(|message| {
+                    NetError::Connect(ConnectError::config(DiagnosticPhase::Tls, message))
+                })?,
         };
         let connector = tokio_rustls::TlsConnector::from(config);
         let domain = ServerName::try_from(server_name.clone()).map_err(|error| {

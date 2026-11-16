@@ -23,23 +23,35 @@ Every crate is lockstep-versioned from a single source of truth:
 | `crates/*/Cargo.toml` → `version.workspace = true` | Inherits it; never hard-code a literal |
 | Internal `path` dependencies carrying a `version` | Must be re-pinned to the new number |
 
-Version policy: the project currently publishes from the `0.0.x` line, where Cargo treats every patch as a breaking change (`^0.0.1` matches only `0.0.1`), so consumers must pin an exact `tag` or `rev`. Moving to `0.1.0` is what relaxes that. Additive and behavioural changes ship as the next `0.0.z`.
+Version policy: starting at **`0.1.0` (GA)**, the **Stable** tier follows
+pre-1.0 SemVer discipline:
+
+- **Patch releases (`0.1.z`)** fix bugs, regressions, and security issues only
+  without breaking Stable public APIs.
+- **Minor releases (`0.y.0`)** introduce additive APIs and documented breaking or
+  behavioral changes cleanly.
+- **Preview & Experimental** crates remain opt-in and may still evolve between
+  `0.x` releases when documented in `CHANGELOG.md`.
+
+Prior `0.0.x` tags treated every patch as potentially breaking under Cargo's
+initial `0.0.z` resolver semantics. Consumers should pin exact tags or use
+`^0.1.0` once on GA.
 
 ---
 
 ## 2. Tag Convention
 
-- Format: `vMAJOR.MINOR.PATCH` (e.g. `v0.0.1`), always an **annotated** tag.
+- Format: `vMAJOR.MINOR.PATCH` (e.g. `v0.1.0`), always an **annotated** (and SSH/GPG-signed where keys are configured) tag.
 - Cut the tag on the release commit (the version-bump + `CHANGELOG.md` commit):
 
   ```bash
-  git tag -a v0.0.2 -m "netune 0.0.2: <one-line summary>"
+  git tag -s v0.1.0 -m "netune 0.1.0: GA release"
+  git verify-tag v0.1.0
   git push origin main --follow-tags
   ```
 
-- The tag version must equal `[workspace.package] version`. The `Release` workflow aborts before creating anything if the two disagree.
-- The `CHANGELOG.md` section for that version becomes the release body; a tag with no matching section fails the workflow.
-- Tags are immutable once pushed. A wrong tag is deleted and re-created on a corrected commit — nothing is distributed by the tag itself, so this is cheap.
+- The CI `Release` workflow verifies the tag is a real annotated/signed tag object (`refs/tags/<tag>^{tag}`), verifies it matches `[workspace.package] version`, generates a CycloneDX SBOM asset (`cargo cyclonedx`), and creates the GitHub Release from `CHANGELOG.md`.
+- Tags are immutable once pushed. A wrong tag is deleted and re-created on a corrected commit only before external consumption — nothing is published to a crate registry, so forward patch tags are preferred.
 
 ---
 
@@ -77,11 +89,16 @@ The crates were published to crates.io once (`0.0.1` for five of them, `0.0.2` f
    cargo fmt --check
    ```
 
-7. Dry-run the packaging for every crate and confirm it succeeds (section 5):
+7. Dry-run packaging and SemVer API checks before tagging:
 
    ```bash
-   cargo package --list --allow-dirty -p netune-trace   # repeat for each crate
+   for manifest in crates/*/Cargo.toml; do
+     name="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$manifest" | head -1)"
+     grep -q '^publish *= *false' "$manifest" || cargo package --list --allow-dirty -p "$name" >/dev/null
+   done
    ```
+
+   For post-`0.1.0` releases, run `cargo semver-checks check-release --baseline-rev v0.1.0` on Stable crates to verify zero unintended breaking changes in patch/minor releases.
 
 8. Commit as `netune X.Y.Z: <one-line summary>`, then create and push the annotated tag (section 2).
 9. Watch the `Release` workflow: it creates the GitHub Release from the changelog. Spot-check the body.

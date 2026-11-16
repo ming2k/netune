@@ -21,6 +21,18 @@
 //! that could drift apart. A single pure leaf is the mechanism that keeps the
 //! rule stated once (`AGENTS.md`: "Mechanisms over exhortations").
 //!
+//! # Example
+//!
+//! ```rust
+//! use std::net::IpAddr;
+//! use netune_egress::{EgressConfinement, is_public_ip};
+//!
+//! let public: IpAddr = "93.184.216.34".parse().unwrap();
+//! let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+//! assert!(is_public_ip(public));
+//! assert!(EgressConfinement::StrictPublic.check(loopback).is_err());
+//! ```
+//!
 //! # What it does not do
 //!
 //! It does not resolve names, does not open a socket, and does not decide
@@ -31,6 +43,7 @@
 //! ordering.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![deny(missing_docs)]
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

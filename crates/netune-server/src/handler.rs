@@ -67,6 +67,7 @@ impl BodyStream for tokio::sync::mpsc::Receiver<Bytes> {
 }
 
 /// The body of a response the transport writes.
+#[non_exhaustive]
 pub enum ResponseBody {
     /// No body at all.
     Empty,
@@ -99,9 +100,12 @@ impl ResponseBody {
 }
 
 /// What a handler produces: a head plus the body that goes with it.
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct Response {
+    /// Response status line and headers.
     pub head: ResponseHead,
+    /// Response body payload or stream.
     pub body: ResponseBody,
 }
 

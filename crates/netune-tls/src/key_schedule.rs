@@ -92,7 +92,7 @@ pub struct Secret {
 
 impl Drop for Secret {
     fn drop(&mut self) {
-        self.bytes.fill(0);
+        crate::zeroize::wipe(&mut self.bytes);
     }
 }
 
@@ -111,8 +111,8 @@ pub struct TrafficKeys {
 
 impl Drop for TrafficKeys {
     fn drop(&mut self) {
-        self.key.fill(0);
-        self.iv.fill(0);
+        crate::zeroize::wipe(&mut self.key);
+        crate::zeroize::wipe(&mut self.iv);
     }
 }
 

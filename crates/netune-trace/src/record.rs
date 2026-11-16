@@ -62,10 +62,15 @@ pub trait TraceSink: Send + Sync + std::fmt::Debug {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraceSummary {
+    /// Total number of events retained or seen when the trace finished.
     pub events: usize,
+    /// Events evicted by the ring buffer before completion.
     pub dropped_events: u32,
+    /// Number of diagnostic records retained.
     pub diagnostics: usize,
+    /// Diagnostic records evicted before completion.
     pub dropped_diagnostics: u32,
+    /// Events declined by the attached [`TraceSink`].
     pub sink_dropped: u32,
 }
 
@@ -467,6 +472,7 @@ pub struct TraceCollector {
 }
 
 impl TraceCollector {
+    /// Begin an egress trace with default identity and ring capacity.
     pub fn start(capacity: usize) -> Self {
         Self::start_with_meta(TraceMeta::egress(), capacity)
     }
@@ -479,6 +485,7 @@ impl TraceCollector {
         }
     }
 
+    /// Begin an ingress trace with default identity and ring capacity.
     pub fn start_ingress(capacity: usize) -> Self {
         Self::start_ingress_with_meta(TraceMeta::ingress(), capacity)
     }
@@ -493,6 +500,7 @@ impl TraceCollector {
         }
     }
 
+    /// Construct a disabled timeline collector that records only diagnostics.
     pub fn disabled() -> Self {
         Self::disabled_with_meta(TraceMeta::egress())
     }
@@ -505,6 +513,7 @@ impl TraceCollector {
         }
     }
 
+    /// Attach a real-time [`TraceSink`] when the collector is enabled.
     #[must_use]
     pub fn with_sink(self, sink: Arc<dyn TraceSink>) -> Self {
         if self.enabled {
@@ -516,6 +525,7 @@ impl TraceCollector {
         self
     }
 
+    /// Monotonic origin instant of the trace.
     pub fn origin(&self) -> Instant {
         self.inner
             .lock()
@@ -523,6 +533,7 @@ impl TraceCollector {
             .origin()
     }
 
+    /// Configured event ring capacity.
     pub fn capacity(&self) -> usize {
         self.inner
             .lock()
@@ -530,10 +541,12 @@ impl TraceCollector {
             .capacity()
     }
 
+    /// Whether event recording is enabled (`Observation::Traced`).
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
 
+    /// Return the configured live [`TraceSink`], if any.
     pub fn sink(&self) -> Option<Arc<dyn TraceSink>> {
         self.inner
             .lock()
@@ -541,6 +554,7 @@ impl TraceCollector {
             .sink()
     }
 
+    /// Elapsed nanoseconds since the trace origin.
     pub fn now_ns(&self) -> u64 {
         self.inner
             .lock()
@@ -685,6 +699,7 @@ impl TraceCollector {
             .mark_stream(stream, kind, a, b);
     }
 
+    /// Record a parsed/emitted application frame event.
     pub fn frame(&self, class: FrameClass, units: u32) {
         self.inner
             .lock()
@@ -692,6 +707,7 @@ impl TraceCollector {
             .frame(class, units);
     }
 
+    /// Record [`EventKind::ConnectReused`].
     pub fn reused_connection(&self) {
         self.inner
             .lock()
@@ -699,6 +715,7 @@ impl TraceCollector {
             .reused_connection();
     }
 
+    /// Record a `TCP_INFO` RTT and retransmit reading.
     pub fn tcp_info(&self, rtt_us: u32, retransmits: u32) {
         self.inner
             .lock()
@@ -706,6 +723,7 @@ impl TraceCollector {
             .tcp_info(rtt_us, retransmits);
     }
 
+    /// Record completion of an inbound request head (`bytes` read).
     pub fn request_head(&self, bytes: usize) {
         self.inner
             .lock()
@@ -713,6 +731,7 @@ impl TraceCollector {
             .request_head(bytes);
     }
 
+    /// Record completion of an inbound request body (`bytes` read).
     pub fn request_body_end(&self, bytes: usize) {
         self.inner
             .lock()
@@ -720,6 +739,7 @@ impl TraceCollector {
             .request_body_end(bytes);
     }
 
+    /// Record handler completion with HTTP `status`.
     pub fn handler_end(&self, status: u16) {
         self.inner
             .lock()
@@ -727,6 +747,7 @@ impl TraceCollector {
             .handler_end(status);
     }
 
+    /// Record completion of an outbound response (`bytes` written).
     pub fn response_end(&self, bytes: usize) {
         self.inner
             .lock()
@@ -757,6 +778,7 @@ impl TraceCollector {
             .clone()
     }
 
+    /// Number of events evicted from the underlying ring buffer.
     pub fn dropped(&self) -> u32 {
         self.inner
             .lock()

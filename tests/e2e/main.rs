@@ -16,6 +16,7 @@ mod quic_owned_endpoint;
 mod quic_owned_server;
 mod quic_transport;
 mod request_lifecycle;
+mod soak;
 mod tls;
 mod websocket;
 mod websocket_guide;

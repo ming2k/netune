@@ -307,10 +307,7 @@ async fn a_head_that_never_comes_trips_the_bound_and_returns_evidence() {
         .reply(MockResponse::ok("late").delay_head(Duration::from_secs(30)));
     let client = client_with(
         &mock,
-        ClientConfig {
-            response_head_timeout: Some(Duration::from_millis(30)),
-            ..ClientConfig::default()
-        },
+        ClientConfig::default().with_response_head_timeout(Some(Duration::from_millis(30))),
     );
 
     let error = client
@@ -349,11 +346,9 @@ async fn a_trickling_body_trips_the_total_attempt_bound() {
     );
     let client = client_with(
         &mock,
-        ClientConfig {
-            request_timeout: Some(Duration::from_millis(70)),
-            body_idle_timeout: Some(Duration::from_secs(5)),
-            ..ClientConfig::default()
-        },
+        ClientConfig::default()
+            .with_request_timeout(Some(Duration::from_millis(70)))
+            .with_body_idle_timeout(Some(Duration::from_secs(5))),
     );
 
     let mut response = client
@@ -385,10 +380,7 @@ async fn a_body_that_goes_quiet_trips_the_idle_bound_but_a_long_one_does_not() {
     );
     let client = client_with(
         &mock,
-        ClientConfig {
-            body_idle_timeout: Some(Duration::from_millis(60)),
-            ..ClientConfig::default()
-        },
+        ClientConfig::default().with_body_idle_timeout(Some(Duration::from_millis(60))),
     );
 
     let (_, body) = get(&client, &target(), "/steady").await;

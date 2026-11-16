@@ -45,8 +45,20 @@
 //! by a test. Gaps longer than 4.29 s are carried losslessly by a
 //! [`EventKind::TimeJump`] record (see the `log` module). A 10 000-event turn
 //! is ~200 KB, bounded by a ring buffer that counts what it drops.
+//!
+//! # Example
+//!
+//! ```rust
+//! use netune_trace::{EventKind, TraceCollector};
+//!
+//! let collector = TraceCollector::start(64);
+//! collector.mark(EventKind::Dispatch, 0, 0);
+//! assert!(collector.is_enabled());
+//! assert_eq!(collector.capacity(), 64);
+//! ```
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![deny(missing_docs)]
 
 mod derive;
 mod derive_ingress;

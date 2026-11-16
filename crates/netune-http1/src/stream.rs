@@ -26,6 +26,7 @@ use crate::head::BodyKind;
 /// One `Limits` type serves both roles. A server and a client disagree about the
 /// *values* they should use, never about which quantities must be bounded — an
 /// unbounded head is a memory exhaustion vector in either direction.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// Maximum bytes of start line plus headers.
@@ -80,6 +81,41 @@ impl Limits {
             max_body_bytes: 64 * 1024 * 1024,
             require_crlf: true,
         }
+    }
+
+    /// Set the maximum bytes of start line plus headers.
+    #[must_use]
+    pub const fn with_max_head_bytes(mut self, max_head_bytes: usize) -> Self {
+        self.max_head_bytes = max_head_bytes;
+        self
+    }
+
+    /// Set the maximum number of header fields.
+    #[must_use]
+    pub const fn with_max_headers(mut self, max_headers: usize) -> Self {
+        self.max_headers = max_headers;
+        self
+    }
+
+    /// Set the maximum size of a single chunk.
+    #[must_use]
+    pub const fn with_max_chunk_bytes(mut self, max_chunk_bytes: u64) -> Self {
+        self.max_chunk_bytes = max_chunk_bytes;
+        self
+    }
+
+    /// Set the maximum cumulative body bytes per message.
+    #[must_use]
+    pub const fn with_max_body_bytes(mut self, max_body_bytes: u64) -> Self {
+        self.max_body_bytes = max_body_bytes;
+        self
+    }
+
+    /// Require strict CRLF line terminators (`true` for servers).
+    #[must_use]
+    pub const fn with_require_crlf(mut self, require_crlf: bool) -> Self {
+        self.require_crlf = require_crlf;
+        self
     }
 }
 

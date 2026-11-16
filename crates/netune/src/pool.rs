@@ -33,6 +33,7 @@ const MIN_REAPER_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_REAPER_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Pool policy.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolConfig {
     /// Idle connections retained per authority key.
@@ -73,6 +74,43 @@ impl Default for PoolConfig {
     }
 }
 
+impl PoolConfig {
+    /// Set the per-authority idle connection cap.
+    #[must_use]
+    pub fn with_max_idle_per_authority(mut self, cap: usize) -> Self {
+        self.max_idle_per_authority = cap;
+        self
+    }
+
+    /// Set the global idle connection cap (`0` disables pooling).
+    #[must_use]
+    pub fn with_max_idle_total(mut self, cap: usize) -> Self {
+        self.max_idle_total = cap;
+        self
+    }
+
+    /// Set the per-authority concurrent in-flight limit.
+    #[must_use]
+    pub fn with_max_in_flight_per_authority(mut self, cap: Option<usize>) -> Self {
+        self.max_in_flight_per_authority = cap;
+        self
+    }
+
+    /// Set the global concurrent in-flight limit.
+    #[must_use]
+    pub fn with_max_in_flight_total(mut self, cap: Option<usize>) -> Self {
+        self.max_in_flight_total = cap;
+        self
+    }
+
+    /// Set how long an idle connection may be reused.
+    #[must_use]
+    pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle_timeout = timeout;
+        self
+    }
+}
+
 /// Which idle single-owner protocol a pooled socket speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Protocol {
@@ -93,6 +131,7 @@ pub struct Http1Idle {
 
 /// A connection taken from the pool.
 pub enum IdleConnection {
+    /// An idle HTTP/1.1 keep-alive connection.
     Http1(Http1Idle),
 }
 
@@ -257,11 +296,14 @@ fn current_runtime_id() -> Option<RuntimeId> {
 /// rather than a convention.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PoolKey {
+    /// Authority (`host:port`) of the peer.
     pub authority: String,
+    /// Connection-fixed TLS/wire/route identity.
     pub identity: ConnectionIdentity,
 }
 
 impl PoolKey {
+    /// Construct a [`PoolKey`] from `authority` and `identity`.
     pub fn new(authority: impl Into<String>, identity: ConnectionIdentity) -> Self {
         Self {
             authority: authority.into(),
@@ -543,6 +585,7 @@ impl Default for Pool {
 }
 
 impl Pool {
+    /// Create a pool governed by `config`.
     pub fn new(config: PoolConfig) -> Self {
         let global_in_flight = config
             .max_in_flight_total
@@ -556,6 +599,7 @@ impl Pool {
         }
     }
 
+    /// Return this pool's configuration.
     pub fn config(&self) -> PoolConfig {
         self.inner.config
     }

@@ -46,6 +46,7 @@ use crate::handler::Handler;
 /// exchange is visible in the log as its own run of events — tagged with its stream identity when the
 /// protocol multiplexed them. Derive with [`netune_trace::derive_ingress_exchanges`] for the
 /// per-exchange view.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct IngressTrace {
     /// Identity, direction, start time and build provenance.
@@ -68,6 +69,7 @@ pub struct IngressTrace {
 }
 
 /// Which protocol a connection was served with.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServedProtocol {
     /// HTTP/1.1.
@@ -79,6 +81,7 @@ pub enum ServedProtocol {
 }
 
 impl ServedProtocol {
+    /// Short protocol identifier (`"http/1.1"`, `"h2"`, or `"h3"`).
     pub const fn label(self) -> &'static str {
         match self {
             Self::Http1 => "http/1.1",
@@ -89,6 +92,7 @@ impl ServedProtocol {
 }
 
 /// Why a server could not be bound.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum BindError {
     /// The address could not be bound.
@@ -258,6 +262,9 @@ impl Server {
                         drop(stream);
                         continue;
                     };
+                    if config.nodelay {
+                        let _ = stream.set_nodelay(true);
+                    }
                     let handler = Arc::clone(&handler);
                     let config = Arc::clone(&config);
                     let drain = drain_rx.clone();

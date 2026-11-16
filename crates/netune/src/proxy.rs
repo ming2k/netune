@@ -34,13 +34,17 @@ pub enum Proxy {
     /// (`http://user:pass@host:port`). An `https://` URL is refused, not
     /// downgraded.
     Http {
+        /// Proxy `host:port` authority.
         authority: String,
+        /// Optional `(username, password)` basic-auth credentials.
         credentials: Option<(String, String)>,
     },
     /// SOCKS5 (`socks5://user:pass@host:port`); `socks5h` is treated as SOCKS5
     /// with remote name resolution, which is what we ask for anyway.
     Socks5 {
+        /// Proxy `host:port` authority.
         authority: String,
+        /// Optional `(username, password)` username/password authentication.
         credentials: Option<(String, String)>,
     },
 }
@@ -117,6 +121,7 @@ pub struct ProxyConnector<C: Connector> {
 }
 
 impl<C: Connector> ProxyConnector<C> {
+    /// Wrap `inner` to tunnel outbound connections through `proxy`.
     pub fn new(inner: C, proxy: Proxy) -> Self {
         Self {
             inner,

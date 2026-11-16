@@ -7,7 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-16
+
+First Generally Available (GA) release of the **Stable** tier (`netune`,
+`netune-server` HTTP/1.1 & HTTP/2, `netune-http1`, `netune-http2`, `netune-ws`,
+`netune-io`, `netune-egress`, `netune-trace`, and `netune-diagnostics`). HTTP/3,
+owned TLS (`netune-tls`), and `netune-probe` remain **Preview**;
+`netune-webtransport` remains **Experimental**.
+
+See [Migrating to 0.1.0](docs/reference/migration-0.1.0.md) for upgrade guidance.
+
+### Added
+
+- `netune`: `Client::builder()` / `ClientBuilder`, `TlsRouterConnector::platform_default()`, `TlsRouterConnector::with_rustls_alpn()`, and process-wide cached platform verifier roots (`OnceLock`). Calling `ClientBuilder::http2(true)` automatically synchronizes `ClientConfig::enable_http2` with rustls ALPN `["h2", "http/1.1"]`.
+- `netune-http2` & `netune-server`: bidirectional independent differential oracle suites against `h2` (`crates/netune-http2/tests/differential.rs`, `crates/netune-server/tests/h2_oracle.rs`) covering `HEADERS`/`CONTINUATION`, HPACK dynamic table, `SETTINGS`, `WINDOW_UPDATE`, concurrent streams, trailers, early `RST_STREAM`, `GOAWAY`, and stray `CONTINUATION` rejection.
+- `netune-server`: `ServerConfig::nodelay` (default `true`, setting `TCP_NODELAY` on accepted connections to eliminate Linux 40 ms delayed-ACK keep-alive stalls).
+- `benches/baseline.rs` and `tests/e2e/soak.rs`: reproducible transport throughput/latency baseline (HTTP/1.1 pool/cold/duplex, mutex split vs `into_split`, HTTP/2 multiplexed, optional HTTP/3) and scheduled resource/FD/RSS churn soak tests.
+- Coverage-guided `cargo-fuzz` libFuzzer + ASan harnesses inside `crates/{netune-http1,netune-http2,netune-http3,netune-quic,netune-tls}/fuzz/` plus CI MSRV (`1.95.0`) enforcement, feature-isolation matrix, `cargo package --list`, `cargo audit`, CycloneDX SBOM generation, and Dependabot configuration.
+- Documentation: `docs/reference/migration-0.1.0.md`, `docs/how-to/production-operations.md`, and `0.1.0` GA SemVer + Linux Tier-1 support matrix in `docs/reference/stability.md`.
+
+### Changed
+
+- **Breaking (pre-GA clean break):** Core public structs and enums across all Stable crates are now `#[non_exhaustive]` with `with_*` builder methods (`ClientConfig`, `PoolConfig`, `ServerConfig`, `Limits`, `ws::Limits`, `NetError`, `ConnectErrorKind`, `ResolveErrorKind`, `HttpProtocol`, `Observation`, `BodyState`, `RequestBody`, `Target`, `Request`, `Response`, `Established`, `Released`, `Exchange`, `H2Error`, `DiagnosticPhase`, `RetryVerdict`, `EventKind`, `ConnectionIdentity`).
+- **Breaking:** `#![deny(missing_docs)]` is enforced on all 9 Stable crates (and `netune-tls`).
+- `netune-http3` (Preview): `H3RequestBody::split()` returns `(H3ResponseFuture, H3SplitSender)`, separating streaming send operations from connection-level datagrams.
+- `netune-tls` (Preview): consolidated all `unsafe` FFI and `volatile_zeroize` memory wiping into `crates/netune-tls/src/ffi.rs` and `zeroize.rs` under `#![deny(unsafe_op_in_unsafe_fn)]`, with `Drop` zeroization on `ClientHandshake` and verified under AddressSanitizer.
+
+### Fixed
+
+- `netune`: H1 full-duplex `SplitHandle::release()` synchronously swaps `SocketTap::Off` when tearing down an unpooled/aborted exchange (including via an `ExchangeCleanup` guard around `select!`), guaranteeing complete `Body::trace()` socket timelines on early responses, half-read body drops, and upload task aborts without returning half-written connections to the pool.
+
 ## [0.0.35] - 2026-11-16
+
+Release pipeline validation tag (`0.0.x` RC line).
 
 ## [0.0.34] - 2026-11-16
 

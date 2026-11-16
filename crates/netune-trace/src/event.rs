@@ -10,6 +10,7 @@
 ///
 /// Discriminants are stable: they are the persisted code for a kind, so a kind
 /// may be added but never renumbered.
+#[non_exhaustive]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -17,19 +18,23 @@
 pub enum EventKind {
     /// Origin of the trace: the caller dispatched the request. Always at offset 0.
     Dispatch = 0,
-    /// Name resolution begins / ends. Absent on a reused connection.
+    /// Name resolution begins (`DnsStart`) / ends (`DnsEnd`). Absent on a reused connection.
     DnsStart = 1,
+    /// Name resolution completed.
     DnsEnd = 2,
-    /// TCP connect begins / ends (`SYN` sent → connection established).
+    /// TCP connect begins (`SYN` sent).
     TcpStart = 3,
+    /// TCP connect completed (connection established).
     TcpEnd = 4,
-    /// TLS handshake begins / ends. `a` = 1 when the session was resumed.
+    /// TLS handshake begins (`a` = 1 when the session was resumed).
     TlsStart = 5,
+    /// TLS handshake completed.
     TlsEnd = 6,
     /// The connection came from the pool: no DNS/TCP/TLS phases occurred.
     ConnectReused = 7,
-    /// Request bytes handed to the kernel / fully written. `a` = bytes.
+    /// Request write started.
     RequestWriteStart = 8,
+    /// Request bytes handed to the kernel / fully written (`a` = bytes).
     RequestWriteEnd = 9,
     /// One successful socket read. `a` = bytes, `b` = [`TimeSource`] code.
     Read = 10,
@@ -277,10 +282,12 @@ pub enum TimeSource {
 }
 
 impl TimeSource {
+    /// Numeric wire code for this time source.
     pub const fn code(self) -> u8 {
         self as u8
     }
 
+    /// Decode a [`TimeSource`] from its numeric code.
     pub const fn from_code(code: u8) -> Option<Self> {
         Some(match code {
             0 => Self::Syscall,
@@ -302,6 +309,7 @@ impl TimeSource {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum FrameClass {
+    /// Unclassified frame.
     #[default]
     Unknown = 0,
     /// Preamble: a frame that opens the exchange and carries no payload yet.
@@ -319,10 +327,12 @@ pub enum FrameClass {
 }
 
 impl FrameClass {
+    /// Numeric wire code for this frame class.
     pub const fn code(self) -> u8 {
         self as u8
     }
 
+    /// Decode a [`FrameClass`] from its numeric code.
     pub const fn from_code(code: u8) -> Option<Self> {
         Some(match code {
             0 => Self::Unknown,
@@ -344,17 +354,22 @@ impl FrameClass {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Alpn {
+    /// Unknown or absent ALPN protocol.
     #[default]
     Unknown = 0,
+    /// HTTP/1.1 (`http/1.1`).
     Http11 = 1,
+    /// HTTP/2 (`h2`).
     H2 = 2,
 }
 
 impl Alpn {
+    /// Numeric code for this ALPN selection.
     pub const fn code(self) -> u8 {
         self as u8
     }
 
+    /// Decode an [`Alpn`] from its numeric code.
     pub const fn from_code(code: u8) -> Option<Self> {
         Some(match code {
             0 => Self::Unknown,
@@ -380,6 +395,7 @@ impl Alpn {
 pub struct Event {
     /// Nanoseconds since dispatch (the trace origin).
     pub at_ns: u64,
+    /// Event kind.
     pub kind: EventKind,
     /// Which exchange on the connection this event belongs to.
     ///

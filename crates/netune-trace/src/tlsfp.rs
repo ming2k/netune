@@ -134,6 +134,7 @@ impl ClientHello {
 /// original tooling hashed what was on the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ja3 {
+    /// Raw canonical JA3 fingerprint string before hashing.
     pub string: String,
     /// Lowercase hex MD5 digest of [`Ja3::string`].
     pub md5: String,
@@ -170,6 +171,7 @@ pub fn ja3(hello: &ClientHello) -> Option<Ja3> {
 /// The JA4 fingerprint (`t13d1516h2_8daaf6152771_b186095e22b6` shape).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ja4 {
+    /// Full JA4 fingerprint string (`a_b_c`).
     pub fingerprint: String,
     /// The TLS version the fingerprint reported (see the module notes).
     pub tls_version: u16,

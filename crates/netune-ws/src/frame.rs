@@ -4,11 +4,17 @@ use bytes::Bytes;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Opcode {
+    /// Continuation frame (`0x0`).
     Continuation = 0x0,
+    /// UTF-8 text data frame (`0x1`).
     Text = 0x1,
+    /// Binary data frame (`0x2`).
     Binary = 0x2,
+    /// Connection close control frame (`0x8`).
     Close = 0x8,
+    /// Ping control frame (`0x9`).
     Ping = 0x9,
+    /// Pong control frame (`0xA`).
     Pong = 0xA,
 }
 
@@ -42,6 +48,7 @@ impl Opcode {
 /// These live here, beside the decoder that enforces them (mirroring
 /// `netune-http1::Limits`): a limit is part of the codec's contract with the
 /// wire, not a transport policy.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     /// Maximum allowed payload size for a single frame (default 16 MiB).
@@ -56,6 +63,22 @@ impl Default for Limits {
             max_frame_bytes: 16 * 1024 * 1024,
             max_message_bytes: 64 * 1024 * 1024,
         }
+    }
+}
+
+impl Limits {
+    /// Set the maximum payload bytes per single WebSocket frame.
+    #[must_use]
+    pub const fn with_max_frame_bytes(mut self, max_frame_bytes: usize) -> Self {
+        self.max_frame_bytes = max_frame_bytes;
+        self
+    }
+
+    /// Set the maximum bytes for a reassembled multi-frame message.
+    #[must_use]
+    pub const fn with_max_message_bytes(mut self, max_message_bytes: usize) -> Self {
+        self.max_message_bytes = max_message_bytes;
+        self
     }
 }
 
@@ -107,9 +130,13 @@ pub enum Role {
 /// A decoded or in-flight WebSocket wire frame (RFC 6455 §5.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
+    /// Final fragment flag (`FIN`).
     pub fin: bool,
+    /// Extension reservation bits (`RSV1`, `RSV2`, `RSV3`).
     pub rsv: [bool; 3],
+    /// Frame opcode.
     pub opcode: Opcode,
+    /// Frame payload bytes (unmasked).
     pub payload: Bytes,
 }
 

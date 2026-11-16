@@ -4,6 +4,7 @@
 use std::fmt;
 
 /// A protocol, limit or transport failure while reading a response.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum HttpError {
     /// The peer's bytes are not valid HTTP/1.x.

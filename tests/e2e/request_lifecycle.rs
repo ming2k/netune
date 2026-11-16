@@ -696,3 +696,376 @@ async fn prewarming_primes_pool_for_zero_handshake_first_request() {
 
     let _ = server.await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn h1_full_duplex_server_closes_after_half_request_and_preserves_trace() {
+    use netune::RequestBodySource;
+
+    struct SlowChunks {
+        sent: usize,
+    }
+    impl RequestBodySource for SlowChunks {
+        fn next_chunk(&mut self) -> netune::BoxFuture<'_, Result<Option<Bytes>, netune::NetError>> {
+            Box::pin(async move {
+                if self.sent >= 100 {
+                    return Ok(None);
+                }
+                self.sent += 1;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Ok(Some(Bytes::from_static(b"upload-chunk-")))
+            })
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 256];
+        let _ = socket.read(&mut buf).await;
+        // Answer immediately after reading only part of the upload, then close.
+        socket
+            .write_all(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 9\r\nconnection: keep-alive\r\n\r\ntoo-large")
+            .await
+            .expect("write 413");
+        drop(socket);
+
+        // Expect a second connection because the half-written first one must NOT be pooled.
+        let accept2 = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+        if let Ok(Ok((mut s2, _))) = accept2 {
+            let mut req2 = Vec::new();
+            let mut b = [0u8; 1024];
+            while !req2.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = s2.read(&mut b).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                req2.extend_from_slice(&b[..n]);
+            }
+            let _ = s2
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                .await;
+        }
+    });
+
+    let pool = Pool::default();
+    let client = Client::new(TcpConnector::new(), pool.clone(), ClientConfig::default());
+    let target = Target::plain(address.to_string());
+
+    let mut resp = client
+        .request_traced(
+            &target,
+            RequestHead::new(Method::POST, "/half"),
+            RequestBody::stream(SlowChunks { sent: 0 }),
+            TraceConfig::default(),
+        )
+        .await
+        .expect("early 413 head");
+    assert_eq!(resp.head.status, http::StatusCode::PAYLOAD_TOO_LARGE);
+    let body = resp.body.read_to_end().await.expect("read 413 body");
+    assert_eq!(body.as_ref(), b"too-large");
+    let trace = resp
+        .body
+        .trace()
+        .expect("early response trace must be immediately complete");
+    assert!(trace.log.bytes_read() > 0, "socket reads must be present");
+    assert!(
+        trace.log.bytes_written() > 0,
+        "socket writes must be present"
+    );
+
+    // Next request must dial a fresh connection (not reuse the half-written one).
+    let mut resp2 = client
+        .request_traced(
+            &target,
+            RequestHead::new(Method::GET, "/after"),
+            None,
+            TraceConfig::default(),
+        )
+        .await
+        .expect("second request");
+    assert_eq!(resp2.head.status, http::StatusCode::OK);
+    let _ = resp2.body.read_to_end().await.expect("body 2");
+    let trace2 = resp2.body.trace().expect("trace 2");
+    assert_eq!(trace2.log.first_of(EventKind::ConnectReused), None);
+
+    server.await.expect("server join");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn h1_full_duplex_abandon_mid_response_cancels_upload_and_preserves_trace() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 256];
+        let _ = socket.read(&mut buf).await;
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n")
+            .await
+            .expect("first chunk");
+        // Keep streaming chunks until client disconnects.
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            if socket.write_all(b"5\r\nworld\r\n").await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel::<Result<Bytes, netune::NetError>>(4);
+    let uploader = tokio::spawn(async move {
+        loop {
+            if upload_tx
+                .send(Ok(Bytes::from_static(b"chunk")))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    let pool = Pool::default();
+    let client = Client::new(TcpConnector::new(), pool.clone(), ClientConfig::default());
+    let target = Target::plain(address.to_string());
+    let mut resp = client
+        .request_traced(
+            &target,
+            RequestHead::new(Method::POST, "/stream"),
+            RequestBody::stream(upload_rx),
+            TraceConfig::default(),
+        )
+        .await
+        .expect("head");
+    let first = resp
+        .body
+        .next_chunk()
+        .await
+        .expect("chunk 1")
+        .expect("some");
+    assert_eq!(first.as_ref(), b"hello");
+
+    // Abandon mid-response while upload is still active.
+    resp.body.abandon();
+    let trace = resp
+        .body
+        .trace()
+        .expect("abandoned body must synchronously return trace");
+    assert!(trace.log.bytes_read() > 0);
+    assert!(trace.log.bytes_written() > 0);
+    let key = client.pool_key(&target).expect("plan");
+    assert_eq!(
+        pool.idle_count(&key),
+        0,
+        "abandoned half-written conn must not pool"
+    );
+
+    uploader.abort();
+    let _ = uploader.await;
+    let _ = server.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn h1_full_duplex_upload_error_surfaces_and_never_pools() {
+    use netune::RequestBodySource;
+
+    struct FailingUpload {
+        step: usize,
+    }
+    impl RequestBodySource for FailingUpload {
+        fn next_chunk(&mut self) -> netune::BoxFuture<'_, Result<Option<Bytes>, netune::NetError>> {
+            Box::pin(async move {
+                self.step += 1;
+                if self.step == 1 {
+                    Ok(Some(Bytes::from_static(b"part1")))
+                } else {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Err(netune::NetError::Protocol(
+                        "simulated upload failure".into(),
+                    ))
+                }
+            })
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 512];
+        let _ = socket.read(&mut buf).await;
+        // Send response head while upload is about to fail, then wait before finishing body.
+        let _ = socket
+            .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n5\r\nfirst\r\n")
+            .await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let _ = socket.write_all(b"0\r\n\r\n").await;
+    });
+
+    let pool = Pool::default();
+    let client = Client::new(TcpConnector::new(), pool.clone(), ClientConfig::default());
+    let target = Target::plain(address.to_string());
+    let mut resp = client
+        .request_traced(
+            &target,
+            RequestHead::new(Method::POST, "/fail-upload"),
+            RequestBody::stream(FailingUpload { step: 0 }),
+            TraceConfig::default(),
+        )
+        .await
+        .expect("head arrived before upload error");
+    let first = resp
+        .body
+        .next_chunk()
+        .await
+        .expect("first chunk")
+        .expect("some");
+    assert_eq!(first.as_ref(), b"first");
+    // Wait for upload failure to propagate into next_chunk.
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let err = resp
+        .body
+        .read_to_end()
+        .await
+        .expect_err("upload failure must surface as AttemptError");
+    assert!(err.to_string().contains("simulated upload failure"));
+    let trace = err.trace();
+    assert!(trace.log.bytes_written() > 0, "error trace keeps writes");
+    let key = client.pool_key(&target).expect("plan");
+    assert_eq!(pool.idle_count(&key), 0, "failed upload must never pool");
+
+    let _ = server.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn h1_full_duplex_fault_io_split_delay_and_truncate_preserve_socket_trace() {
+    use netune::{Fault, FaultConnector, FaultScript};
+
+    // Case 1: Fault::Split + Fault::Delay on reads while upload streams concurrently.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 512];
+        let _ = socket.read(&mut buf).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 32\r\n\r\n0123456789abcdef0123456789abcdef",
+            )
+            .await
+            .expect("write body");
+    });
+
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel::<Result<Bytes, netune::NetError>>(4);
+    let uploader = tokio::spawn(async move {
+        loop {
+            if upload_tx
+                .send(Ok(Bytes::from_static(b"streaming")))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    let pool = Pool::default();
+    let connector = FaultConnector::new(TcpConnector::new(), |_| {
+        FaultScript::new([
+            (
+                0,
+                Fault::Split {
+                    span: 128,
+                    per_read: 5,
+                },
+            ),
+            (20, Fault::Delay(Duration::from_millis(15))),
+        ])
+    });
+    let client = Client::new(connector, pool.clone(), ClientConfig::default());
+    let target = Target::plain(address.to_string());
+    let mut resp = client
+        .request_traced(
+            &target,
+            RequestHead::new(Method::POST, "/fault-split"),
+            RequestBody::stream(upload_rx),
+            TraceConfig::default(),
+        )
+        .await
+        .expect("fault split head");
+    let body = resp.body.read_to_end().await.expect("fault split body");
+    assert_eq!(body.as_ref(), b"0123456789abcdef0123456789abcdef");
+    let trace = resp.body.trace().expect("fault split trace");
+    assert!(trace.log.bytes_read() > 0);
+    assert!(trace.log.bytes_written() > 0);
+    let key = client.pool_key(&target).expect("plan");
+    assert_eq!(pool.idle_count(&key), 0, "early response must not pool");
+    uploader.abort();
+    let _ = uploader.await;
+    let _ = server.await;
+
+    // Case 2: Fault::Truncate mid-response while upload is still active -> AttemptError keeps socket events.
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 512];
+        let _ = socket.read(&mut buf).await;
+        let _ = socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 64\r\n\r\npartial-payload")
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    });
+
+    let (upload_tx2, upload_rx2) = tokio::sync::mpsc::channel::<Result<Bytes, netune::NetError>>(4);
+    let uploader2 = tokio::spawn(async move {
+        loop {
+            if upload_tx2
+                .send(Ok(Bytes::from_static(b"streaming")))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    let pool2 = Pool::default();
+    let connector2 = FaultConnector::new(TcpConnector::new(), |_| {
+        FaultScript::new([(45, Fault::Truncate)])
+    });
+    let client2 = Client::new(connector2, pool2.clone(), ClientConfig::default());
+    let target2 = Target::plain(address.to_string());
+    let mut resp2 = client2
+        .request_traced(
+            &target2,
+            RequestHead::new(Method::POST, "/fault-truncate"),
+            RequestBody::stream(upload_rx2),
+            TraceConfig::default(),
+        )
+        .await
+        .expect("head before truncate");
+    let err = resp2
+        .body
+        .read_to_end()
+        .await
+        .expect_err("truncated response must fail");
+    let err_trace = err.trace();
+    assert!(
+        err_trace.log.bytes_read() > 0,
+        "truncated error trace must preserve socket reads"
+    );
+    assert!(
+        err_trace.log.bytes_written() > 0,
+        "truncated error trace must preserve socket writes"
+    );
+    let key2 = client2.pool_key(&target2).expect("plan");
+    assert_eq!(pool2.idle_count(&key2), 0);
+    uploader2.abort();
+    let _ = uploader2.await;
+    let _ = server.await;
+}

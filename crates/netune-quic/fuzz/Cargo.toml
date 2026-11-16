@@ -1,0 +1,21 @@
+[package]
+name = "netune-quic-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+netune-quic = { path = ".." }
+
+[[bin]]
+name = "fuzz_quic"
+path = "fuzz_targets/fuzz_quic.rs"
+test = false
+doc = false
+bench = false

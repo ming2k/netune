@@ -61,6 +61,7 @@ pub const MIN_MAX_FRAME_SIZE: u32 = 16_384;
 pub const MAX_MAX_FRAME_SIZE: u32 = 16_777_215;
 
 /// Protocol error codes (RFC 9113 §7).
+#[allow(missing_docs)]
 pub mod error_code {
     pub const NO_ERROR: u32 = 0x0;
     pub const PROTOCOL_ERROR: u32 = 0x1;
@@ -130,10 +131,15 @@ impl Role {
 /// not told about becomes a mid-request failure instead of a limit it could have respected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalSettings {
+    /// Advertised `SETTINGS_HEADER_TABLE_SIZE`.
     pub header_table_size: u32,
+    /// Advertised `SETTINGS_MAX_CONCURRENT_STREAMS`.
     pub max_concurrent_streams: u32,
+    /// Advertised `SETTINGS_INITIAL_WINDOW_SIZE`.
     pub initial_window_size: u32,
+    /// Advertised `SETTINGS_MAX_FRAME_SIZE`.
     pub max_frame_size: u32,
+    /// Advertised `SETTINGS_MAX_HEADER_LIST_SIZE`.
     pub max_header_list_size: u32,
     /// `ENABLE_PUSH`; only meaningful for a server advertising to a client.
     pub enable_push: bool,
@@ -228,11 +234,17 @@ impl LocalSettings {
 /// The peer's advertised SETTINGS, as they now apply to what we send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerSettings {
+    /// Peer's `SETTINGS_HEADER_TABLE_SIZE`.
     pub header_table_size: u32,
+    /// Peer's `SETTINGS_MAX_CONCURRENT_STREAMS`, if advertised.
     pub max_concurrent_streams: Option<u32>,
+    /// Peer's `SETTINGS_INITIAL_WINDOW_SIZE`.
     pub initial_window_size: u32,
+    /// Peer's `SETTINGS_MAX_FRAME_SIZE`.
     pub max_frame_size: u32,
+    /// Peer's `SETTINGS_MAX_HEADER_LIST_SIZE`, if advertised.
     pub max_header_list_size: Option<u32>,
+    /// Peer's `SETTINGS_ENABLE_PUSH`.
     pub enable_push: bool,
 }
 

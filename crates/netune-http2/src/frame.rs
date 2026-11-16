@@ -8,37 +8,59 @@ pub const FRAME_HEADER_LEN: usize = 9;
 
 /// Frame types (RFC 9113 Section 6).
 pub const FRAME_DATA: u8 = 0x0;
+/// `HEADERS` frame type (`0x1`).
 pub const FRAME_HEADERS: u8 = 0x1;
+/// `PRIORITY` frame type (`0x2`).
 pub const FRAME_PRIORITY: u8 = 0x2;
+/// `RST_STREAM` frame type (`0x3`).
 pub const FRAME_RST_STREAM: u8 = 0x3;
+/// `SETTINGS` frame type (`0x4`).
 pub const FRAME_SETTINGS: u8 = 0x4;
+/// `PUSH_PROMISE` frame type (`0x5`).
 pub const FRAME_PUSH_PROMISE: u8 = 0x5;
+/// `PING` frame type (`0x6`).
 pub const FRAME_PING: u8 = 0x6;
+/// `GOAWAY` frame type (`0x7`).
 pub const FRAME_GOAWAY: u8 = 0x7;
+/// `WINDOW_UPDATE` frame type (`0x8`).
 pub const FRAME_WINDOW_UPDATE: u8 = 0x8;
+/// `CONTINUATION` frame type (`0x9`).
 pub const FRAME_CONTINUATION: u8 = 0x9;
 
-/// Frame flags.
+/// `ACK` flag (`0x1`) on `SETTINGS` and `PING`.
 pub const FLAG_ACK: u8 = 0x1;
+/// `END_STREAM` flag (`0x1`) on `DATA` and `HEADERS`.
 pub const FLAG_END_STREAM: u8 = 0x1;
+/// `END_HEADERS` flag (`0x4`) on `HEADERS`, `PUSH_PROMISE`, and `CONTINUATION`.
 pub const FLAG_END_HEADERS: u8 = 0x4;
+/// `PADDED` flag (`0x8`) on `DATA`, `HEADERS`, and `PUSH_PROMISE`.
 pub const FLAG_PADDED: u8 = 0x8;
+/// `PRIORITY` flag (`0x20`) on `HEADERS`.
 pub const FLAG_PRIORITY: u8 = 0x20;
 
-/// Known SETTINGS parameters.
+/// `SETTINGS_HEADER_TABLE_SIZE` (`0x1`).
 pub const SETTING_HEADER_TABLE_SIZE: u16 = 0x1;
+/// `SETTINGS_ENABLE_PUSH` (`0x2`).
 pub const SETTING_ENABLE_PUSH: u16 = 0x2;
+/// `SETTINGS_MAX_CONCURRENT_STREAMS` (`0x3`).
 pub const SETTING_MAX_CONCURRENT_STREAMS: u16 = 0x3;
+/// `SETTINGS_INITIAL_WINDOW_SIZE` (`0x4`).
 pub const SETTING_INITIAL_WINDOW_SIZE: u16 = 0x4;
+/// `SETTINGS_MAX_FRAME_SIZE` (`0x5`).
 pub const SETTING_MAX_FRAME_SIZE: u16 = 0x5;
+/// `SETTINGS_MAX_HEADER_LIST_SIZE` (`0x6`).
 pub const SETTING_MAX_HEADER_LIST_SIZE: u16 = 0x6;
 
 /// A parsed 9-byte HTTP/2 frame header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
+    /// 24-bit payload length in bytes.
     pub length: u32,
+    /// 8-bit frame type code.
     pub frame_type: u8,
+    /// 8-bit flags bitfield.
     pub flags: u8,
+    /// 31-bit stream identifier (`0` for connection-level frames).
     pub stream_id: u32,
 }
 
@@ -76,6 +98,7 @@ impl FrameHeader {
 
 /// An HTTP/2 frame representation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(missing_docs)]
 pub enum Frame {
     Data {
         stream_id: u32,

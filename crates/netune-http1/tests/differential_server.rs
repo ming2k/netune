@@ -385,10 +385,7 @@ async fn an_oversized_declared_length_is_refused_before_the_body_is_read() {
     let bytes = b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 999999999\r\n\r\n";
     let mut server = Http1ServerReader::with_limits(
         ScriptedIo::chunked(bytes, 64),
-        Limits {
-            max_body_bytes: 1024,
-            ..Limits::for_ingress()
-        },
+        Limits::for_ingress().with_max_body_bytes(1024),
     );
     let error = server
         .read_request_head()

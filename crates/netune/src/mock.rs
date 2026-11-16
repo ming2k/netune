@@ -54,10 +54,13 @@ use crate::exchange::{Attempt, BodySource, BoxFuture, Exchange, Released, Reques
 pub struct Recorded {
     /// `host:port` the request was addressed to.
     pub authority: String,
+    /// HTTP request method.
     pub method: Method,
     /// The request target (origin-form path and query).
     pub target: String,
+    /// Final request headers sent by the client.
     pub headers: HeaderMap,
+    /// Buffered request body bytes.
     pub body: Bytes,
 }
 
@@ -107,6 +110,7 @@ impl Matcher {
         Self::new(Method::POST, path)
     }
 
+    /// Require the request method to equal `method`.
     #[must_use]
     pub fn method(mut self, method: Method) -> Self {
         self.method = Some(method);
@@ -377,6 +381,7 @@ impl RouteBuilder<'_> {
 }
 
 impl Mock {
+    /// Construct an empty mock transport with no routes and no fallback.
     pub fn new() -> Self {
         Self::default()
     }

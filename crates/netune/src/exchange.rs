@@ -103,6 +103,7 @@ impl RequestStream {
 }
 
 /// A request body: buffered (replayable) or streaming (single-use once started).
+#[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub enum RequestBody {
     /// No body.
@@ -218,13 +219,17 @@ impl From<&'static [u8]> for RequestBody {
 
 /// One request as a transport sees it: head and body, nothing about how it
 /// travels.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct Request {
+    /// Request method, target, and headers.
     pub head: RequestHead,
+    /// Buffered or streaming request payload.
     pub body: RequestBody,
 }
 
 impl Request {
+    /// Construct a request from `head` and `body`.
     pub fn new(head: RequestHead, body: impl Into<RequestBody>) -> Self {
         Self {
             head,
@@ -268,10 +273,14 @@ impl Request {
 /// How finely the attempt asked to be observed. The transport installs the
 /// matching socket tap; the artifact it hands back decides the fidelity the
 /// trace may claim.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservationLevel {
+    /// No socket tap installed.
     Off,
+    /// Lock-free L0 byte/call counters.
     Counters,
+    /// Bounded L1 syscall event ring.
     Traced,
 }
 
@@ -282,6 +291,7 @@ pub struct Attempt<'a> {
     pub plan: &'a ConnectionPlan,
     /// The attempt's control recorder. Disabled unless the attempt is traced.
     pub recorder: &'a TraceCollector,
+    /// Requested byte-path observation level.
     pub observation: ObservationLevel,
     /// The client's policy: limits and bounds.
     pub config: &'a ClientConfig,
@@ -294,6 +304,7 @@ pub struct Attempt<'a> {
 }
 
 /// What a transport hands back when a body gives up its connection.
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct Released {
     /// What the socket tap recorded for this exchange. A transport without a
@@ -328,11 +339,29 @@ pub trait BodySource: Send {
 }
 
 /// The result of one round trip: a response head and a body still to be read.
+#[non_exhaustive]
 pub struct Exchange {
+    /// Received response status line and headers.
     pub head: IncomingResponse,
+    /// Protocol-specific unread body source.
     pub body: Box<dyn BodySource>,
     /// Provenance of the connection that served the exchange.
     pub connection: ConnectionInfo,
+}
+
+impl Exchange {
+    /// Construct an [`Exchange`] from its response head, body source, and connection info.
+    pub fn new(
+        head: IncomingResponse,
+        body: Box<dyn BodySource>,
+        connection: ConnectionInfo,
+    ) -> Self {
+        Self {
+            head,
+            body,
+            connection,
+        }
+    }
 }
 
 /// Something that can turn a request into a response.

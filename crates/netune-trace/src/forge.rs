@@ -14,18 +14,26 @@
 /// A raw TLS extension to encode on the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawExtension {
+    /// Two-byte TLS extension type code.
     pub ext_type: u16,
+    /// Raw extension body bytes (excluding the 2-byte type and 2-byte length).
     pub payload: Vec<u8>,
 }
 
 /// A deterministic ClientHello constructor.
 #[derive(Debug, Clone)]
 pub struct ClientHelloForge {
+    /// Legacy client version field (typically `0x0303` for TLS 1.2+).
     pub legacy_version: u16,
+    /// 32-byte client random.
     pub random: [u8; 32],
+    /// Legacy session ID bytes (`0..=32` bytes).
     pub session_id: Vec<u8>,
+    /// Ordered list of 16-bit TLS cipher suite codes.
     pub cipher_suites: Vec<u16>,
+    /// Legacy compression method bytes (typically `[0x00]`).
     pub compression_methods: Vec<u8>,
+    /// Ordered list of raw TLS extensions.
     pub extensions: Vec<RawExtension>,
 }
 
@@ -43,6 +51,7 @@ impl Default for ClientHelloForge {
 }
 
 impl ClientHelloForge {
+    /// Create a default `ClientHelloForge` with empty cipher suites and extensions.
     pub fn new() -> Self {
         Self::default()
     }

@@ -2,10 +2,13 @@
 
 /// Huffman code entry: (bits, length in bits).
 pub struct HuffmanCode {
+    /// Right-aligned bit pattern for the symbol.
     pub code: u32,
+    /// Bit length of the Huffman code.
     pub bits: u8,
 }
 
+/// RFC 7541 Appendix B static Huffman code table indexed by symbol (`0..=256`).
 pub use crate::huffman_table::HUFFMAN_CODES;
 
 /// Encode a byte slice using HPACK Huffman coding.

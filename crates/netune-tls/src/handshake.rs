@@ -992,6 +992,7 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
             None => Secret::extract(&zeros, &zeros, hash),
         };
         let derived = early.derive_secret("derived", &key_schedule::empty_transcript_hash(hash))?;
+        crate::zeroize::wipe_option(&mut self.offered_psk);
         let handshake_secret = Secret::extract(derived.as_bytes(), &shared_secret, hash);
         self.handshake_secret = Some(handshake_secret.clone());
 
@@ -1182,7 +1183,7 @@ impl<V: ServerCertVerifier> ClientHandshake<V> {
                 hello
                     .extensions
                     .retain(|ext| !matches!(ext.body, ExtensionBody::PreSharedKey { .. }));
-                self.offered_psk = None;
+                crate::zeroize::wipe_option(&mut self.offered_psk);
             } else {
                 hello.rebind_psk_with_prefix(&self.transcript, psk, hash)?;
             }
@@ -2286,6 +2287,16 @@ fn hello_server_name(hello: &ClientHello) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+impl<V: ServerCertVerifier> Drop for ClientHandshake<V> {
+    fn drop(&mut self) {
+        crate::zeroize::wipe_option(&mut self.offered_psk);
+        crate::zeroize::wipe(&mut self.transcript);
+        crate::zeroize::wipe(&mut self.record_buffer);
+        crate::zeroize::wipe(&mut self.flight);
+        crate::zeroize::wipe(&mut self.pending_output);
+    }
 }
 
 #[cfg(test)]

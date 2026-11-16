@@ -335,3 +335,50 @@ async fn inv_trace_10_a_traced_tls_attempt_records_socket_events_under_the_hands
         trace.log.bytes_read()
     );
 }
+
+#[tokio::test]
+async fn client_builder_http2_syncs_default_rustls_alpn_on_the_wire() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buf = vec![0u8; 4096];
+        let mut filled = 0usize;
+        while filled < 5 {
+            let n = socket
+                .read(&mut buf[filled..])
+                .await
+                .expect("read record header");
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        let rec_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+        while filled < 5 + rec_len {
+            let n = socket
+                .read(&mut buf[filled..])
+                .await
+                .expect("read record body");
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        let parsed =
+            netune_trace::ClientHello::parse(&buf[5..5 + rec_len]).expect("parse client hello");
+        parsed.alpn_protocols
+    });
+
+    let client = Client::builder().http2(true).build();
+    assert!(client.config().enable_http2);
+    let target = Target::tls(address.to_string(), "example.com");
+    // The peer closes after reading ClientHello, so the request returns an error;
+    // what we assert is the exact ALPN list offered on the wire by default rustls.
+    let _ = client
+        .request(&target, RequestHead::new(Method::GET, "/"), None)
+        .await;
+
+    let alpns = server.await.expect("server join");
+    assert_eq!(alpns, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+}

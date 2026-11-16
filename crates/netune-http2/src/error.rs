@@ -4,6 +4,7 @@ use std::fmt;
 use std::io;
 
 /// An HTTP/2 protocol or transport error.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum H2Error {
     /// An I/O error occurred on the transport.
@@ -16,11 +17,18 @@ pub enum H2Error {
     Hpack(String),
     /// The peer sent a GOAWAY frame closing the connection.
     GoAway {
+        /// RFC 9113 §7 error code carried in `GOAWAY`.
         error_code: u32,
+        /// Optional opaque debug bytes carried in `GOAWAY`.
         debug_data: Vec<u8>,
     },
     /// A stream-level reset occurred.
-    StreamReset { stream_id: u32, error_code: u32 },
+    StreamReset {
+        /// Identifier of the reset stream.
+        stream_id: u32,
+        /// RFC 9113 §7 error code carried in `RST_STREAM`.
+        error_code: u32,
+    },
     /// Unexpected EOF before receiving a complete frame or message.
     UnexpectedEof,
 }

@@ -13,6 +13,7 @@ use netune_trace::{
 };
 
 /// Specific reason authority parsing or DNS resolution failed.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResolveErrorKind {
     /// Authority syntax or port was invalid (non-retryable configuration error).
@@ -26,11 +27,16 @@ pub enum ResolveErrorKind {
 }
 
 /// Structured failure from authority parsing or DNS resolution.
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct ResolveError {
+    /// Classification of the resolution failure.
     pub kind: ResolveErrorKind,
+    /// Target host or authority that failed to resolve.
     pub host: String,
+    /// Human-readable error detail.
     pub message: String,
+    /// Underlying OS I/O error, when available.
     pub source: Option<std::io::Error>,
 }
 
@@ -124,6 +130,7 @@ impl std::error::Error for ResolveError {
 }
 
 /// Category of connection-establishment failure.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConnectErrorKind {
     /// Timed out waiting for socket connect or handshake completion.
@@ -141,12 +148,18 @@ pub enum ConnectErrorKind {
 }
 
 /// Structured failure from connection establishment (TCP, TLS, proxy, or handshake).
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct ConnectError {
+    /// Handshake/connect phase where the failure occurred.
     pub phase: DiagnosticPhase,
+    /// Classification of the connection error.
     pub kind: ConnectErrorKind,
+    /// Peer address or server name, when known.
     pub peer: Option<String>,
+    /// Human-readable error detail.
     pub message: String,
+    /// Underlying source error, when available.
     pub source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
 }
 
@@ -298,6 +311,7 @@ impl std::error::Error for ConnectError {
 }
 
 /// Why a request could not be completed at the transport layer.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum NetError {
     /// The authority could not be parsed or resolved.
@@ -333,9 +347,11 @@ pub enum NetError {
     /// the request was sent, so this is never the signature of a stale pooled
     /// socket and is never replayed transparently.
     Timeout {
+        /// Exchange phase during which the deadline expired.
         phase: DiagnosticPhase,
         /// What was being waited for, e.g. `"response head"`.
         waiting_for: &'static str,
+        /// Configured timeout duration that elapsed.
         limit: Duration,
     },
 }
@@ -604,22 +620,27 @@ impl AttemptError {
         }
     }
 
+    /// Borrow the underlying transport error.
     pub fn error(&self) -> &NetError {
         &self.error
     }
 
+    /// Borrow the attempt trace snapshot captured up to the failure.
     pub fn trace(&self) -> &TraceSnapshot {
         &self.trace
     }
 
+    /// Borrow the primary terminal diagnostic record.
     pub fn diagnostic(&self) -> &DiagnosticRecord {
         &self.report
     }
 
+    /// Derive a structured [`netune_trace::Diagnosis`] from the failure trace.
     pub fn diagnosis(&self) -> netune_trace::Diagnosis {
         self.trace.diagnose()
     }
 
+    /// Consume the attempt error into its `(NetError, TraceSnapshot)` parts.
     pub fn into_parts(self) -> (NetError, TraceSnapshot) {
         (self.error, self.trace)
     }

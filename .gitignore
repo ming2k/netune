@@ -8,3 +8,10 @@ __pycache__/
 
 # Local agent-tool workspace configuration (machine-specific roots).
 /.muta/
+
+# Coverage-guided cargo-fuzz transient artifacts and corpora inside crates/*/fuzz.
+crates/*/fuzz/target/
+crates/*/fuzz/corpus/
+crates/*/fuzz/artifacts/
+crates/*/fuzz/coverage/
+crates/*/fuzz/Cargo.lock

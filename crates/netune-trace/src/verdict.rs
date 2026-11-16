@@ -52,6 +52,7 @@ pub enum Reason {
 }
 
 impl Reason {
+    /// Numeric wire/serialization code for this absence reason.
     pub const fn code(self) -> u8 {
         self as u8
     }
@@ -181,6 +182,7 @@ impl<T: Copy> Reading<T> {
         }
     }
 
+    /// Return the [`Validity`] verdict attached to this reading.
     pub const fn validity(&self) -> Validity {
         self.validity
     }

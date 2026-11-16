@@ -51,3 +51,9 @@ pub struct DiagnoseFailuresExamples;
 
 #[doc = include_str!("../../../docs/how-to/mock-requests.md")]
 pub struct MockRequestsExamples;
+
+#[doc = include_str!("../../../docs/how-to/production-operations.md")]
+pub struct ProductionOperationsExamples;
+
+#[doc = include_str!("../../../docs/reference/migration-0.1.0.md")]
+pub struct Migration010Examples;

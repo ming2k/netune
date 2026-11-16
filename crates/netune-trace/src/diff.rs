@@ -12,8 +12,11 @@ use crate::trace::TraceSnapshot;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EventView {
+    /// Timestamp offset from trace start in nanoseconds.
     pub at_ns: u64,
+    /// Multiplexed stream / exchange identifier (`0` for non-multiplexed transports).
     pub stream: u32,
+    /// Recorded event kind.
     pub kind: EventKind,
 }
 
@@ -31,8 +34,11 @@ impl From<Event> for EventView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Divergence {
+    /// Zero-based event index where the two logs first disagreed.
     pub index: usize,
+    /// Event in the left trace at `index`, if present.
     pub left: Option<EventView>,
+    /// Event in the right trace at `index`, if present.
     pub right: Option<EventView>,
 }
 
@@ -40,20 +46,35 @@ pub struct Divergence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraceDiff {
+    /// Trace identifier of the left snapshot.
     pub left_id: String,
+    /// Trace identifier of the right snapshot.
     pub right_id: String,
+    /// Terminal outcome of the left snapshot.
     pub left_outcome: Outcome,
+    /// Terminal outcome of the right snapshot.
     pub right_outcome: Outcome,
+    /// Terminal diagnostic code symbol of the left snapshot, if failed.
     pub left_terminal: Option<String>,
+    /// Terminal diagnostic code symbol of the right snapshot, if failed.
     pub right_terminal: Option<String>,
+    /// Retained event count on the left.
     pub left_events: usize,
+    /// Retained event count on the right.
     pub right_events: usize,
+    /// Dropped event count on the left.
     pub left_dropped_events: u32,
+    /// Dropped event count on the right.
     pub right_dropped_events: u32,
+    /// Retained diagnostic record count on the left.
     pub left_diagnostics: usize,
+    /// Retained diagnostic record count on the right.
     pub right_diagnostics: usize,
+    /// Dropped diagnostic record count on the left.
     pub left_dropped_diagnostics: u32,
+    /// Dropped diagnostic record count on the right.
     pub right_dropped_diagnostics: u32,
+    /// First event divergence between the two logs, if any.
     pub first_divergence: Option<Divergence>,
 }
 

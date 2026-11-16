@@ -43,6 +43,7 @@
 //! defined here, so honoring that boundary costs a consumer nothing.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![deny(missing_docs)]
 
 // The documentation's Rust examples are compiled by doctest; see this module
 // for why, and for the one rule it imposes on how a guide fences its code.
@@ -79,7 +80,7 @@ mod ws_session;
 pub const DEFAULT_TRACE_CAPACITY: usize = 1024;
 
 pub use body::{Body, BodyState};
-pub use client::{Client, ClientConfig, Observation, Response, TraceConfig};
+pub use client::{Client, ClientBuilder, ClientConfig, Observation, Response, TraceConfig};
 pub use connect::{
     ConfinementRefused, Connector, EgressConfinement, Established, HttpProtocol, TappedSocket,
     Target, TcpConnector, Transport, Untapped, is_public_ip,
@@ -96,7 +97,7 @@ pub use exchange::{
 };
 pub use fault::FaultConnector;
 pub use http::{HeaderMap, Method};
-pub use netune_http1::{BodyKind, RequestHead, ResponseHead};
+pub use netune_http1::{BodyKind, Limits, RequestHead, ResponseHead};
 #[cfg(feature = "http2")]
 pub use netune_http2::{
     H2ClientConnection, H2ConnectionProfile, H2Fingerprint, H2RequestProfile, H2Response,
@@ -135,11 +136,13 @@ pub use ws::{WsHandshake, WsIo, WsLimits, WsStream};
 #[cfg(feature = "ws")]
 pub use ws_session::{WsSession, WsSessionConfig};
 
+/// Re-exported QUIC transport types when `--features quic` is enabled.
 #[cfg(feature = "quic")]
 pub mod quic {
     pub use netune_quic::*;
 }
 
+/// Re-exported HTTP/3 client and server types when `--features http3` is enabled.
 #[cfg(feature = "http3")]
 pub mod http3 {
     pub use netune_http3::*;

@@ -50,7 +50,12 @@ pub enum Fault {
     Delay(Duration),
     /// Deliver at most `per_read` bytes per read while the offset is within
     /// `span` bytes of the fault's position.
-    Split { span: usize, per_read: usize },
+    Split {
+        /// Number of bytes over which the split cap remains active.
+        span: usize,
+        /// Maximum bytes delivered per `poll_read` while active.
+        per_read: usize,
+    },
     /// EOF at the offset: the declared body simply stops.
     Truncate,
     /// `ConnectionResetByPeer` at the offset.

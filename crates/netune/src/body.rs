@@ -34,6 +34,7 @@ use crate::error::{AttemptError, NetError};
 use crate::exchange::{BodySource, ObservationLevel};
 
 /// How a body reached (or has not reached) its end.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyState {
     /// More may be read.

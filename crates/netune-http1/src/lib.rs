@@ -64,8 +64,20 @@
 //! corpus — hyper as *server* for our client role, hyper as *client* for our
 //! server role — fuzzed for panics, and bounded by [`Limits`]. See
 //! `tests/differential.rs` and `tests/differential_server.rs`.
+//!
+//! # Example
+//!
+//! ```rust
+//! use http::Method;
+//! use netune_http1::{Limits, TargetForm, classify_target};
+//!
+//! let limits = Limits::default().with_max_body_bytes(16 * 1024 * 1024);
+//! assert_eq!(limits.max_body_bytes, 16 * 1024 * 1024);
+//! assert_eq!(classify_target(&Method::GET, b"/health").unwrap(), TargetForm::Origin);
+//! ```
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![deny(missing_docs)]
 
 mod error;
 mod head;

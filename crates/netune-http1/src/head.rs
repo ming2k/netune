@@ -28,10 +28,12 @@ use http::{HeaderMap, Method, StatusCode, Version};
 /// and never for an absent one.
 #[derive(Debug, Clone)]
 pub struct RequestHead {
+    /// HTTP request method.
     pub method: Method,
     /// Origin-form target (`/v1/chat/completions`); the authority lives in the
     /// connection, not the message.
     pub target: String,
+    /// Normalized header map.
     pub headers: HeaderMap,
     /// Explicit raw wire headers preserving caller-defined casing and order.
     /// When `Some`, [`crate::write_request`] serializes these exact bytes
@@ -40,6 +42,7 @@ pub struct RequestHead {
 }
 
 impl RequestHead {
+    /// Construct a new request head with empty headers.
     pub fn new(method: Method, target: impl Into<String>) -> Self {
         Self {
             method,
@@ -83,6 +86,7 @@ impl RequestHead {
 }
 
 /// How a message body is framed.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyKind {
     /// No body at all: `HEAD`, `1xx`, `204`, `304`, or a request with no framing
@@ -134,7 +138,9 @@ impl ReasonPhrase {
 /// A response head the server role builds.
 #[derive(Debug, Clone)]
 pub struct ResponseHead {
+    /// HTTP response status code.
     pub status: StatusCode,
+    /// Response header fields.
     pub headers: HeaderMap,
     /// The phrase written after the status code.
     pub reason: ReasonPhrase,
@@ -225,8 +231,11 @@ impl ResponseHead {
 /// A response head the client role received.
 #[derive(Debug, Clone)]
 pub struct IncomingResponse {
+    /// HTTP version spoken by the peer (`HTTP/1.0` or `HTTP/1.1`).
     pub version: Version,
+    /// Response status code.
     pub status: StatusCode,
+    /// Response headers.
     pub headers: HeaderMap,
     /// How the body is framed, decided by the response's own headers.
     pub body: BodyKind,
@@ -235,6 +244,7 @@ pub struct IncomingResponse {
 /// A request head the server role received.
 #[derive(Debug, Clone)]
 pub struct IncomingRequest {
+    /// HTTP request method.
     pub method: Method,
     /// The request-target, unmodified, as bytes. Origin-form (`/path?query`),
     /// absolute-form and authority-form (for `CONNECT`) all arrive here exactly
@@ -248,8 +258,11 @@ pub struct IncomingRequest {
     /// to re-classify would be re-implementing the grammar, and an orchestrator that
     /// guessed would accept an absolute-form target as an origin path.
     pub form: crate::target::TargetForm,
+    /// HTTP version spoken by the peer.
     pub version: Version,
+    /// Request headers.
     pub headers: HeaderMap,
+    /// Framing declared for the request body.
     pub body: BodyKind,
 }
 

@@ -8,9 +8,9 @@
 //! as the ADR anticipated.
 
 use aws_lc_rs::digest::{self, SHA1_FOR_LEGACY_USE_ONLY, SHA256, SHA384};
-use aws_lc_rs::error::Unspecified;
 use aws_lc_rs::tls_prf::{self, P_SHA256, P_SHA384};
 
+use crate::ffi::{md5, md5_sha1_prf};
 use crate::key_schedule::ScheduleError;
 
 /// The PRF a TLS 1.2 suite is keyed with (RFC 5246 §5).
@@ -62,66 +62,6 @@ pub fn prf12(
             .to_vec()),
         Prf12::Md5Sha1 => md5_sha1_prf(secret, label, seed, length),
     }
-}
-
-/// The MD5+SHA-1 dual PRF, through the `aws-lc-sys` FFI: the facade's
-/// `tls_prf` exposes only the modern single-hash PRFs, and `EVP_md5_sha1`
-/// is the one spell BoringSSL carries for the legacy suites.
-fn md5_sha1_prf(
-    secret: &[u8],
-    label: &[u8],
-    seed: &[u8],
-    length: usize,
-) -> Result<Vec<u8>, ScheduleError> {
-    use aws_lc_sys::{CRYPTO_tls1_prf, EVP_md5_sha1};
-    if secret.is_empty() || length == 0 {
-        return Err(ScheduleError::Expand(Unspecified));
-    }
-    let mut out = vec![0u8; length];
-    // SAFETY: `out` is written by the callee within `out_len`; the label
-    // bytes are read-only for the callee and outlive the call.
-    let written = unsafe {
-        CRYPTO_tls1_prf(
-            EVP_md5_sha1(),
-            out.as_mut_ptr(),
-            out.len(),
-            secret.as_ptr(),
-            secret.len(),
-            label.as_ptr().cast(),
-            label.len(),
-            seed.as_ptr(),
-            seed.len(),
-            core::ptr::null(),
-            0,
-        )
-    };
-    if written != 1 {
-        return Err(ScheduleError::Expand(Unspecified));
-    }
-    Ok(out)
-}
-
-/// The MD5 digest, through the same FFI (the facade does not expose MD5).
-fn md5(data: &[u8]) -> [u8; 16] {
-    use aws_lc_sys::{EVP_Digest, EVP_md5};
-    let mut out = [0u8; 16];
-    let mut written = 0u32;
-    // SAFETY: `out` receives exactly 16 bytes of MD5 output.
-    let result = unsafe {
-        EVP_Digest(
-            data.as_ptr().cast(),
-            data.len(),
-            out.as_mut_ptr(),
-            &mut written,
-            EVP_md5(),
-            core::ptr::null_mut(),
-        )
-    };
-    debug_assert!(
-        result == 1 && written == 16,
-        "MD5 through aws-lc cannot fail"
-    );
-    out
 }
 
 /// The master secret (RFC 5246 §8.1): the PRF over the pre-master secret

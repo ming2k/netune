@@ -59,6 +59,7 @@ pub struct Wire<C: Connector> {
 }
 
 impl<C: Connector> Wire<C> {
+    /// Construct a real network [`RoundTrip`] over `connector` and `pool`.
     pub fn new(connector: C, pool: Pool) -> Self {
         Self {
             connector,

@@ -47,8 +47,20 @@
 //! `INV-TRACE-01`. The server role accepts a `SessionObserver` because a multiplexed connection's
 //! facts must carry their stream identity, and only the layer that knows the stream can attach it;
 //! the orchestrator adapts those facts into its `TraceCollector`.
+//!
+//! # Example
+//!
+//! ```rust
+//! use netune_http2::{FRAME_SETTINGS, FrameHeader};
+//!
+//! let raw_settings = [0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00];
+//! let hdr = FrameHeader::parse(&raw_settings).expect("valid 9-byte H2 header");
+//! assert_eq!(hdr.frame_type, FRAME_SETTINGS);
+//! assert_eq!(hdr.stream_id, 0);
+//! ```
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![deny(missing_docs)]
 
 pub mod client;
 pub mod connection;

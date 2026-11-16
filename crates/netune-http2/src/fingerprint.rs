@@ -92,7 +92,9 @@ pub struct H2ConnectionProfile {
 /// connection. They must not key a pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct H2RequestProfile {
+    /// Human-readable profile name.
     pub name: &'static str,
+    /// Pseudo-header emission order for `HEADERS`.
     pub pseudo_headers_order: PseudoHeaderOrder,
     /// How regular (non-pseudo) headers are ordered ([`INV-CUSTOM-21`]).
     pub regular_header_order: RegularHeaderOrder,
@@ -104,7 +106,9 @@ pub struct H2RequestProfile {
 /// the request half can be applied per exchange without opening a new socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H2Fingerprint {
+    /// Connection-scoped SETTINGS and initial window profile.
     pub connection: H2ConnectionProfile,
+    /// Per-request header-ordering profile.
     pub request: H2RequestProfile,
 }
 

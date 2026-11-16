@@ -177,10 +177,7 @@ async fn an_oversized_head_is_refused_without_unbounded_growth() {
     data.extend_from_slice(b"\r\n");
     let mut reader = Http1Reader::with_limits(
         ScriptedIo::chunked(&data, 64),
-        Limits {
-            max_head_bytes: 4096,
-            ..Limits::default()
-        },
+        Limits::default().with_max_head_bytes(4096),
     );
     let error = reader
         .read_response_head(&Method::GET)
@@ -194,10 +191,7 @@ async fn an_oversized_chunk_is_refused() {
     let data = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\nfffffff\r\n";
     let mut reader = Http1Reader::with_limits(
         ScriptedIo::chunked(data, 8),
-        Limits {
-            max_chunk_bytes: 1024,
-            ..Limits::default()
-        },
+        Limits::default().with_max_chunk_bytes(1024),
     );
     reader.read_response_head(&Method::GET).await.expect("head");
     let error = reader.read_body_chunk().await.expect_err("must reject");

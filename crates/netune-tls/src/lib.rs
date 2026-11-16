@@ -61,9 +61,11 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![deny(missing_docs)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod cert;
 pub mod driver;
+mod ffi;
 pub mod handshake;
 pub mod hello;
 pub mod key_exchange;
@@ -73,6 +75,7 @@ pub mod session;
 pub mod tls12;
 pub mod verifier;
 pub mod wire;
+mod zeroize;
 
 pub use driver::{
     OwnedConnectParams, OwnedTlsConnector, OwnedTlsError, OwnedTlsStream, ProtectorsKind,

@@ -25,6 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
       - run: cargo fetch --locked
 
   test:
@@ -40,18 +42,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.95.0"
-      # `cargo nextest` is not part of the toolchain; without this step the
-      # suite does not run at all and the job fails on the missing subcommand.
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
-      # The default build must not contain the transmit path; the inject
-      # build must compile and pass. Both are asserted by running the suite
-      # in both configurations.
       - run: cargo nextest run --workspace
         if: matrix.features == ''
-      # Additive capabilities must remain optional: the trace crate builds and
-      # tests without its default `ja4` feature, and no observation/identity
-      # default changes when it is absent.
       - run: cargo nextest run -p netune-trace --no-default-features
         if: matrix.features == ''
       - run: cargo nextest run -p netune-trace --no-default-features --features ja4
@@ -60,26 +54,69 @@ jobs:
         if: matrix.features == ''
       - run: cargo nextest run -p netune-probe --features inject
         if: matrix.features == 'netune-probe/inject'
-      # The `all-features` posture is where opt-in code is *executed*, not merely
-      # compiled: `netune-server`'s `tls` suite lives behind the non-default
-      # `tls` feature, so `cargo nextest run --workspace` never runs it and the lint/doc
-      # jobs compile it without executing. Running the whole workspace with
-      # every feature on is the only gate that proves those paths work.
       - run: cargo nextest run --workspace --all-features
         if: matrix.features == 'all-features'
 
-  supply-chain:
-    name: Supply chain (advisories, licences, bans)
+  feature-matrix:
+    name: Feature & packaging matrix (MSRV 1.95.0)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify feature isolation across orchestrators
+        run: |
+          cargo check --all-targets --all-features
+          cargo check --all-targets --no-default-features
+          cargo check -p netune --no-default-features
+          cargo check -p netune --no-default-features --features http2
+          cargo check -p netune --no-default-features --features ws
+          cargo check -p netune --no-default-features --features http3
+          cargo check -p netune-server --no-default-features
+          cargo check -p netune-server --no-default-features --features tls
+          cargo check -p netune-server --no-default-features --features http3
+      - name: Verify package manifests (cargo package --list)
+        run: |
+          for manifest in crates/*/Cargo.toml; do
+            name="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$manifest" | head -1)"
+            if grep -q '^publish *= *false' "$manifest"; then
+              echo "Skipping non-publishable crate $name"
+              continue
+            fi
+            echo "Packaging dry-run list for $name"
+            cargo package --list -p "$name" --allow-dirty >/dev/null
+          done
+
+  supply-chain:
+    name: Supply chain, audit & SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses sources bans
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate CycloneDX SBOM
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --output-prefix netune-sbom
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: "*netune-sbom*.json"
+          if-no-files-found: error
 
   lint:
-    name: Clippy + fmt
+    name: Clippy, fmt & zero-cost
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -89,12 +126,6 @@ jobs:
           toolchain: "1.95.0"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      # `INV-QUIC-01` states that `ring` never reaches a build — `aws-lc-rs` is the
-      # one crypto provider. `cargo-deny`'s ban table cannot enforce it: it resolves
-      # cross-platform metadata and would fail on a `ring` that is only linked on a
-      # target this project never builds. The precise statement is "does not
-      # *compile*", so the precise mechanism is to ask the compiler's own resolver
-      # for the host target and fail if it names `ring`.
       - name: No second crypto engine (INV-QUIC-01)
         run: |
           if cargo tree --all-features --invert ring 2>/dev/null | grep -q '^ring '; then
@@ -103,9 +134,6 @@ jobs:
             exit 1
           fi
       - run: cargo clippy --all-targets --all-features -- -D warnings
-      # Deterministic observation-cost gate. The baseline is generated in the
-      # same job, then the second run fails on any instruction-count regression:
-      # no wall-clock tolerance, no "load average" excuse.
       - name: Zero-cost instruction gate (INV-TRACE-04)
         run: |
           sudo apt-get update
@@ -113,11 +141,6 @@ jobs:
           cargo install gungraun-runner --version 0.20.0 --locked
           cargo bench -p netune --bench zero_cost -- --save-baseline=ci
           cargo bench -p netune --bench zero_cost -- --baseline=ci --callgrind-limits='ir=0%'
-      # Both feature postures are checked: `--all-features` proves the opt-in
-      # paths compile, `--no-default-features` proves the codecs are genuinely
-      # optional rather than merely gated in name.
-      - run: cargo check --all-targets --all-features
-      - run: cargo check --all-targets --no-default-features
       - run: cargo fmt --check
 
   doc:
@@ -127,23 +150,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
       - uses: Swatinem/rust-cache@v2
-      # The standards in `docs/dev/standards/` are only rules if something
-      # fails when they are broken. This gate is that mechanism: links,
-      # anchors, the public/internal firewall, the ADR registry, invariant
-      # governance, and version consistency. Run it first so a documentation
-      # defect is reported before the slower rustdoc pass.
       - name: Documentation integrity gate
         run: python3 .github/scripts/check-docs.py
-      # `--document-private-items` is deliberately absent: rustdoc warnings are
-      # about the public surface, and every intra-doc link on it must resolve.
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: "-D warnings"
-      # The examples in `README.md` and `docs/{tutorials,how-to}/` are compiled
-      # as doctests by `src/doc_examples.rs`. Without this step a guide could
-      # describe an API that does not exist and every other gate would pass —
-      # which is exactly how the guides reached that state before.
       - run: cargo test --doc --workspace --all-features
         env:
           RUSTFLAGS: ""
@@ -154,8 +168,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      # A checker that is not itself checked rots silently: every rule below
-      # has a fixture that must fail and a fixture that must pass.
       - run: python3 .github/scripts/test-check-docs.py
 
   architecture:
@@ -164,9 +176,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      # `architecture.md` and `AGENTS.md` state the topology and the red-lines.
-      # Without this job they are review conventions, and a stray `Cargo.toml`
-      # edge ships. It needs no toolchain: it reads manifests and source.
       - name: Architecture gate
         run: python3 .github/scripts/check-architecture.py
       - name: Architecture gate self-test

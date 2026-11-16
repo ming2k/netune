@@ -84,12 +84,12 @@ capability of anything long-running.
 
 ### Use as a dependency
 
-The crates are consumed from this repository by tag:
+The crates are consumed from this repository by tag (`0.1.0` GA for the Stable tier):
 
 ```toml
 [dependencies]
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.35" }
-netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.0.35" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.1.0" }
+netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.1.0" }
 ```
 
 Pin a `tag` (or a `rev` for the strictest reproducibility) and upgrade
@@ -104,18 +104,18 @@ cargo nextest run --workspace
 
 ### Basic Request & Trace Inspection
 
-Every traced attempt is recorded, and every displayed number is derived from
-that record. This program sends one traced request and reads the trace back:
+For production HTTPS with automatic HTTP/2 ALPN negotiation (powered by
+`rustls` and platform certificate verification), start with `Client::builder()`:
 
 ```rust,no_run
 use http::Method;
-use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TraceConfig};
+use netune::{Client, HttpProtocol, RequestHead, Target, TraceConfig};
 use netune_trace::derive;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new(TcpConnector::new(), Pool::default(), ClientConfig::default());
-    let target = Target::plain("127.0.0.1:8080");
+    let client = Client::builder().http2(true).build();
+    let target = Target::tls("example.com:443", "example.com").with_protocol(HttpProtocol::Auto);
     let head = RequestHead::new(Method::GET, "/health");
 
     let mut response = client
@@ -150,11 +150,13 @@ stages as if they had not happened.
   - [Simulate Network Chaos with FaultIo](docs/how-to/fault-injection.md)
   - [Configure Proxies](docs/how-to/configure-proxies.md)
   - [Establish a WebSocket Client Connection](docs/how-to/websocket-client.md)
+  - [Operate netune in Production](docs/how-to/production-operations.md)
   - [Use HTTP/3](docs/how-to/use-http3.md)
 - **Reference**:
   - [Crates Reference](docs/reference/crates.md)
   - [System Architecture](docs/reference/architecture.md)
   - [Stability and Production Boundaries](docs/reference/stability.md)
+  - [Migrating to 0.1.0 (GA)](docs/reference/migration-0.1.0.md)
 - **Security**: [Security Policy](.github/SECURITY.md)
 - **Explanation**: [all articles](docs/explanation/index.md)
   - [Structural Privilege Boundaries](docs/explanation/privilege-boundaries.md)
@@ -164,9 +166,9 @@ stages as if they had not happened.
 
 ## Status
 
-Pre-1.0. Every workspace crate is lockstep-versioned at `0.0.35`.
+**`0.1.0` GA (Stable tier)**. Every workspace crate is lockstep-versioned at `0.1.0`; HTTP/3, owned TLS (`netune-tls`), and `netune-probe` are Preview; WebTransport is Experimental (see [Stability and Production Boundaries](docs/reference/stability.md)).
 
-MSRV: 1.95. License: MIT.
+MSRV: 1.95.0. Tier-1 OS: Linux. License: MIT.
 
 [`netune-trace`]: crates/netune-trace
 [`netune-http1`]: crates/netune-http1

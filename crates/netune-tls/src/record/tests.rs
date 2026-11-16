@@ -344,6 +344,6 @@ fn tls12_cbc_open_rejects_empty_and_unaligned_ciphertext_without_panicking() {
     );
 
     // Direct guard on cbc_transform itself: empty or unaligned input never panics.
-    assert!(super::cbc_transform(128, &[0x22; 16], [0; 16], &[], false).is_err());
-    assert!(super::cbc_transform(128, &[0x22; 16], [0; 16], &[0; 3], false).is_err());
+    assert!(crate::ffi::cbc_transform(128, &[0x22; 16], [0; 16], &[], false).is_err());
+    assert!(crate::ffi::cbc_transform(128, &[0x22; 16], [0; 16], &[0; 3], false).is_err());
 }

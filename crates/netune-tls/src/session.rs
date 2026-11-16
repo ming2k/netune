@@ -52,7 +52,7 @@ pub struct ResumptionTicket {
 
 impl Drop for ResumptionTicket {
     fn drop(&mut self) {
-        self.psk.fill(0);
+        crate::zeroize::wipe(&mut self.psk);
     }
 }
 

@@ -187,6 +187,7 @@ impl Default for DynamicTable {
 }
 
 impl DynamicTable {
+    /// Construct an empty dynamic table bounded by `max_size` octets.
     #[must_use]
     pub fn new(max_size: usize) -> Self {
         Self {
@@ -196,21 +197,25 @@ impl DynamicTable {
         }
     }
 
+    /// Number of entries currently stored in the table.
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether the dynamic table contains zero entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// Current byte size of the table (RFC 7541 §4.1 accounting).
     #[must_use]
     pub const fn size(&self) -> usize {
         self.size
     }
 
+    /// Configured maximum byte capacity of the table.
     #[must_use]
     pub const fn max_size(&self) -> usize {
         self.max_size
@@ -298,6 +303,7 @@ impl DynamicTable {
 /// An HPACK header compressor over a dynamic table.
 #[derive(Debug)]
 pub struct HpackEncoder {
+    /// Whether literal header strings are Huffman-encoded (`true` by default).
     pub use_huffman: bool,
     table: DynamicTable,
 }
@@ -309,6 +315,7 @@ impl Default for HpackEncoder {
 }
 
 impl HpackEncoder {
+    /// Construct an encoder with default table size and Huffman coding enabled.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -401,6 +408,7 @@ impl Default for HpackDecoder {
 }
 
 impl HpackDecoder {
+    /// Construct a decoder with the RFC 7541 default 4,096-byte dynamic table.
     #[must_use]
     pub fn new() -> Self {
         Self {

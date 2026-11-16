@@ -23,6 +23,7 @@
 //!   poisoning bug starts.
 
 /// The form of a request target, per RFC 9112 §3.2.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetForm {
     /// `absolute-path [ "?" query ]` — the only form an origin server serves.

@@ -4,6 +4,7 @@
 // prefix-free and the Kraft sum is exactly 1 (so the set is complete), and the
 // Appendix C example vector round-trips byte for byte. A single wrong entry makes this
 // client unable to decode any real server's header block.
+/// Static HPACK Huffman codes `(code, bit_length)` from RFC 7541 Appendix B.
 pub const HUFFMAN_CODES: [(u32, u8); 257] = [
     (0x1ff8, 13),
     (0x7fffd8, 23),

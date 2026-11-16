@@ -25,10 +25,12 @@ use crate::pool::PoolKey;
 pub struct ProfileId(String);
 
 impl ProfileId {
+    /// Wrap a profile name string as a [`ProfileId`].
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
 
+    /// Borrow the profile name as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -49,7 +51,9 @@ impl From<&str> for ProfileId {
 /// How an HTTP/1 profile spells header names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderCasing {
+    /// Emit header names in canonical lowercase (`content-type`).
     Lowercase,
+    /// Emit header names in HTTP/1 Title-Case (`Content-Type`).
     TitleCase,
 }
 
@@ -67,6 +71,7 @@ pub struct H1WireProfile {
 }
 
 impl H1WireProfile {
+    /// Construct a custom HTTP/1 wire profile.
     pub fn new(
         id: impl Into<ProfileId>,
         casing: HeaderCasing,
@@ -79,6 +84,7 @@ impl H1WireProfile {
         }
     }
 
+    /// Borrow the profile's identifier.
     pub fn id(&self) -> &ProfileId {
         &self.id
     }
@@ -232,9 +238,11 @@ pub enum Http2Mode {
 /// Which transport protocol family and resolved protocol profiles a plan carries.
 #[derive(Debug, Clone)]
 pub enum PlannedTransport {
+    /// TCP-based transport (HTTP/1.1 and/or HTTP/2).
     Tcp {
         /// Whether, and how insistently, this request speaks HTTP/2.
         http2: Http2Mode,
+        /// Resolved HTTP/2 connection+request fingerprint, when planned.
         #[cfg(feature = "http2")]
         h2: Option<netune_http2::H2Fingerprint>,
         /// The request half, when an H2 connection is planned. Deliberately
@@ -242,10 +250,14 @@ pub enum PlannedTransport {
         #[cfg(feature = "http2")]
         h2_request: Option<netune_http2::H2RequestProfile>,
     },
+    /// QUIC-based HTTP/3 transport (`--features http3`).
     #[cfg(feature = "http3")]
     Http3 {
+        /// Resolved QUIC transport profile.
         quic: netune_quic::profile::QuicProfile,
+        /// Resolved HTTP/3 connection SETTINGS profile.
         settings: netune_http3::H3SettingsProfile,
+        /// Resolved HTTP/3 per-request header ordering profile.
         request: netune_http3::H3RequestProfile,
     },
 }
@@ -257,17 +269,23 @@ pub enum PlannedTransport {
 /// not).
 #[derive(Debug, Clone)]
 pub struct ConnectionPlan {
+    /// Original target requested by the caller.
     pub target: Target,
+    /// Resolved connection identity used as part of [`PoolKey`].
     pub identity: ConnectionIdentity,
+    /// Resolved HTTP/1.1 wire profile.
     pub h1: H1WireProfile,
+    /// Protocol family and resolved protocol-specific profiles.
     pub transport: PlannedTransport,
 }
 
 impl ConnectionPlan {
+    /// Derive the [`PoolKey`] for this connection plan.
     pub fn pool_key(&self) -> PoolKey {
         PoolKey::new(self.target.authority.clone(), self.identity.clone())
     }
 
+    /// Return the planned HTTP/2 negotiation mode (`Off` for HTTP/3).
     pub const fn http2_mode(&self) -> Http2Mode {
         match &self.transport {
             PlannedTransport::Tcp { http2, .. } => *http2,
@@ -276,6 +294,7 @@ impl ConnectionPlan {
         }
     }
 
+    /// Borrow the resolved HTTP/2 fingerprint, if planned.
     #[cfg(feature = "http2")]
     pub fn h2_fingerprint(&self) -> Option<&netune_http2::H2Fingerprint> {
         match &self.transport {
@@ -285,6 +304,7 @@ impl ConnectionPlan {
         }
     }
 
+    /// Return the resolved HTTP/2 per-request header profile, if planned.
     #[cfg(feature = "http2")]
     pub fn h2_request(&self) -> Option<netune_http2::H2RequestProfile> {
         match &self.transport {
@@ -294,6 +314,7 @@ impl ConnectionPlan {
         }
     }
 
+    /// Borrow the resolved QUIC and HTTP/3 profiles when this plan targets HTTP/3.
     #[cfg(feature = "http3")]
     pub fn h3_plan(
         &self,
@@ -312,6 +333,7 @@ impl ConnectionPlan {
         }
     }
 
+    /// Whether this plan routes over HTTP/3.
     pub const fn is_http3(&self) -> bool {
         #[cfg(feature = "http3")]
         {
@@ -345,11 +367,13 @@ impl Default for H1Registry {
 }
 
 impl H1Registry {
+    /// Register or replace an HTTP/1 wire profile.
     pub fn with_profile(mut self, profile: H1WireProfile) -> Self {
         self.profiles.insert(profile.id().clone(), profile);
         self
     }
 
+    /// Resolve a profile by id or return a configuration error.
     pub fn resolve(&self, id: &ProfileId) -> Result<&H1WireProfile, NetError> {
         self.profiles.get(id).ok_or_else(|| {
             NetError::Connect(crate::error::ConnectError::config(
@@ -362,6 +386,7 @@ impl H1Registry {
         })
     }
 
+    /// Return the default `"netune"` HTTP/1 wire profile.
     pub fn default_profile(&self) -> &H1WireProfile {
         match self.profiles.get(&ProfileId::new("netune")) {
             Some(profile) => profile,
@@ -429,6 +454,7 @@ impl Default for H2RequestRegistry {
 
 #[cfg(feature = "http2")]
 impl H2RequestRegistry {
+    /// Register or replace an HTTP/2 request-header profile under `id`.
     pub fn with_profile(
         mut self,
         id: impl Into<ProfileId>,
@@ -438,6 +464,7 @@ impl H2RequestRegistry {
         self
     }
 
+    /// Resolve an HTTP/2 request profile by `id` or return a configuration error.
     pub fn resolve(&self, id: &ProfileId) -> Result<&netune_http2::H2RequestProfile, NetError> {
         self.profiles.get(id).ok_or_else(|| {
             NetError::Connect(crate::error::ConnectError::config(
@@ -459,6 +486,7 @@ impl H2RequestRegistry {
 
 #[cfg(feature = "http2")]
 impl H2Registry {
+    /// Register or replace an HTTP/2 fingerprint profile under `id`.
     pub fn with_profile(
         mut self,
         id: impl Into<ProfileId>,
@@ -468,6 +496,7 @@ impl H2Registry {
         self
     }
 
+    /// Resolve an HTTP/2 fingerprint profile by `id` or return a configuration error.
     pub fn resolve(&self, id: &ProfileId) -> Result<&netune_http2::H2Fingerprint, NetError> {
         self.profiles.get(id).ok_or_else(|| {
             NetError::Connect(crate::error::ConnectError::config(

@@ -1,16 +1,13 @@
 name: Release
 
-# A release is defined by this repository: an annotated tag that matches the
+# A release is defined by this repository: an annotated/signed tag that matches the
 # workspace version, plus the GitHub Release this workflow creates from the
-# matching CHANGELOG.md section. Distribution is by git tag:
+# matching CHANGELOG.md section (with attached CycloneDX SBOM). Distribution is by git tag:
 #
-#   netune = { git = "https://github.com/ming2k/netune", tag = "v0.0.1" }
+#   netune = { git = "https://github.com/ming2k/netune", tag = "v0.1.0" }
 #
 # No registry account, token, or upload participates in making a release.
 # See docs/dev/release-and-versioning.md.
-#
-#   git tag -a v0.0.2 -m "netune 0.0.2: <one-line summary>"
-#   git push origin main --follow-tags
 
 on:
   push:
@@ -24,15 +21,19 @@ env:
 
 jobs:
   verify:
-    name: Tag matches workspace version
+    name: Tag matches workspace version & is annotated
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      # A tag whose version disagrees with Cargo.toml would ship a mislabelled
-      # release. Fail before the GitHub Release is created.
-      - name: Compare tag with [workspace.package] version
+        with:
+          fetch-depth: 0
+      - name: Verify annotated tag object and version match
         run: |
+          if ! git rev-parse -q --verify "refs/tags/${GITHUB_REF_NAME}^{tag}" >/dev/null; then
+            echo "::error::tag ${GITHUB_REF_NAME} must be an annotated (preferably signed) tag, not a lightweight tag"
+            exit 1
+          fi
           version="$(awk '/^\[workspace\.package\]/{seen=1} seen && /^version *=/{gsub(/[" ]/,"",$3); print $3; exit}' Cargo.toml)"
           echo "tag=${GITHUB_REF_NAME} workspace_version=${version}"
           if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
@@ -44,11 +45,19 @@ jobs:
     name: GitHub Release ${{ github.ref_name }}
     needs: verify
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate CycloneDX SBOM for release tag
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --output-prefix "netune-${GITHUB_REF_NAME}-sbom"
       - name: Assemble the release body from CHANGELOG.md
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -86,7 +95,7 @@ jobs:
             cat "$notes"
           } > "$body"
           mv "$body" "$notes"
-      - name: Create or update the GitHub Release
+      - name: Create or update the GitHub Release and upload SBOM
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -97,3 +106,4 @@ jobs:
               --title "netune ${GITHUB_REF_NAME#v}" \
               --notes-file "$RUNNER_TEMP/notes.md"
           fi
+          gh release upload "${GITHUB_REF_NAME}" *netune-${GITHUB_REF_NAME}-sbom*.json --clobber

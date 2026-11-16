@@ -146,19 +146,51 @@ struct SplitHandle {
 }
 
 impl SplitHandle {
-    /// Recover the transport and tap artifact if every half has been dropped.
-    fn into_inner(self) -> Option<(Box<dyn Transport>, TapArtifact)> {
-        let shared = Arc::try_unwrap(self.shared).ok()?;
-        let mut transport = shared
-            .transport
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()?;
-        let artifact = transport
-            .swap_tap(SocketTap::Off)
-            .map_or(TapArtifact::None, Tap::finish);
-        Some((transport, artifact))
+    /// Release the split transport, synchronously extracting its tap artifact.
+    ///
+    /// When `try_keep` is `true` and every half (`SplitRead`/`SplitWrite`) has
+    /// already been dropped, this returns `Some(transport)` so the caller can
+    /// pool it. Otherwise it takes and drops the underlying transport
+    /// immediately (closing any abandoned upload socket) while still returning
+    /// the recorded `TapArtifact` synchronously.
+    fn release(self, try_keep: bool) -> (Option<Box<dyn Transport>>, TapArtifact) {
+        if try_keep {
+            match Arc::try_unwrap(self.shared) {
+                Ok(mut shared) => {
+                    let Some(mut transport) = shared
+                        .transport
+                        .get_mut()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take()
+                    else {
+                        return (None, TapArtifact::None);
+                    };
+                    let artifact = transport
+                        .swap_tap(SocketTap::Off)
+                        .map_or(TapArtifact::None, Tap::finish);
+                    return (Some(transport), artifact);
+                }
+                Err(shared) => {
+                    return (None, take_transport_tap(&shared));
+                }
+            }
+        }
+        (None, take_transport_tap(&self.shared))
     }
+}
+
+fn take_transport_tap(shared: &SplitShared) -> TapArtifact {
+    let Some(mut transport) = shared
+        .transport
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    else {
+        return TapArtifact::None;
+    };
+    transport
+        .swap_tap(SocketTap::Off)
+        .map_or(TapArtifact::None, Tap::finish)
 }
 
 fn split_transport(
@@ -194,6 +226,25 @@ impl Drop for AbortOnDrop {
     }
 }
 
+struct ExchangeCleanup {
+    handle: Option<SplitHandle>,
+    upload_abort: Option<AbortOnDrop>,
+    sampler: Option<Sampler>,
+    recorder: TraceCollector,
+}
+
+impl Drop for ExchangeCleanup {
+    fn drop(&mut self) {
+        drop(self.upload_abort.take());
+        drop(self.sampler.take());
+        if let Some(handle) = self.handle.take() {
+            let (_, artifact) = handle.release(false);
+            if let TapArtifact::Log(log) = artifact {
+                self.recorder.merge(log);
+            }
+        }
+    }
+}
 /// A connection ready to carry one HTTP/1.1 exchange.
 pub(super) struct Connection {
     pub stream: Box<dyn Transport>,
@@ -271,30 +322,11 @@ pub(super) async fn exchange(
             .map(|clone| start_sampler(clone, recorder.clone(), SAMPLE_INTERVAL))
     });
 
-    // From here the body owns the connection: any early return drops it, and
-    // its `Drop` still merges what the socket tap saw into the trace.
+    // From here `cleanup` owns the connection until `Body` is returned: any
+    // early error or cancellation synchronously extracts and merges the socket
+    // tap into `recorder` before returning to the caller.
     let (read, write, handle) = split_transport(stream, recorder.clone());
-    let mut body = Body {
-        reader: Some(Http1Reader::with_limits_and_buffer(
-            read,
-            attempt.config.limits,
-            buffered,
-        )),
-        write_half: None,
-        handle: Some(handle),
-        upload_abort: None,
-        upload_rx: None,
-        upload_done: false,
-        upload_error: None,
-        recorder: recorder.clone(),
-        pool: pool.clone(),
-        key,
-        local_port,
-        socket,
-        sampler,
-        reusable: false,
-        _in_flight: None,
-    };
+    let mut reader = Http1Reader::with_limits_and_buffer(read, attempt.config.limits, buffered);
 
     recorder.mark(EventKind::RequestWriteStart, 0, 0);
     let stream_source = request.body.take_stream()?;
@@ -324,11 +356,13 @@ pub(super) async fn exchange(
         .await;
         let _ = upload_tx.send(result);
     });
-    let mut upload_abort = AbortOnDrop(Some(upload.abort_handle()));
-    let mut reader = body
-        .reader
-        .take()
-        .ok_or_else(|| NetError::Protocol("the HTTP/1.1 reader was already released".into()))?;
+    let mut cleanup = ExchangeCleanup {
+        handle: Some(handle),
+        upload_abort: Some(AbortOnDrop(Some(upload.abort_handle()))),
+        sampler,
+        recorder: recorder.clone(),
+    };
+
     // The response head and the upload run concurrently. If the head wins, the
     // body keeps the upload task until the response stream ends or is dropped;
     // if the upload wins, its split write half is retained for pooling.
@@ -347,20 +381,36 @@ pub(super) async fn exchange(
                         "HTTP/1.1 upload task aborted".into(),
                     )),
                 };
-                upload_abort.disarm();
+                if let Some(abort) = cleanup.upload_abort.as_mut() {
+                    abort.disarm();
+                }
                 (head_fut.as_mut().await??, None, Some(write))
             }
         }
     };
-    body.reader = Some(reader);
-    body.upload_rx = upload_rx;
-    body.write_half = write_half;
-    body.upload_done = body.upload_rx.is_none();
-    if body.upload_rx.is_some() {
-        body.upload_abort = Some(upload_abort);
-    }
-    body.reusable = is_reusable(&response_head);
-    body._in_flight = in_flight.take();
+
+    let upload_done = upload_rx.is_none();
+    let body = Body {
+        reader: Some(reader),
+        write_half,
+        handle: cleanup.handle.take(),
+        upload_abort: if upload_done {
+            None
+        } else {
+            cleanup.upload_abort.take()
+        },
+        upload_rx,
+        upload_done,
+        upload_error: None,
+        recorder: recorder.clone(),
+        pool: pool.clone(),
+        key,
+        local_port,
+        socket,
+        sampler: cleanup.sampler.take(),
+        reusable: is_reusable(&response_head),
+        _in_flight: in_flight.take(),
+    };
 
     Ok(Exchange {
         head: response_head,
@@ -449,10 +499,16 @@ impl Body {
         }
     }
 
-    /// Detach the connection and what its tap recorded.
-    fn detach(&mut self) -> Option<(Box<dyn Transport>, BytesMut, TapArtifact)> {
-        let (read, buffered) = self.reader.take()?.into_inner();
-        drop(read);
+    /// Detach the connection and synchronously extract what its tap recorded.
+    fn detach(&mut self, try_keep: bool) -> (Option<Box<dyn Transport>>, BytesMut, TapArtifact) {
+        let buffered = match self.reader.take() {
+            Some(reader) => {
+                let (read, buffered) = reader.into_inner();
+                drop(read);
+                buffered
+            }
+            None => BytesMut::new(),
+        };
         drop(self.write_half.take());
         drop(self.upload_abort.take());
         self.poll_upload();
@@ -460,10 +516,11 @@ impl Body {
         drop(self.write_half.take());
         // Stop sampling before the connection goes idle.
         drop(self.sampler.take());
-        self.handle
-            .take()?
-            .into_inner()
-            .map(|(stream, artifact)| (stream, buffered, artifact))
+        let Some(handle) = self.handle.take() else {
+            return (None, buffered, TapArtifact::None);
+        };
+        let (stream, artifact) = handle.release(try_keep);
+        (stream, buffered, artifact)
     }
 }
 
@@ -496,10 +553,8 @@ impl BodySource for Body {
     fn release(mut self: Box<Self>, complete: bool) -> Released {
         self.poll_upload();
         let can_pool = complete && self.reusable && self.upload_done;
-        let Some((stream, buffered, artifact)) = self.detach() else {
-            return Released::untapped();
-        };
-        if can_pool {
+        let (stream, buffered, artifact) = self.detach(can_pool);
+        if can_pool && let Some(stream) = stream {
             self.pool.put_http1(
                 &self.key,
                 stream,
@@ -514,10 +569,11 @@ impl BodySource for Body {
 
 impl Drop for Body {
     fn drop(&mut self) {
-        // Reached only when the exchange failed before it produced a response:
-        // nobody will call `release`, but the bytes that did cross the socket
-        // are part of the failure's evidence.
-        if let Some((_stream, _buffered, TapArtifact::Log(log))) = self.detach() {
+        // Reached when the exchange failed or was dropped without calling
+        // `release`: any bytes that crossed the socket are merged synchronously
+        // so `Body::trace()` / `AttemptError::trace()` always see them.
+        let (_stream, _buffered, artifact) = self.detach(false);
+        if let TapArtifact::Log(log) = artifact {
             self.recorder.merge(log);
         }
     }

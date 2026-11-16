@@ -39,22 +39,27 @@ path = "tests/integration/main.rs"
 name = "e2e"
 path = "tests/e2e/main.rs"
 
+[[bench]]
+name = "baseline"
+path = "benches/baseline.rs"
+harness = false
+
 [dev-dependencies]
 brotli = { workspace = true }
 bytes = { workspace = true }
 flate2 = { workspace = true }
 http = { workspace = true }
-netune = { path = "crates/netune", version = "0.0.35", default-features = false }
-netune-http1 = { path = "crates/netune-http1", version = "0.0.35" }
-netune-http2 = { path = "crates/netune-http2", version = "0.0.35" }
-netune-http3 = { path = "crates/netune-http3", version = "0.0.35" }
-netune-quic = { path = "crates/netune-quic", version = "0.0.35" }
-netune-server = { path = "crates/netune-server", version = "0.0.35", default-features = false }
-netune-tls = { path = "crates/netune-tls", version = "0.0.35" }
-test-support = { path = "crates/test-support", version = "0.0.35" }
-netune-trace = { path = "crates/netune-trace", version = "0.0.35" }
-netune-webtransport = { path = "crates/netune-webtransport", version = "0.0.35" }
-netune-ws = { path = "crates/netune-ws", version = "0.0.35" }
+netune = { path = "crates/netune", version = "0.1.0", default-features = false }
+netune-http1 = { path = "crates/netune-http1", version = "0.1.0" }
+netune-http2 = { path = "crates/netune-http2", version = "0.1.0" }
+netune-http3 = { path = "crates/netune-http3", version = "0.1.0" }
+netune-quic = { path = "crates/netune-quic", version = "0.1.0" }
+netune-server = { path = "crates/netune-server", version = "0.1.0", default-features = false }
+netune-tls = { path = "crates/netune-tls", version = "0.1.0" }
+test-support = { path = "crates/test-support", version = "0.1.0" }
+netune-trace = { path = "crates/netune-trace", version = "0.1.0" }
+netune-webtransport = { path = "crates/netune-webtransport", version = "0.1.0" }
+netune-ws = { path = "crates/netune-ws", version = "0.1.0" }
 quinn = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
@@ -65,7 +70,7 @@ tokio-rustls = { workspace = true }
 workspace = true
 
 [workspace.package]
-version = "0.0.35"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -93,7 +98,9 @@ socket2 = { version = "0.6", features = ["all"] }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 quinn-proto = { version = "0.11", default-features = false, features = ["rustls-aws-lc-rs"] }
 # Dev-only interop oracles. netune-http3 owns its H3 state machine and QPACK
-# codec (ADR-0027); neither crate may appear in a production dependency graph.
+# codec (ADR-0027); netune-http2 owns its H2 codec and session (ADR-0001).
+# None of these crates may appear in a production dependency graph.
+h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 # The owned TLS engine's chain validator (a verifier, not a TLS engine).

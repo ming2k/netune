@@ -34,8 +34,11 @@ pub use session::{H2ClientSession, H2HeadFuture, H2RequestSender, H2StreamPermit
 /// A parsed HTTP/2 response.
 #[derive(Debug, Clone)]
 pub struct H2Response {
+    /// HTTP status code (`:status`).
     pub status: u16,
+    /// Decoded response headers as `(name, value)` pairs in wire order.
     pub headers: Vec<(String, String)>,
+    /// Accumulated response body bytes.
     pub body: Bytes,
     /// The `:trailers` block, when the peer sent one.
     pub trailers: Vec<(String, String)>,
@@ -44,7 +47,9 @@ pub struct H2Response {
 /// The head of a streamed HTTP/2 response.
 #[derive(Debug, Clone)]
 pub struct H2ResponseHead {
+    /// HTTP status code (`:status`).
     pub status: u16,
+    /// Decoded response headers as `(name, value)` pairs in wire order.
     pub headers: Vec<(String, String)>,
     /// Whether the response head was also the end of the stream (no body).
     pub end_stream: bool,
@@ -54,7 +59,12 @@ pub struct H2ResponseHead {
 #[derive(Debug, Clone)]
 pub enum H2ResponseEvent {
     /// A `DATA` frame payload. `end_stream` marks the last payload.
-    Data { payload: Bytes, end_stream: bool },
+    Data {
+        /// Payload bytes carried by the `DATA` frame.
+        payload: Bytes,
+        /// Whether this frame carried `END_STREAM`.
+        end_stream: bool,
+    },
     /// The trailer section: a second `HEADERS` block that ends the stream.
     Trailers(Vec<(String, String)>),
     /// The stream is complete; the connection is idle.

@@ -17,7 +17,9 @@ use crate::log::EventLog;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Direction {
+    /// Outbound client connection/attempt.
     Egress,
+    /// Inbound server connection/exchange.
     Ingress,
 }
 
@@ -37,6 +39,7 @@ pub enum TracePropagation {
 }
 
 impl TracePropagation {
+    /// Return the wire header name if trace propagation is enabled.
     pub const fn header(self) -> Option<&'static str> {
         match self {
             Self::Off => None,
@@ -56,6 +59,7 @@ impl TracePropagation {
 pub struct TraceId(String);
 
 impl TraceId {
+    /// Wrap an existing correlation identifier string.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
@@ -94,6 +98,7 @@ impl TraceId {
         ))
     }
 
+    /// Borrow the correlation identifier as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -130,6 +135,7 @@ pub struct TraceMeta {
 }
 
 impl TraceMeta {
+    /// Construct metadata with explicit `id` and `direction`.
     pub fn new(id: TraceId, direction: Direction) -> Self {
         Self {
             id,
@@ -140,10 +146,12 @@ impl TraceMeta {
         }
     }
 
+    /// Generate metadata for a new outbound egress attempt.
     pub fn egress() -> Self {
         Self::new(TraceId::generate(), Direction::Egress)
     }
 
+    /// Generate metadata for a new inbound ingress connection.
     pub fn ingress() -> Self {
         Self::new(TraceId::generate(), Direction::Ingress)
     }
@@ -247,8 +255,11 @@ pub enum EvasionPolicy {
     /// Split the first `segment_limit` bytes into `chunk_size` writes, with an
     /// optional gap in microseconds between chunks.
     SniSplit {
+        /// Maximum bytes written per TCP segment before `segment_limit`.
         chunk_size: u16,
+        /// Byte offset at which segmentation stops and full writes resume.
         segment_limit: u16,
+        /// Delay between segmented chunks in microseconds.
         gap_us: u32,
     },
 }
@@ -264,6 +275,7 @@ impl EvasionPolicy {
         }
     }
 
+    /// Whether no evasion policy is active.
     pub const fn is_none(self) -> bool {
         matches!(self, Self::None)
     }
@@ -275,17 +287,22 @@ impl EvasionPolicy {
 /// Request-only wire details (HTTP/1 header order and casing, HTTP/2
 /// pseudo-header order) are deliberately not here: they are applied per
 /// request and do not make two sockets interchangeable.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConnectionIdentity {
+    /// Selected TLS fingerprint profile name, if any.
     pub tls_profile: Option<String>,
     /// The TLS engine that handshakes this connection: `None` is the default
     /// rustls path; a name selects a registered engine (the owned
     /// `netune-tls` engine). Engine choice is connection identity
     /// ([`INV-TLS-09`]).
     pub tls_engine: Option<String>,
+    /// Verified TLS server name (SNI / certificate subject).
     pub tls_server_name: Option<String>,
+    /// Wire-shaping evasion policy active on this connection.
     pub evasion: EvasionPolicy,
+    /// Selected HTTP/2 connection profile name, if any.
     pub h2_profile: Option<String>,
     /// The resolved QUIC profile that supplies the H3 connection's transport
     /// identity.
@@ -294,10 +311,34 @@ pub struct ConnectionIdentity {
     /// named one. SETTINGS are connection-level: they shape the peer's view of
     /// the connection and cannot be changed per request.
     pub h3_settings_profile: Option<String>,
+    /// Opaque socket-options fingerprint distinguishing custom `SocketConfig`s.
     pub socket_shape: Option<String>,
     /// The route a connection took (for example a proxy authority), when it is
     /// not a direct dial. Credentials are deliberately excluded.
     pub route: Option<String>,
+}
+
+impl ConnectionIdentity {
+    /// Set the verified TLS server name.
+    #[must_use]
+    pub fn with_tls_server_name(mut self, name: impl Into<String>) -> Self {
+        self.tls_server_name = Some(name.into());
+        self
+    }
+
+    /// Set the HTTP/3 QUIC profile name.
+    #[must_use]
+    pub fn with_h3_profile(mut self, profile: impl Into<String>) -> Self {
+        self.h3_profile = Some(profile.into());
+        self
+    }
+
+    /// Set the HTTP/3 SETTINGS profile name.
+    #[must_use]
+    pub fn with_h3_settings_profile(mut self, profile: impl Into<String>) -> Self {
+        self.h3_settings_profile = Some(profile.into());
+        self
+    }
 }
 
 /// Current schema of the trace envelope. Bumped when a consumer must change
@@ -316,12 +357,15 @@ pub struct RequestTrace {
     /// *meant* to its consumer (a tenant, a job, a retry ordinal) is the
     /// consumer's to keep, keyed by [`TraceMeta::id`].
     pub authority: String,
+    /// Provenance metadata of the connection that carried this attempt.
     pub connection: ConnectionInfo,
     /// The wire identity requested for the connection this attempt used.
     pub identity: ConnectionIdentity,
     /// Envelope schema version; see [`TRACE_SCHEMA_VERSION`].
     pub schema_version: u32,
+    /// Fidelity level achieved by this trace.
     pub fidelity: Fidelity,
+    /// Recorded event log.
     pub log: EventLog,
     /// Bounded failure narration for this attempt.
     pub diagnostics: DiagnosticTable,
@@ -361,13 +405,18 @@ impl RequestTrace {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraceSnapshot {
+    /// Correlation identity and provenance metadata.
     pub meta: TraceMeta,
+    /// Fidelity level achieved by the recorded events.
     pub fidelity: Fidelity,
+    /// Recorded event log.
     pub log: EventLog,
+    /// Bounded diagnostic side table.
     pub diagnostics: DiagnosticTable,
 }
 
 impl TraceSnapshot {
+    /// Construct a snapshot from its parts.
     pub fn new(
         meta: TraceMeta,
         fidelity: Fidelity,
@@ -382,10 +431,12 @@ impl TraceSnapshot {
         }
     }
 
+    /// Total events evicted from the ring buffer.
     pub fn dropped_events(&self) -> u32 {
         self.log.dropped()
     }
 
+    /// Total diagnostics evicted from the side table.
     pub fn dropped_diagnostics(&self) -> u32 {
         self.diagnostics.dropped()
     }
@@ -395,6 +446,7 @@ impl TraceSnapshot {
         self.diagnostics.last_error().map(|record| record.code)
     }
 
+    /// Derive a structured [`Diagnosis`] from this snapshot.
     pub fn diagnose(&self) -> crate::diagnose::Diagnosis {
         crate::diagnose::diagnose(&self.meta, self.fidelity, &self.log, &self.diagnostics)
     }

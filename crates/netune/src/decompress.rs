@@ -18,8 +18,11 @@ const SCRATCH: usize = 64 * 1024;
 
 /// Decodes a body according to its `Content-Encoding`.
 pub enum Decoder {
+    /// Uncompressed pass-through (`identity` or absent `Content-Encoding`).
     Identity,
+    /// `gzip` / `deflate` stream decoder.
     Gzip(Box<Gzip>),
+    /// `br` (Brotli) stream decoder.
     Brotli(Box<Brotli>),
 }
 

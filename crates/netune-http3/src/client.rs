@@ -129,14 +129,15 @@ impl H3RequestBody {
         self.stream.send_capsule(capsule).await
     }
 
-    /// Split the request into a sender and a response-head future.
+    /// Split the request into a write-only sender and a response-head future.
     ///
-    /// The sender keeps the original stream view; the future reads a
-    /// receive-only view of the same QUIC stream. They can run concurrently,
-    /// which is what lets an HTTP/3 client observe an early response while a
-    /// streaming upload is still in progress. The response future owns the
-    /// stream permit, so dropping it releases the session slot.
-    pub fn split(mut self) -> (Self, H3ResponseFuture) {
+    /// The returned [`H3SplitSender`] can only send body data, trailers, or
+    /// close the send side; it does not expose datagrams or `into_duplex`,
+    /// which belong exclusively to an unsplit [`H3RequestBody`] /
+    /// [`H3ResponseStream`]. The response future owns the receive half and
+    /// shares the stream permit, so dropping either half waits for the other
+    /// before releasing the session slot.
+    pub fn split(mut self) -> (H3SplitSender, H3ResponseFuture) {
         let view = self.stream.response_view();
         self.stream.release_read_ownership();
         let response = H3ResponseFuture {
@@ -147,7 +148,13 @@ impl H3RequestBody {
             exchange: self.exchange,
             permit: self.permit.clone(),
         };
-        (self, response)
+        let sender = H3SplitSender {
+            stream: self.stream,
+            config: self.config,
+            exchange: self.exchange,
+            _permit: self.permit,
+        };
+        (sender, response)
     }
 
     /// Read the response head while keeping the request body open.
@@ -203,6 +210,68 @@ impl H3RequestBody {
             self.config,
             self.exchange,
             self.permit,
+        )
+        .await
+    }
+}
+
+/// The write-only request-body half returned by [`H3RequestBody::split`].
+///
+/// Unlike [`H3RequestBody`], this type cannot read the response or send HTTP/3
+/// datagrams; use [`H3RequestBody::into_duplex`] for full-duplex CONNECT /
+/// WebTransport streams with datagrams.
+pub struct H3SplitSender {
+    stream: H3Stream,
+    config: H3ClientConfig,
+    exchange: u32,
+    _permit: Option<H3StreamPermit>,
+}
+
+impl std::fmt::Debug for H3SplitSender {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("H3SplitSender")
+            .field("exchange", &self.exchange)
+            .finish_non_exhaustive()
+    }
+}
+
+impl H3SplitSender {
+    /// The exchange id carried in `Event::stream`.
+    pub const fn exchange(&self) -> u32 {
+        self.exchange
+    }
+
+    /// Write the next request-body chunk.
+    pub async fn send_data(&mut self, bytes: Bytes) -> Result<(), H3Error> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        deadline(
+            "request body",
+            self.config.request_timeout,
+            self.stream.send_data(&bytes),
+        )
+        .await
+    }
+
+    /// Close the request send side without waiting for response headers.
+    pub async fn close_send(&mut self) -> Result<(), H3Error> {
+        deadline(
+            "request finish",
+            self.config.request_timeout,
+            self.stream.finish_send(),
+        )
+        .await
+    }
+
+    /// Send request trailers and finish the send side.
+    pub async fn send_trailers(mut self, trailers: http::HeaderMap) -> Result<(), H3Error> {
+        let fields = encode_trailers(&trailers)?;
+        deadline(
+            "request trailers",
+            self.config.request_timeout,
+            self.stream.send_trailers(&fields),
         )
         .await
     }
@@ -730,12 +799,10 @@ impl H3Client {
             trace_context: Some(H3TraceContext {
                 authority: target.to_string(),
                 server_name: server_name.to_string(),
-                identity: ConnectionIdentity {
-                    tls_server_name: Some(server_name.to_string()),
-                    h3_profile: Some(quic_profile.to_string()),
-                    h3_settings_profile: Some(settings_name),
-                    ..ConnectionIdentity::default()
-                },
+                identity: ConnectionIdentity::default()
+                    .with_tls_server_name(server_name)
+                    .with_h3_profile(quic_profile)
+                    .with_h3_settings_profile(settings_name),
             }),
             request_profile: H3RequestProfile::default(),
             config,

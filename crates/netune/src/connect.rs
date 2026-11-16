@@ -209,6 +209,7 @@ pub(crate) fn dial_tap(recorder: &TraceCollector) -> SocketTap {
 }
 
 /// Which HTTP protocol family an egress [`Target`] asks to speak.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HttpProtocol {
     /// HTTP/1.1, or HTTP/2 when `ClientConfig::enable_http2` is set and ALPN negotiates `h2`.
@@ -223,6 +224,7 @@ pub enum HttpProtocol {
 }
 
 /// How to reach a peer.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     /// `host:port`.
@@ -274,10 +276,7 @@ impl Target {
     pub fn tls(authority: impl Into<String>, server_name: impl Into<String>) -> Self {
         Self {
             authority: authority.into(),
-            identity: ConnectionIdentity {
-                tls_server_name: Some(server_name.into()),
-                ..ConnectionIdentity::default()
-            },
+            identity: ConnectionIdentity::default().with_tls_server_name(server_name),
             protocol: HttpProtocol::Auto,
             h1_profile: None,
             h2_request_profile: None,
@@ -467,7 +466,9 @@ pub(crate) fn authority_host(authority: &str) -> &str {
 }
 
 /// A freshly established connection.
+#[non_exhaustive]
 pub struct Established {
+    /// Connected byte stream, wrapped with the attempt's socket tap when applicable.
     pub stream: Box<dyn Transport>,
     /// Local port, when the platform exposes it. Distinguishes concurrent
     /// connections to the same authority.
@@ -489,9 +490,49 @@ pub struct Established {
     pub alpn_protocol: Option<Vec<u8>>,
 }
 
+impl Established {
+    /// Wrap a raw established [`Transport`] with no ALPN or socket metadata.
+    pub fn new(stream: Box<dyn Transport>) -> Self {
+        Self {
+            stream,
+            local_port: None,
+            socket: None,
+            alpn: None,
+            alpn_protocol: None,
+        }
+    }
+
+    /// Attach the local port of the underlying socket.
+    #[must_use]
+    pub fn with_local_port(mut self, local_port: Option<u16>) -> Self {
+        self.local_port = local_port;
+        self
+    }
+
+    /// Attach a duplicated `TcpStream` handle for `TCP_INFO` sampling.
+    #[must_use]
+    pub fn with_socket(mut self, socket: Option<std::net::TcpStream>) -> Self {
+        self.socket = socket;
+        self
+    }
+
+    /// Attach the negotiated ALPN protocol.
+    #[must_use]
+    pub fn with_alpn(
+        mut self,
+        alpn: Option<netune_trace::Alpn>,
+        alpn_protocol: Option<Vec<u8>>,
+    ) -> Self {
+        self.alpn = alpn;
+        self.alpn_protocol = alpn_protocol;
+        self
+    }
+}
+
 /// Opens connections. Implemented by `TcpConnector` today; the TLS layer wraps
 /// its output rather than replacing it.
 pub trait Connector: Send + Sync {
+    /// Establish a transport connection to `target`, recording phase events into `recorder`.
     fn connect(
         &self,
         target: &Target,
@@ -534,8 +575,11 @@ pub use netune_egress::{ConfinementRefused, EgressConfinement, is_public_ip};
 /// Resolves, then connects over TCP with optional egress confinement and socket tuning.
 #[derive(Debug, Clone)]
 pub struct TcpConnector<R: DnsResolver = SystemResolver> {
+    /// Egress address confinement policy enforced prior to socket connect.
     pub confinement: EgressConfinement,
+    /// DNS resolver used for authority hostnames.
     pub resolver: Arc<R>,
+    /// Socket options applied before connecting.
     pub socket_config: SocketConfig,
     /// Upper bound on the *connection establishment* phases (DNS + TCP).
     ///
@@ -560,6 +604,7 @@ impl Default for TcpConnector<SystemResolver> {
 }
 
 impl TcpConnector<SystemResolver> {
+    /// Create a connector with unrestricted confinement and the system DNS resolver.
     pub fn new() -> Self {
         Self {
             confinement: EgressConfinement::Unrestricted,
@@ -569,6 +614,7 @@ impl TcpConnector<SystemResolver> {
         }
     }
 
+    /// Create a connector enforcing [`EgressConfinement::StrictPublic`].
     pub fn strict_public() -> Self {
         Self {
             confinement: EgressConfinement::StrictPublic,
@@ -580,6 +626,7 @@ impl TcpConnector<SystemResolver> {
 }
 
 impl<R: DnsResolver> TcpConnector<R> {
+    /// Create a connector using a custom [`DnsResolver`].
     pub fn with_resolver(resolver: Arc<R>) -> Self {
         Self {
             confinement: EgressConfinement::Unrestricted,
@@ -589,6 +636,7 @@ impl<R: DnsResolver> TcpConnector<R> {
         }
     }
 
+    /// Apply custom [`SocketConfig`] options before connecting.
     pub fn with_socket_config(mut self, config: SocketConfig) -> Self {
         self.socket_config = config;
         self

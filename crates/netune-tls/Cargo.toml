@@ -44,8 +44,8 @@ flate2 = { workspace = true }
 # and `netune-trace` (ClientHello parser, JA3/JA4) are test-only. Neither
 # ships ([INV-TLS-04]). `test-support` provides the self-signed
 # identity for the live loopback handshake.
-netune-trace = { path = "../netune-trace", version = "0.0.35" }
-test-support = { path = "../test-support", version = "0.0.35" }
+netune-trace = { path = "../netune-trace", version = "0.1.0" }
+test-support = { path = "../test-support", version = "0.1.0" }
 rustls = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
 

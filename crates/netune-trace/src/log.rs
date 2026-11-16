@@ -23,8 +23,11 @@ pub struct EncodedEvent {
     pub stream: u32,
     /// Nanoseconds since the previous stored event (`0` for a `TimeJump`).
     pub dt_ns: u32,
+    /// Kind of event recorded.
     pub kind: EventKind,
+    /// First event-specific payload word.
     pub a: u32,
+    /// Second event-specific payload word.
     pub b: u32,
 }
 
@@ -230,6 +233,7 @@ impl EventLog {
         self.len
     }
 
+    /// True when no events are currently retained.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

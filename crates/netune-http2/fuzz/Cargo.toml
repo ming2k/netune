@@ -1,0 +1,22 @@
+[package]
+name = "netune-http2-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+bytes = "1"
+libfuzzer-sys = "0.4"
+netune-http2 = { path = ".." }
+
+[[bin]]
+name = "fuzz_http2"
+path = "fuzz_targets/fuzz_http2.rs"
+test = false
+doc = false
+bench = false

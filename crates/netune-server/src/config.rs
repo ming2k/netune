@@ -112,8 +112,11 @@ impl Default for Protocols {
 }
 
 /// How the transport bounds one connection, and where its trace goes.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
+    /// Disable Nagle's algorithm (`TCP_NODELAY`) on accepted sockets. Default is `true`.
+    pub nodelay: bool,
     /// Codec bounds: head bytes, header count, chunk and body size.
     pub limits: Limits,
     /// Upper bound on simultaneously served connections.
@@ -197,6 +200,7 @@ pub struct ServerConfig {
 /// the number the peer is *told*, rather than a number enforced after the fact. A bound the
 /// peer was not told about is a bound that shows up as a mid-request failure instead of as
 /// a limit the peer could have respected.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct H2Ingress {
     /// Concurrent streams one connection may have open (advertised
@@ -294,6 +298,7 @@ impl Default for H2Ingress {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            nodelay: true,
             limits: Limits::for_ingress(),
             max_connections: 512,
             max_requests_per_connection: 1_000,
@@ -325,6 +330,7 @@ impl ServerConfig {
     /// behaviour changes.
     pub const fn for_tests() -> Self {
         Self {
+            nodelay: true,
             limits: Limits::for_ingress(),
             max_connections: 8,
             max_requests_per_connection: 8,
@@ -365,6 +371,13 @@ impl ServerConfig {
     #[must_use]
     pub fn with_trace_propagation(mut self, propagation: TracePropagation) -> Self {
         self.trace_propagation = propagation;
+        self
+    }
+
+    /// Enable or disable `TCP_NODELAY` on accepted TCP sockets.
+    #[must_use]
+    pub fn with_nodelay(mut self, nodelay: bool) -> Self {
+        self.nodelay = nodelay;
         self
     }
 
@@ -666,6 +679,7 @@ pub trait TraceObserver: Send + Sync + std::fmt::Debug {
 }
 
 /// How a connection's protocol was selected.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolVia {
     /// The first bytes were a prior-knowledge HTTP/2 preface.
@@ -677,39 +691,66 @@ pub enum ProtocolVia {
 }
 
 /// A listener-scoped fact that is not part of any one connection trace.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListenerEvent {
     /// The listener bound successfully.
     Bound {
+        /// Local socket address bound by the TCP listener.
         local: SocketAddr,
+        /// Application protocols advertised on this listener.
         protocols: Protocols,
+        /// Configured connection concurrency ceiling.
         max_connections: usize,
     },
     /// `accept(2)` failed and the listener continued.
-    AcceptFailed { error: String },
+    AcceptFailed {
+        /// Error string reported by `accept(2)`.
+        error: String,
+    },
     /// Admission control refused a connection.
     Shed {
+        /// Remote peer address that was shed.
         peer: SocketAddr,
+        /// Number of active connections at the time of shedding.
         active: usize,
+        /// Configured maximum connections.
         max: usize,
     },
     /// A connection's protocol was selected.
     ProtocolSelected {
+        /// Remote peer address.
         peer: SocketAddr,
+        /// Protocol selected for this connection.
         protocol: ServedProtocol,
+        /// Mechanism by which the protocol was determined.
         via: ProtocolVia,
     },
     /// The listener stopped accepting and began draining.
-    DrainStarted { inflight: usize },
+    DrainStarted {
+        /// In-flight connections remaining when drain began.
+        inflight: usize,
+    },
     /// The drain deadline expired with connections still running.
-    DrainExpired { aborted: usize },
+    DrainExpired {
+        /// Number of connections aborted on drain expiry.
+        aborted: usize,
+    },
     /// A connection task ended in a panic or join failure.
-    TaskFailed { error: String },
+    TaskFailed {
+        /// Failure reason from the connection task.
+        error: String,
+    },
     /// An incoming QUIC/H3 handshake failed; the listener continues.
-    H3HandshakeFailed { error: String },
+    H3HandshakeFailed {
+        /// Handshake failure reason.
+        error: String,
+    },
     /// The H3 listener bound successfully.
     H3Bound {
+        /// Local UDP socket address bound by the HTTP/3 listener.
         local: SocketAddr,
+        /// Configured connection concurrency ceiling.
         max_connections: usize,
     },
 }
@@ -719,6 +760,7 @@ pub enum ListenerEvent {
 /// Implemented by the transport's consumer, never by the transport. It must not
 /// block: it runs on the accept loop or a connection task.
 pub trait ListenerObserver: Send + Sync + std::fmt::Debug {
+    /// Handle one listener-scoped event.
     fn event(&self, event: ListenerEvent);
 }
 
@@ -731,6 +773,7 @@ pub struct CollectingListenerObserver {
 }
 
 impl CollectingListenerObserver {
+    /// Create a bounded collecting observer holding at most `capacity` recent events.
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity: capacity.max(1),
@@ -738,6 +781,7 @@ impl CollectingListenerObserver {
         }
     }
 
+    /// Drain and return all collected listener events.
     pub fn take(&self) -> Vec<ListenerEvent> {
         let mut events = self
             .events
@@ -901,10 +945,8 @@ mod tests {
 
     #[test]
     fn zero_codec_bounds_are_refused() {
-        let config = ServerConfig::default().with_limits(Limits {
-            max_head_bytes: 0,
-            ..Limits::for_ingress()
-        });
+        let config =
+            ServerConfig::default().with_limits(Limits::for_ingress().with_max_head_bytes(0));
         assert!(config.validate().is_err());
     }
 

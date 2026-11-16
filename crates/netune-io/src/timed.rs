@@ -115,6 +115,7 @@ pub struct RingIo<T> {
 }
 
 impl<T> RingIo<T> {
+    /// Wrap `inner` with an owned `Ring` tap that merges into `collector` on drop.
     pub fn new(inner: T, ring: Ring, collector: TraceCollector) -> Self {
         Self {
             inner: Some(TimedIo::new(inner, ring)),

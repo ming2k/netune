@@ -26,17 +26,23 @@ pub const DEFAULT_DIAGNOSTIC_CAPACITY: usize = 32;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum DiagnosticLevel {
+    /// Terminal or action-required failure.
     Error = 0,
+    /// Non-fatal anomaly or degradation.
     Warn = 1,
+    /// Informational lifecycle fact.
     Info = 2,
+    /// Verbose diagnostic detail.
     Debug = 3,
 }
 
 /// Where in the transport the diagnostic was raised.
+#[non_exhaustive]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[allow(missing_docs)]
 pub enum DiagnosticPhase {
     Dispatch = 0,
     Dns = 1,
@@ -60,6 +66,7 @@ pub enum DiagnosticPhase {
 }
 
 /// Whether another attempt could plausibly succeed.
+#[non_exhaustive]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -99,7 +106,10 @@ pub struct DiagnosticCode(u32);
 macro_rules! diagnostic_registry {
     ($( $name:ident = $raw:literal => $symbol:literal, $phase:ident, $level:ident, $retry:ident; )*) => {
         impl DiagnosticCode {
-            $(pub const $name: Self = Self($raw);)*
+            $(
+                /// Registered diagnostic code (`$symbol`).
+                pub const $name: Self = Self($raw);
+            )*
 
             /// Every registered code, in registry order.
             pub const REGISTERED: &'static [Self] = &[$(Self::$name),*];
@@ -230,6 +240,7 @@ impl fmt::Display for DiagnosticCode {
 /// arbitrary `std::error::Error`: a diagnostic code is a reviewed classification,
 /// not a downcast guess.
 pub trait Diagnose {
+    /// Return a structured diagnostic record describing this error.
     fn diagnostic(&self) -> DiagnosticRecord;
 }
 
@@ -239,14 +250,21 @@ pub trait Diagnose {
 pub struct DiagnosticRecord {
     /// Producer sequence assigned by [`DiagnosticTable::push`].
     pub sequence: u32,
+    /// Stable diagnostic code.
     pub code: DiagnosticCode,
+    /// Severity level.
     pub level: DiagnosticLevel,
+    /// Transport phase where the diagnostic was raised.
     pub phase: DiagnosticPhase,
+    /// Retry safety verdict.
     pub retry: RetryVerdict,
+    /// Bounded human-readable message.
     pub message: String,
     /// How the message may be persisted.
     pub message_sensitivity: Sensitivity,
+    /// Key/value metadata fields attached to this diagnostic.
     pub fields: Vec<DiagnosticField>,
+    /// Optional underlying cause text.
     pub cause: Option<String>,
     /// How the cause text may be persisted.
     pub cause_sensitivity: Sensitivity,
@@ -256,12 +274,16 @@ pub struct DiagnosticRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiagnosticField {
+    /// Bounded field key.
     pub key: String,
+    /// Bounded field value.
     pub value: String,
+    /// Redaction policy for this field.
     pub sensitivity: Sensitivity,
 }
 
 impl DiagnosticField {
+    /// Construct an `Internal`-sensitivity field.
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: truncate(key.into(), MAX_DIAGNOSTIC_FIELD),
@@ -270,6 +292,7 @@ impl DiagnosticField {
         }
     }
 
+    /// Construct a `Secret`-sensitivity field (always redacted in bundles/sinks).
     pub fn secret(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: truncate(key.into(), MAX_DIAGNOSTIC_FIELD),
@@ -278,6 +301,7 @@ impl DiagnosticField {
         }
     }
 
+    /// Construct a `Public`-sensitivity field safe for operator output.
     pub fn public(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: truncate(key.into(), MAX_DIAGNOSTIC_FIELD),
@@ -304,24 +328,28 @@ impl DiagnosticRecord {
         }
     }
 
+    /// Override the diagnostic phase.
     #[must_use]
     pub fn with_phase(mut self, phase: DiagnosticPhase) -> Self {
         self.phase = phase;
         self
     }
 
+    /// Override the diagnostic severity level.
     #[must_use]
     pub fn with_level(mut self, level: DiagnosticLevel) -> Self {
         self.level = level;
         self
     }
 
+    /// Override the retry verdict.
     #[must_use]
     pub fn with_retry(mut self, retry: RetryVerdict) -> Self {
         self.retry = retry;
         self
     }
 
+    /// Attach an `Internal`-sensitivity message.
     #[must_use]
     pub fn with_message(mut self, message: impl Into<String>) -> Self {
         self.message = truncate(message.into(), MAX_DIAGNOSTIC_MESSAGE);
@@ -329,6 +357,7 @@ impl DiagnosticRecord {
         self
     }
 
+    /// Attach a `Public`-sensitivity message.
     #[must_use]
     pub fn with_public_message(mut self, message: impl Into<String>) -> Self {
         self.message = truncate(message.into(), MAX_DIAGNOSTIC_MESSAGE);
@@ -336,6 +365,7 @@ impl DiagnosticRecord {
         self
     }
 
+    /// Attach a `Secret`-sensitivity message.
     #[must_use]
     pub fn with_secret_message(mut self, message: impl Into<String>) -> Self {
         self.message = truncate(message.into(), MAX_DIAGNOSTIC_MESSAGE);
@@ -343,6 +373,7 @@ impl DiagnosticRecord {
         self
     }
 
+    /// Attach an `Internal`-sensitivity cause string.
     #[must_use]
     pub fn with_cause(mut self, cause: impl Into<String>) -> Self {
         self.cause = Some(truncate(cause.into(), MAX_DIAGNOSTIC_MESSAGE));
@@ -350,6 +381,7 @@ impl DiagnosticRecord {
         self
     }
 
+    /// Attach a `Public`-sensitivity cause string.
     #[must_use]
     pub fn with_public_cause(mut self, cause: impl Into<String>) -> Self {
         self.cause = Some(truncate(cause.into(), MAX_DIAGNOSTIC_MESSAGE));
@@ -357,6 +389,7 @@ impl DiagnosticRecord {
         self
     }
 
+    /// Attach a `Secret`-sensitivity cause string.
     #[must_use]
     pub fn with_secret_cause(mut self, cause: impl Into<String>) -> Self {
         self.cause = Some(truncate(cause.into(), MAX_DIAGNOSTIC_MESSAGE));
@@ -364,6 +397,7 @@ impl DiagnosticRecord {
         self
     }
 
+    /// Append an `Internal`-sensitivity metadata field.
     #[must_use]
     pub fn with_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         if self.fields.len() < MAX_DIAGNOSTIC_FIELDS {
@@ -372,6 +406,7 @@ impl DiagnosticRecord {
         self
     }
 
+    /// Append a `Public`-sensitivity metadata field.
     #[must_use]
     pub fn with_public_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         if self.fields.len() < MAX_DIAGNOSTIC_FIELDS {
@@ -380,6 +415,7 @@ impl DiagnosticRecord {
         self
     }
 
+    /// Append a `Secret`-sensitivity metadata field.
     #[must_use]
     pub fn with_secret_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         if self.fields.len() < MAX_DIAGNOSTIC_FIELDS {
@@ -406,6 +442,7 @@ impl Default for DiagnosticTable {
 }
 
 impl DiagnosticTable {
+    /// Construct an empty diagnostic table with bounded `capacity`.
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity: capacity.max(1),
@@ -435,22 +472,27 @@ impl DiagnosticTable {
             .find(|record| record.sequence == sequence)
     }
 
+    /// Iterate over retained diagnostic records in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = &DiagnosticRecord> {
         self.records.iter()
     }
 
+    /// Number of retained diagnostic records.
     pub fn len(&self) -> usize {
         self.records.len()
     }
 
+    /// Whether the diagnostic table holds zero records.
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
 
+    /// Number of records evicted due to table capacity.
     pub fn dropped(&self) -> u32 {
         self.dropped
     }
 
+    /// Configured maximum record capacity.
     pub fn capacity(&self) -> usize {
         self.capacity
     }

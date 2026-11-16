@@ -45,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("server closed: {reason:?}");
                 break;
             }
+            _ => {}
         }
     }
 
@@ -182,12 +183,11 @@ let ws = client.connect_ws(&target, "/v1/stream").await?;
 
 let mut session = WsSession::new(
     ws,
-    WsSessionConfig {
+    WsSessionConfig::default()
         // Default 20 s, aligned with the pool's idle bound and the 30–60 s
         // cull window edge gateways actually apply (ADR-0005).
-        ping_interval: Duration::from_secs(20),
-        pong_timeout: Duration::from_secs(10),
-    },
+        .with_ping_interval(Duration::from_secs(20))
+        .with_pong_timeout(Duration::from_secs(10)),
 );
 
 while let Some(message) = session.next().await? {

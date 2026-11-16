@@ -237,19 +237,15 @@ async fn an_ingress_trace_from_a_real_exchange_derives_every_phase() {
     );
     let log = ingress.log;
 
-    let trace = netune_trace::RequestTrace {
-        meta: netune_trace::TraceMeta::new(
+    let trace = netune_trace::RequestTrace::new(
+        netune_trace::TraceMeta::new(
             netune_trace::TraceId::new("ingress"),
             netune_trace::Direction::Ingress,
         ),
-        authority: address.to_string(),
-        connection: netune_trace::ConnectionInfo::default(),
-        identity: netune_trace::ConnectionIdentity::default(),
-        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
-        fidelity: netune_trace::Fidelity::l1(),
+        address.to_string(),
         log,
-        diagnostics: netune_trace::DiagnosticTable::default(),
-    };
+    )
+    .with_fidelity(netune_trace::Fidelity::l1());
 
     let derived = derive_ingress(&trace);
     assert_eq!(

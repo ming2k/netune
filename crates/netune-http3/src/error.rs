@@ -26,11 +26,19 @@ pub enum H3Error {
 
     /// The peer or local endpoint closed the connection with an H3 error code.
     #[error("http3 connection closed with {code:#x}: {message}")]
-    Connection { code: u64, message: String },
+    Connection {
+        /// HTTP/3 application error code.
+        code: u64,
+        /// Diagnostic reason phrase or error message.
+        message: String,
+    },
 
     /// The peer sent `GOAWAY` indicating streams at or above `id` were not processed.
     #[error("http3 connection received GOAWAY (id {id})")]
-    GoAway { id: u64 },
+    GoAway {
+        /// Stream or push identifier carried in the `GOAWAY` frame.
+        id: u64,
+    },
 
     /// HTTP request construction or validation failed.
     #[error("http error: {0}")]
@@ -62,7 +70,10 @@ pub enum H3Error {
 
     /// A buffered response exceeded the configured body ceiling.
     #[error("http3 response body exceeded {limit} bytes")]
-    BodyTooLarge { limit: usize },
+    BodyTooLarge {
+        /// Configured maximum response body size in bytes.
+        limit: usize,
+    },
 }
 
 impl Diagnose for H3Error {
@@ -192,22 +203,27 @@ impl H3AttemptError {
         Self::new(error, snapshot)
     }
 
+    /// Borrow the underlying HTTP/3 error.
     pub fn error(&self) -> &H3Error {
         &self.error
     }
 
+    /// Borrow the trace snapshot captured for this attempt.
     pub fn trace(&self) -> &TraceSnapshot {
         &self.trace
     }
 
+    /// Borrow the primary error-level diagnostic record for this attempt.
     pub fn diagnostic(&self) -> &DiagnosticRecord {
         &self.report
     }
 
+    /// Derive a structured diagnosis from the attempt's trace snapshot.
     pub fn diagnosis(&self) -> netune_trace::Diagnosis {
         self.trace.diagnose()
     }
 
+    /// Consume the attempt error into its underlying [`H3Error`] and [`TraceSnapshot`].
     pub fn into_parts(self) -> (H3Error, TraceSnapshot) {
         (self.error, self.trace)
     }

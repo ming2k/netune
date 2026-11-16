@@ -17,9 +17,13 @@ pub const VERSION_2: u32 = 0x6b33_43cf;
 /// A long-header packet type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LongType {
+    /// Initial packet carrying client/server Initial CRYPTO frames.
     Initial,
+    /// 0-RTT early data packet.
     ZeroRtt,
+    /// Handshake packet carrying Handshake CRYPTO and ACK frames.
     Handshake,
+    /// Retry packet carrying an address-validation token and integrity tag.
     Retry,
 }
 
@@ -43,6 +47,7 @@ impl LongType {
         }
     }
 
+    /// Decode the long-header type bits from `bits` for `version`.
     pub fn from_bits_for(version: u32, bits: u8) -> Self {
         if version == VERSION_2 {
             match bits & 0x30 {
@@ -61,6 +66,7 @@ impl LongType {
         }
     }
 
+    /// Decode the long-header type bits from `bits` using QUIC v1 bit assignments.
     pub fn from_bits(bits: u8) -> Self {
         Self::from_bits_for(VERSION_1, bits)
     }
@@ -69,13 +75,21 @@ impl LongType {
 /// A decoded long-header packet (headers unprotected).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LongPacket {
+    /// Long-header packet type.
     pub ty: LongType,
+    /// QUIC version field.
     pub version: u32,
+    /// Destination connection ID bytes.
     pub destination_connection_id: Vec<u8>,
+    /// Source connection ID bytes.
     pub source_connection_id: Vec<u8>,
+    /// Address-validation token (present only in `Initial` packets).
     pub token: Vec<u8>,
+    /// Decoded or truncated packet number value.
     pub packet_number: u64,
+    /// Encoded packet number byte length (`1..=4`).
     pub packet_number_len: u8,
+    /// Unprotected or encrypted packet payload bytes.
     pub payload: Bytes,
 }
 
@@ -187,19 +201,27 @@ impl LongPacket {
 /// A decoded short-header packet (headers unprotected).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShortPacket {
+    /// Latency spin bit.
     pub spin: bool,
+    /// Key phase bit for 1-RTT key rotation.
     pub key_phase: bool,
+    /// Destination connection ID bytes.
     pub destination_connection_id: Vec<u8>,
+    /// Decoded or truncated packet number value.
     pub packet_number: u64,
+    /// Encoded packet number byte length (`1..=4`).
     pub packet_number_len: u8,
+    /// Unprotected or encrypted packet payload bytes.
     pub payload: Bytes,
 }
 
 impl ShortPacket {
+    /// Byte offset of the packet-number field from the start of the packet.
     pub fn packet_number_offset(&self) -> usize {
         1 + self.destination_connection_id.len()
     }
 
+    /// Encode the short-header packet without header or payload protection.
     pub fn encode(&self) -> Result<Bytes, WireError> {
         validate_packet_number_len(self.packet_number_len)?;
         if self.destination_connection_id.len() > 20 {
@@ -264,14 +286,20 @@ impl ShortPacket {
 /// A Retry packet, including its integrity tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetryPacket {
+    /// QUIC version field.
     pub version: u32,
+    /// Destination connection ID bytes.
     pub destination_connection_id: Vec<u8>,
+    /// Source connection ID bytes.
     pub source_connection_id: Vec<u8>,
+    /// Opaque Retry token bytes.
     pub token: Vec<u8>,
+    /// 16-byte Retry integrity tag.
     pub integrity_tag: [u8; 16],
 }
 
 impl RetryPacket {
+    /// Decode a Retry packet from `buf`.
     pub fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
         let first = buf.try_get_u8().map_err(|_| WireError::UnexpectedEnd)?;
         if first & 0x80 == 0 {
@@ -304,6 +332,7 @@ impl RetryPacket {
         })
     }
 
+    /// Encode the Retry packet without the trailing 16-byte integrity tag (used for tag computation).
     pub fn encode_without_tag(&self) -> Result<Bytes, WireError> {
         let mut out = BytesMut::new();
         out.put_u8(0xc0 | LongType::Retry.bits_for(self.version));
@@ -314,6 +343,7 @@ impl RetryPacket {
         Ok(out.freeze())
     }
 
+    /// Encode the complete Retry packet including its integrity tag.
     pub fn encode(&self) -> Result<Bytes, WireError> {
         let mut out = BytesMut::from(self.encode_without_tag()?.as_ref());
         out.put_slice(&self.integrity_tag);
@@ -324,12 +354,16 @@ impl RetryPacket {
 /// A parsed Version Negotiation packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionNegotiation {
+    /// Destination connection ID bytes.
     pub destination_connection_id: Vec<u8>,
+    /// Source connection ID bytes.
     pub source_connection_id: Vec<u8>,
+    /// Supported QUIC versions advertised by the server.
     pub versions: Vec<u32>,
 }
 
 impl VersionNegotiation {
+    /// Decode a Version Negotiation packet from `buf`.
     pub fn decode(buf: &mut &[u8]) -> Result<Self, WireError> {
         let first = buf.try_get_u8().map_err(|_| WireError::UnexpectedEnd)?;
         if first & 0x80 == 0 {
@@ -361,6 +395,7 @@ impl VersionNegotiation {
         })
     }
 
+    /// Encode the Version Negotiation packet.
     pub fn encode(&self) -> Result<Bytes, WireError> {
         let mut out = BytesMut::new();
         out.put_u8(0x80);

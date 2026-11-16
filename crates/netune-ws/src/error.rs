@@ -3,6 +3,7 @@ use std::fmt;
 use crate::frame::CloseCode;
 
 /// WebSocket protocol and codec errors.
+#[non_exhaustive]
 #[derive(Debug, PartialEq, Eq)]
 pub enum WsError {
     /// A violation of RFC 6455 framing, opcode, masking, or control frame invariants.

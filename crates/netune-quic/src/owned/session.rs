@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::wire::transport_parameters::TransportParameters;
 
+/// In-memory cache of peer QUIC transport parameters keyed by server name for 0-RTT resumption.
 #[derive(Clone, Default)]
 pub struct SessionCache {
     entries: Arc<Mutex<HashMap<String, TransportParameters>>>,
@@ -34,10 +35,12 @@ impl std::fmt::Debug for SessionCache {
 }
 
 impl SessionCache {
+    /// Create an empty session cache.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Look up cached peer transport parameters for `server_name`.
     pub fn get(&self, server_name: &str) -> Option<TransportParameters> {
         self.entries
             .lock()

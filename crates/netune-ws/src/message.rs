@@ -36,6 +36,7 @@ impl DataOpcode {
 }
 
 /// A reassembled WebSocket message ready for application processing.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     /// A UTF-8 text message.
@@ -51,6 +52,7 @@ pub enum Message {
 }
 
 /// Description of connection closure.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloseReason {
     /// Numeric WebSocket close code.

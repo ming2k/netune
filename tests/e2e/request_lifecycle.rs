@@ -15,8 +15,8 @@ use netune::{
     TraceConfig,
 };
 use netune_trace::{
-    ConnectionInfo, EventKind, Fidelity, FrameClass, Reason, RequestTrace, TRACE_SCHEMA_VERSION,
-    TraceCollector, TraceId, Validity, derive,
+    EventKind, Fidelity, FrameClass, Reason, RequestTrace, TRACE_SCHEMA_VERSION, TraceCollector,
+    TraceId, Validity, derive,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -76,16 +76,12 @@ async fn serve(listener: TcpListener, responses: usize) {
 }
 
 fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
-    RequestTrace {
-        meta: netune_trace::TraceMeta::new(TraceId::new("e2e"), netune_trace::Direction::Egress),
-        authority: authority.to_string(),
-        connection: ConnectionInfo::default(),
-        identity: netune_trace::ConnectionIdentity::default(),
-        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
-        fidelity: Fidelity::l1(),
+    RequestTrace::new(
+        netune_trace::TraceMeta::new(TraceId::new("e2e"), netune_trace::Direction::Egress),
+        authority,
         log,
-        diagnostics: netune_trace::DiagnosticTable::default(),
-    }
+    )
+    .with_fidelity(Fidelity::l1())
 }
 
 /// Run one request, marking one output token per streamed frame the way a

@@ -28,6 +28,7 @@ pub enum Direction {
 /// Adding a header changes HTTP/1 header order and the HTTP/2 header set, which
 /// are fingerprint-relevant. Propagation is therefore a named policy, never a
 /// silent default.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TracePropagation {
     /// No header is added or read.
@@ -119,6 +120,7 @@ fn now_unix_ns() -> u64 {
 }
 
 /// Identity and provenance that travels with every trace.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraceMeta {
@@ -164,6 +166,7 @@ impl std::fmt::Display for TraceId {
 }
 
 /// Provenance of the connection the attempt used.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConnectionInfo {
@@ -176,10 +179,34 @@ pub struct ConnectionInfo {
     pub age_ns: Option<u64>,
 }
 
+impl ConnectionInfo {
+    /// Set whether this connection was reused from the pool.
+    #[must_use]
+    pub const fn with_reused(mut self, reused: bool) -> Self {
+        self.reused = reused;
+        self
+    }
+
+    /// Set the ephemeral local port recorded for the connection.
+    #[must_use]
+    pub const fn with_local_port(mut self, local_port: Option<u16>) -> Self {
+        self.local_port = local_port;
+        self
+    }
+
+    /// Set the reused connection age at dispatch in nanoseconds.
+    #[must_use]
+    pub const fn with_age_ns(mut self, age_ns: Option<u64>) -> Self {
+        self.age_ns = age_ns;
+        self
+    }
+}
+
 /// Which tap levels produced this trace.
 ///
 /// A consumer's first duty is to check this before trusting a scope: an L0
 /// trace has no `TCP_INFO`, no per-read timeline and no segments.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Fidelity {
@@ -245,6 +272,7 @@ impl Fidelity {
 /// This is intentionally a value, not a boolean on a target: it can be compared,
 /// hashed into a pool key and recorded in a trace envelope. The `SniSplit`
 /// preset matches the long-standing `SegmentingIo::for_sni` shape.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -346,6 +374,7 @@ impl ConnectionIdentity {
 pub const TRACE_SCHEMA_VERSION: u32 = 3;
 
 /// One request attempt's complete recorded trace.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RequestTrace {
@@ -372,6 +401,49 @@ pub struct RequestTrace {
 }
 
 impl RequestTrace {
+    /// Construct a trace envelope with schema version [`TRACE_SCHEMA_VERSION`]
+    /// and default connection metadata, identity, fidelity, and empty diagnostics.
+    pub fn new(meta: TraceMeta, authority: impl Into<String>, log: EventLog) -> Self {
+        Self {
+            meta,
+            authority: authority.into(),
+            connection: ConnectionInfo::default(),
+            identity: ConnectionIdentity::default(),
+            schema_version: TRACE_SCHEMA_VERSION,
+            fidelity: Fidelity::default(),
+            log,
+            diagnostics: DiagnosticTable::default(),
+        }
+    }
+
+    /// Attach connection provenance metadata.
+    #[must_use]
+    pub const fn with_connection(mut self, connection: ConnectionInfo) -> Self {
+        self.connection = connection;
+        self
+    }
+
+    /// Attach the requested wire identity.
+    #[must_use]
+    pub fn with_identity(mut self, identity: ConnectionIdentity) -> Self {
+        self.identity = identity;
+        self
+    }
+
+    /// Set the trace fidelity level achieved.
+    #[must_use]
+    pub const fn with_fidelity(mut self, fidelity: Fidelity) -> Self {
+        self.fidelity = fidelity;
+        self
+    }
+
+    /// Attach a diagnostic table.
+    #[must_use]
+    pub fn with_diagnostics(mut self, diagnostics: DiagnosticTable) -> Self {
+        self.diagnostics = diagnostics;
+        self
+    }
+
     /// The trace's correlation id.
     pub fn id(&self) -> &TraceId {
         &self.meta.id
@@ -402,6 +474,7 @@ impl RequestTrace {
 
 /// A bounded snapshot of an attempt's evidence, suitable for attaching to an
 /// error or writing into a review bundle.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraceSnapshot {

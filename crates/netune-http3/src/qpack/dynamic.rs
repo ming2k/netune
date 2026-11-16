@@ -15,11 +15,14 @@ use super::error::QpackError;
 /// the H3 layer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HeaderField {
+    /// Header field name bytes.
     pub name: Vec<u8>,
+    /// Header field value bytes.
     pub value: Vec<u8>,
 }
 
 impl HeaderField {
+    /// Construct a header field from raw name and value bytes.
     pub fn new(name: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
         Self {
             name: name.into(),
@@ -80,26 +83,32 @@ impl DynamicTable {
         }
     }
 
+    /// Return the total number of entries inserted since table creation.
     pub fn total_inserted(&self) -> u64 {
         self.insert_count
     }
 
+    /// Return the current occupied size of the table in bytes.
     pub fn size(&self) -> usize {
         self.size
     }
 
+    /// Return the active dynamic table capacity in bytes.
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
+    /// Return the maximum allowed dynamic table capacity in bytes.
     pub fn max_capacity(&self) -> usize {
         self.max_capacity
     }
 
+    /// Return the Known Received Count tracked by the table.
     pub fn known_received(&self) -> u64 {
         self.known_received
     }
 
+    /// Advance the Known Received Count to at least `count`.
     pub fn set_known_received(&mut self, count: u64) {
         self.known_received = self.known_received.max(count);
     }

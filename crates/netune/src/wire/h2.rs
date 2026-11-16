@@ -168,12 +168,7 @@ pub(super) async fn exchange_on_session(
     });
 
     Ok(Exchange {
-        head: IncomingResponse {
-            version: http::Version::HTTP_2,
-            status,
-            headers,
-            body: body_kind,
-        },
+        head: IncomingResponse::new(http::Version::HTTP_2, status, headers, body_kind),
         body: Box::new(Body {
             reader: Some(reader),
             recorder: recorder.clone(),
@@ -314,6 +309,7 @@ impl BodySource for Body {
                         }
                         return Ok(None);
                     }
+                    _ => continue,
                 }
             }
         })

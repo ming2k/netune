@@ -27,6 +27,7 @@ use crate::trace::RequestTrace;
 use crate::verdict::{Reading, Reason};
 
 /// Everything derivable from a QUIC handshake trace.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DerivedQuic {
@@ -35,6 +36,7 @@ pub struct DerivedQuic {
 }
 
 /// Everything derivable from one HTTP/3 request exchange.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DerivedH3 {

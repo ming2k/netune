@@ -13,102 +13,170 @@ pub const MAX_FRAME_PAYLOAD: usize = 1 << 20;
 /// ACK ECN counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EcnCounts {
+    /// Count of packets received with the ECT(0) codepoint.
     pub ect0: u64,
+    /// Count of packets received with the ECT(1) codepoint.
     pub ect1: u64,
+    /// Count of packets received with the ECN-CE codepoint.
     pub ce: u64,
 }
 
 /// One gap/range pair in an ACK frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AckRange {
+    /// Number of unacknowledged packets preceding this range, minus one.
     pub gap: u64,
+    /// Number of contiguous acknowledged packets in this range, minus one.
     pub range: u64,
 }
 
 /// ACK frame payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AckFrame {
+    /// Largest packet number being acknowledged.
     pub largest_acknowledged: u64,
+    /// Delay between receipt of `largest_acknowledged` and sending the ACK, encoded per `ack_delay_exponent`.
     pub ack_delay: u64,
+    /// Number of contiguous packets below `largest_acknowledged` being acknowledged, minus one.
     pub first_ack_range: u64,
+    /// Additional gap/range pairs for lower acknowledged packet numbers.
     pub ranges: Vec<AckRange>,
+    /// Optional ECN counts when the frame type is `0x03`.
     pub ecn: Option<EcnCounts>,
 }
 
 /// A QUIC frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
+    /// `PADDING` frame (`0x00`), coalescing consecutive zero bytes.
     Padding {
+        /// Number of contiguous padding bytes.
         len: usize,
     },
+    /// `PING` frame (`0x01`).
     Ping,
+    /// `ACK` frame (`0x02` or `0x03`).
     Ack(AckFrame),
+    /// `RESET_STREAM` frame (`0x04`).
     ResetStream {
+        /// ID of the stream being abruptly terminated.
         stream_id: u64,
+        /// Application protocol error code indicating why the stream is closed.
         error_code: u64,
+        /// Final byte offset sent on the stream.
         final_size: u64,
     },
+    /// `RESET_STREAM_AT` frame (`0x24`) for reliable partial stream reset.
     ResetStreamAt {
+        /// ID of the stream being reset.
         stream_id: u64,
+        /// Application protocol error code.
         error_code: u64,
+        /// Final byte offset sent on the stream.
         final_size: u64,
+        /// Byte offset up to which data must still be delivered reliably.
         reliable_size: u64,
     },
+    /// `STOP_SENDING` frame (`0x05`).
     StopSending {
+        /// ID of the stream to stop transmitting.
         stream_id: u64,
+        /// Application protocol error code explaining why the stream is no longer needed.
         error_code: u64,
     },
+    /// `CRYPTO` frame (`0x06`) carrying TLS handshake data.
     Crypto {
+        /// Byte offset in the cryptographic handshake stream.
         offset: u64,
+        /// Handshake payload bytes.
         data: Bytes,
     },
+    /// `NEW_TOKEN` frame (`0x07`) carrying an address-validation token.
     NewToken {
+        /// Opaque token bytes issued by the server.
         token: Bytes,
     },
+    /// `STREAM` frame (`0x08..=0x0f`).
     Stream {
+        /// ID of the stream carrying this data.
         stream_id: u64,
+        /// Byte offset of `data` within the stream.
         offset: u64,
+        /// Whether this frame marks the end of the stream.
         fin: bool,
+        /// Stream payload bytes.
         data: Bytes,
     },
+    /// `MAX_DATA` frame (`0x10`) advertising the connection-level data limit.
     MaxData(u64),
+    /// `MAX_STREAM_DATA` frame (`0x11`) advertising a stream-level data limit.
     MaxStreamData {
+        /// Target stream ID.
         stream_id: u64,
+        /// Maximum cumulative byte offset permitted on the stream.
         maximum: u64,
     },
+    /// `MAX_STREAMS` frame (`0x12` for bidirectional, `0x13` for unidirectional).
     MaxStreams {
+        /// `true` for bidirectional streams, `false` for unidirectional streams.
         bidi: bool,
+        /// Maximum cumulative number of streams of this directionality allowed.
         maximum: u64,
     },
+    /// `DATA_BLOCKED` frame (`0x14`) indicating connection-level flow control blocking at this limit.
     DataBlocked(u64),
+    /// `STREAM_DATA_BLOCKED` frame (`0x15`).
     StreamDataBlocked {
+        /// Blocked stream ID.
         stream_id: u64,
+        /// Stream data limit at which transmission is blocked.
         maximum: u64,
     },
+    /// `STREAMS_BLOCKED` frame (`0x16` for bidirectional, `0x17` for unidirectional).
     StreamsBlocked {
+        /// `true` for bidirectional streams, `false` for unidirectional streams.
         bidi: bool,
+        /// Stream count limit at which opening new streams is blocked.
         maximum: u64,
     },
+    /// `NEW_CONNECTION_ID` frame (`0x18`).
     NewConnectionId {
+        /// Sequence number assigned to this connection ID.
         sequence: u64,
+        /// Connection IDs with sequence numbers below this value must be retired.
         retire_prior_to: u64,
+        /// Issued connection ID bytes (1..=20 bytes).
         connection_id: Vec<u8>,
+        /// 16-byte stateless reset token associated with this connection ID.
         reset_token: [u8; 16],
     },
+    /// `RETIRE_CONNECTION_ID` frame (`0x19`) retiring the connection ID with this sequence number.
     RetireConnectionId(u64),
+    /// `PATH_CHALLENGE` frame (`0x1a`) carrying an 8-byte challenge payload.
     PathChallenge([u8; 8]),
+    /// `PATH_RESPONSE` frame (`0x1b`) echoing the 8-byte challenge payload.
     PathResponse([u8; 8]),
+    /// Transport-layer `CONNECTION_CLOSE` frame (`0x1c`).
     ConnectionCloseTransport {
+        /// QUIC transport error code.
         error_code: u64,
+        /// Frame type that triggered the error, or `0` if unknown/unspecified.
         frame_type: u64,
+        /// UTF-8 diagnostic reason phrase.
         reason: Bytes,
     },
+    /// Application-layer `CONNECTION_CLOSE` frame (`0x1d`).
     ConnectionCloseApplication {
+        /// Application protocol error code.
         error_code: u64,
+        /// UTF-8 diagnostic reason phrase.
         reason: Bytes,
     },
+    /// `HANDSHAKE_DONE` frame (`0x1e`).
     HandshakeDone,
+    /// RFC 9221 `DATAGRAM` frame (`0x30` or `0x31`).
     Datagram {
+        /// Unreliable datagram payload bytes.
         data: Bytes,
     },
 }

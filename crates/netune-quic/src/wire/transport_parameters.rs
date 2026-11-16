@@ -7,24 +7,43 @@ use bytes::{BufMut, BytesMut};
 use super::error::WireError;
 use super::varint;
 
+/// Transport parameter ID for `original_destination_connection_id` (`0x00`).
 pub const ORIGINAL_DESTINATION_CONNECTION_ID: u64 = 0x00;
+/// Transport parameter ID for `max_idle_timeout` (`0x01`).
 pub const MAX_IDLE_TIMEOUT: u64 = 0x01;
+/// Transport parameter ID for `stateless_reset_token` (`0x02`).
 pub const STATELESS_RESET_TOKEN: u64 = 0x02;
+/// Transport parameter ID for `max_udp_payload_size` (`0x03`).
 pub const MAX_UDP_PAYLOAD_SIZE: u64 = 0x03;
+/// Transport parameter ID for `initial_max_data` (`0x04`).
 pub const INITIAL_MAX_DATA: u64 = 0x04;
+/// Transport parameter ID for `initial_max_stream_data_bidi_local` (`0x05`).
 pub const INITIAL_MAX_STREAM_DATA_BIDI_LOCAL: u64 = 0x05;
+/// Transport parameter ID for `initial_max_stream_data_bidi_remote` (`0x06`).
 pub const INITIAL_MAX_STREAM_DATA_BIDI_REMOTE: u64 = 0x06;
+/// Transport parameter ID for `initial_max_stream_data_uni` (`0x07`).
 pub const INITIAL_MAX_STREAM_DATA_UNI: u64 = 0x07;
+/// Transport parameter ID for `initial_max_streams_bidi` (`0x08`).
 pub const INITIAL_MAX_STREAMS_BIDI: u64 = 0x08;
+/// Transport parameter ID for `initial_max_streams_uni` (`0x09`).
 pub const INITIAL_MAX_STREAMS_UNI: u64 = 0x09;
+/// Transport parameter ID for `ack_delay_exponent` (`0x0a`).
 pub const ACK_DELAY_EXPONENT: u64 = 0x0a;
+/// Transport parameter ID for `max_ack_delay` (`0x0b`).
 pub const MAX_ACK_DELAY: u64 = 0x0b;
+/// Transport parameter ID for `disable_active_migration` (`0x0c`).
 pub const DISABLE_ACTIVE_MIGRATION: u64 = 0x0c;
+/// Transport parameter ID for `preferred_address` (`0x0d`).
 pub const PREFERRED_ADDRESS: u64 = 0x0d;
+/// Transport parameter ID for `active_connection_id_limit` (`0x0e`).
 pub const ACTIVE_CONNECTION_ID_LIMIT: u64 = 0x0e;
+/// Transport parameter ID for `initial_source_connection_id` (`0x0f`).
 pub const INITIAL_SOURCE_CONNECTION_ID: u64 = 0x0f;
+/// Transport parameter ID for `retry_source_connection_id` (`0x10`).
 pub const RETRY_SOURCE_CONNECTION_ID: u64 = 0x10;
+/// Transport parameter ID for `max_datagram_frame_size` (`0x20`, RFC 9221).
 pub const MAX_DATAGRAM_FRAME_SIZE: u64 = 0x20;
+/// Transport parameter ID for `reset_stream_at` (`0x1d`).
 pub const RESET_STREAM_AT: u64 = 0x1d;
 
 /// The smallest legal `max_udp_payload_size` (RFC 9000 §18.2).
@@ -33,52 +52,82 @@ pub const MIN_MAX_UDP_PAYLOAD_SIZE: u64 = 1200;
 /// The preferred-address transport parameter payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreferredAddress {
+    /// IPv4 address octets.
     pub ipv4: [u8; 4],
+    /// IPv4 UDP port in host byte order.
     pub ipv4_port: u16,
+    /// IPv6 address octets.
     pub ipv6: [u8; 16],
+    /// IPv6 UDP port in host byte order.
     pub ipv6_port: u16,
+    /// Connection ID to use when migrating to the preferred address.
     pub connection_id: Vec<u8>,
+    /// 16-byte stateless reset token for `connection_id`.
     pub stateless_reset_token: [u8; 16],
 }
 
 /// A decoded set of QUIC transport parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransportParameters {
+    /// Original Destination Connection ID from the client's first Initial packet.
     pub original_destination_connection_id: Option<Vec<u8>>,
+    /// Maximum idle timeout in milliseconds (`0` disables idle timeout).
     pub max_idle_timeout: Option<u64>,
+    /// 16-byte stateless reset token for the initial source connection ID.
     pub stateless_reset_token: Option<[u8; 16]>,
+    /// Maximum UDP payload size the endpoint is willing to receive.
     pub max_udp_payload_size: Option<u64>,
+    /// Initial connection-level flow-control receive limit in bytes.
     pub initial_max_data: Option<u64>,
+    /// Initial stream-level receive limit for locally-initiated bidirectional streams.
     pub initial_max_stream_data_bidi_local: Option<u64>,
+    /// Initial stream-level receive limit for peer-initiated bidirectional streams.
     pub initial_max_stream_data_bidi_remote: Option<u64>,
+    /// Initial stream-level receive limit for peer-initiated unidirectional streams.
     pub initial_max_stream_data_uni: Option<u64>,
+    /// Initial maximum number of bidirectional streams the peer may open.
     pub initial_max_streams_bidi: Option<u64>,
+    /// Initial maximum number of unidirectional streams the peer may open.
     pub initial_max_streams_uni: Option<u64>,
+    /// Exponent used to decode `ack_delay` values in ACK frames.
     pub ack_delay_exponent: Option<u64>,
+    /// Maximum amount of time by which the endpoint delays sending ACKs, in milliseconds.
     pub max_ack_delay: Option<u64>,
+    /// Whether active connection migration is disabled.
     pub disable_active_migration: bool,
+    /// Server preferred address advertised for post-handshake migration.
     pub preferred_address: Option<PreferredAddress>,
+    /// Maximum number of connection IDs from the peer the endpoint is willing to store.
     pub active_connection_id_limit: Option<u64>,
+    /// Connection ID from the Source Connection ID field of the first Initial packet.
     pub initial_source_connection_id: Option<Vec<u8>>,
+    /// Source Connection ID from the Retry packet, if Retry was used.
     pub retry_source_connection_id: Option<Vec<u8>>,
+    /// Maximum `DATAGRAM` frame payload size accepted by the endpoint (RFC 9221).
     pub max_datagram_frame_size: Option<u64>,
+    /// Whether the endpoint supports `RESET_STREAM_AT` frames.
     pub reset_stream_at: bool,
+    /// Unrecognized `(id, value)` transport parameters preserved during decoding.
     pub unknown: Vec<(u64, Vec<u8>)>,
 }
 
 impl TransportParameters {
+    /// Configured `max_udp_payload_size`, or the RFC 9000 default of `65_527`.
     pub fn max_udp_payload_size_or_default(&self) -> u64 {
         self.max_udp_payload_size.unwrap_or(65_527)
     }
 
+    /// Configured `ack_delay_exponent`, or the RFC 9000 default of `3`.
     pub fn ack_delay_exponent_or_default(&self) -> u64 {
         self.ack_delay_exponent.unwrap_or(3)
     }
 
+    /// Configured `max_ack_delay` in milliseconds, or the RFC 9000 default of `25`.
     pub fn max_ack_delay_or_default(&self) -> u64 {
         self.max_ack_delay.unwrap_or(25)
     }
 
+    /// Configured `active_connection_id_limit`, or the RFC 9000 default of `2`.
     pub fn active_connection_id_limit_or_default(&self) -> u64 {
         self.active_connection_id_limit.unwrap_or(2)
     }

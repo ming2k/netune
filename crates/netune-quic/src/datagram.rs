@@ -14,6 +14,7 @@ pub struct QuicDatagramSession {
 }
 
 impl QuicDatagramSession {
+    /// Wrap a [`Connection`] in an unreliable datagram session handle.
     pub fn new(connection: Connection) -> Self {
         Self { connection }
     }

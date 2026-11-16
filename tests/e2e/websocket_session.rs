@@ -99,10 +99,9 @@ async fn pong_deadline_exceeded_fails_the_session() {
 
     let mut session = netune::WsSession::new(
         ws,
-        netune::WsSessionConfig {
-            ping_interval: Duration::from_millis(100),
-            pong_timeout: Duration::from_millis(200),
-        },
+        netune::WsSessionConfig::default()
+            .with_ping_interval(Duration::from_millis(100))
+            .with_pong_timeout(Duration::from_millis(200)),
     );
 
     let err = session
@@ -136,10 +135,9 @@ async fn server_pong_recharges_liveness_and_session_survives() {
 
     let mut session = netune::WsSession::new(
         ws,
-        netune::WsSessionConfig {
-            ping_interval: Duration::from_millis(100),
-            pong_timeout: Duration::from_millis(200),
-        },
+        netune::WsSessionConfig::default()
+            .with_ping_interval(Duration::from_millis(100))
+            .with_pong_timeout(Duration::from_millis(200)),
     );
 
     // The pong must surface as a received message, not trip the deadline.
@@ -171,10 +169,9 @@ async fn client_ping_reaches_the_server_and_pong_answer_discharges() {
 
     let mut session = netune::WsSession::new(
         ws,
-        netune::WsSessionConfig {
-            ping_interval: Duration::from_millis(50),
-            pong_timeout: Duration::from_millis(500),
-        },
+        netune::WsSessionConfig::default()
+            .with_ping_interval(Duration::from_millis(50))
+            .with_pong_timeout(Duration::from_millis(500)),
     );
 
     // Drive the session concurrently so its ~50 ms heartbeat actually fires,
@@ -215,10 +212,9 @@ async fn disabled_heartbeat_passes_through_without_timers() {
 
     let mut session = netune::WsSession::new(
         ws,
-        netune::WsSessionConfig {
-            ping_interval: Duration::ZERO,
-            pong_timeout: Duration::from_secs(10),
-        },
+        netune::WsSessionConfig::default()
+            .with_ping_interval(Duration::ZERO)
+            .with_pong_timeout(Duration::from_secs(10)),
     );
 
     let msg = session.next().await.expect("next").expect("some");
@@ -253,10 +249,9 @@ async fn peer_initiated_pong_does_not_discharge_our_probe() {
 
     let session = netune::WsSession::new(
         ws,
-        netune::WsSessionConfig {
-            ping_interval: Duration::from_millis(50),
-            pong_timeout: Duration::from_millis(150),
-        },
+        netune::WsSessionConfig::default()
+            .with_ping_interval(Duration::from_millis(50))
+            .with_pong_timeout(Duration::from_millis(150)),
     );
 
     // Drive the session concurrently; its ping goes out at ~50 ms. The

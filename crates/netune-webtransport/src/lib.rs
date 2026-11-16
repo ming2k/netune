@@ -10,6 +10,7 @@
 //! negotiation remain open gates; see `docs/reference/stability.md`.
 
 #![cfg_attr(test, allow(clippy::expect_used))]
+#![deny(missing_docs)]
 //!
 //! This crate owns the WebTransport wire model and product API. HTTP/3 and QUIC
 //! remain RFC-owned leaves; WebTransport-specific SETTINGS, stream signals,
@@ -25,6 +26,7 @@ pub use session::{
     WebTransportSession,
 };
 
+/// The pinned WebTransport over HTTP/3 draft identifier string.
 pub const DRAFT_VERSION: &str = "draft-ietf-webtrans-http3-17";
 
 /// The WebTransport over HTTP/3 draft selected for one session.
@@ -34,11 +36,14 @@ pub const DRAFT_VERSION: &str = "draft-ietf-webtrans-http3-17";
 /// only the shared wire subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WebTransportVersion {
+    /// Draft-16 compatibility codepoint (`"draft-ietf-webtrans-http3-16"`).
     Draft16,
+    /// Draft-17 (`"draft-ietf-webtrans-http3-17"`).
     Draft17,
 }
 
 impl WebTransportVersion {
+    /// Return the draft identifier string for this version.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Draft16 => "draft-ietf-webtrans-http3-16",
@@ -76,31 +81,50 @@ impl WebTransportVersion {
     }
 }
 
+/// HTTP/3 setting enabling WebTransport (`0x20b8933b`).
 pub const SETTINGS_WT_ENABLED: u64 = 0x20b8_933b;
 /// Draft-16 `SETTINGS_WT_ENABLED` codepoint. Draft-17 endpoints advertise both
 /// codepoints when they can speak the draft-16 wire subset; the highest common
 /// version is selected by the codepoint the peer sends.
 pub const SETTINGS_WT_ENABLED_DRAFT16: u64 = 0x2c7c_f000;
+/// HTTP/3 setting advertising the initial unidirectional stream limit (`0x2b64`).
 pub const SETTINGS_WT_INITIAL_MAX_STREAMS_UNI: u64 = 0x2b64;
+/// HTTP/3 setting advertising the initial bidirectional stream limit (`0x2b65`).
 pub const SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI: u64 = 0x2b65;
+/// HTTP/3 setting advertising the initial session data limit (`0x2b61`).
 pub const SETTINGS_WT_INITIAL_MAX_DATA: u64 = 0x2b61;
 
+/// Bidirectional stream signal type identifying a WebTransport stream (`0x41`).
 pub const WT_STREAM_SIGNAL: u64 = 0x41;
+/// Unidirectional stream type identifying a WebTransport stream (`0x54`).
 pub const WT_UNI_STREAM_TYPE: u64 = 0x54;
 
+/// Capsule type closing a WebTransport session (`0x2843`).
 pub const WT_CLOSE_SESSION: u64 = 0x2843;
+/// Capsule type requesting graceful session draining (`0x78ae`).
 pub const WT_DRAIN_SESSION: u64 = 0x78ae;
+/// Capsule type updating the bidirectional stream limit (`0x190b4d3f`).
 pub const WT_MAX_STREAMS_BIDI: u64 = 0x190b_4d3f;
+/// Capsule type updating the unidirectional stream limit (`0x190b4d40`).
 pub const WT_MAX_STREAMS_UNI: u64 = 0x190b_4d40;
+/// Capsule type updating the session-level data limit (`0x190b4d3d`).
 pub const WT_MAX_DATA: u64 = 0x190b_4d3d;
+/// Capsule type signaling session data flow-control blockage (`0x190b4d41`).
 pub const WT_DATA_BLOCKED: u64 = 0x190b_4d41;
+/// Capsule type signaling bidirectional stream limit blockage (`0x190b4d43`).
 pub const WT_STREAMS_BLOCKED_BIDI: u64 = 0x190b_4d43;
+/// Capsule type signaling unidirectional stream limit blockage (`0x190b4d44`).
 pub const WT_STREAMS_BLOCKED_UNI: u64 = 0x190b_4d44;
 
+/// HTTP/3 stream error code for rejecting buffered streams (`0x3994bd84`).
 pub const WT_BUFFERED_STREAM_REJECTED: u64 = 0x3994_bd84;
+/// HTTP/3 stream error code indicating the WebTransport session is gone (`0x170d7b68`).
 pub const WT_SESSION_GONE: u64 = 0x170d_7b68;
+/// HTTP/3 error code for WebTransport flow-control violations (`0x045d4487`).
 pub const WT_FLOW_CONTROL_ERROR: u64 = 0x045d_4487;
+/// HTTP/3 error code for ALPN mismatch (`0x0817b3dd`).
 pub const WT_ALPN_ERROR: u64 = 0x0817_b3dd;
+/// HTTP/3 error code indicating WebTransport requirements were not met (`0x212c0d48`).
 pub const WT_REQUIREMENTS_NOT_MET: u64 = 0x212c_0d48;
 
 const WT_APPLICATION_ERROR_FIRST: u64 = 0x52e4_a40f_a8db;
@@ -134,6 +158,7 @@ pub mod error_code {
 pub struct SessionId(u64);
 
 impl SessionId {
+    /// Construct a session ID if `value` is a valid QUIC varint multiple of 4.
     pub fn new(value: u64) -> Result<Self, WebTransportError> {
         if value > (1u64 << 62) - 1 {
             return Err(WebTransportError::InvalidSessionId(value));
@@ -144,6 +169,7 @@ impl SessionId {
         Ok(Self(value))
     }
 
+    /// Return the underlying raw stream ID.
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -152,9 +178,13 @@ impl SessionId {
 /// WebTransport settings exchanged through HTTP/3 SETTINGS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebTransportSettings {
+    /// Whether WebTransport is enabled.
     pub enabled: bool,
+    /// Initial maximum number of peer-initiated unidirectional streams.
     pub initial_max_streams_uni: u64,
+    /// Initial maximum number of peer-initiated bidirectional streams.
     pub initial_max_streams_bidi: u64,
+    /// Initial maximum cumulative payload bytes across streams in the session.
     pub initial_max_data: u64,
 }
 
@@ -170,6 +200,7 @@ impl Default for WebTransportSettings {
 }
 
 impl WebTransportSettings {
+    /// Serialize these settings as HTTP/3 `(id, value)` setting pairs.
     pub fn extra_settings(self) -> Vec<(u64, u64)> {
         let mut settings = vec![
             (SETTINGS_WT_ENABLED, u64::from(self.enabled)),
@@ -193,6 +224,7 @@ impl WebTransportSettings {
         settings
     }
 
+    /// Parse WebTransport settings from HTTP/3 `(id, value)` pairs.
     pub fn from_extra(settings: &[(u64, u64)]) -> Result<Self, WebTransportError> {
         let mut output = Self {
             enabled: false,
@@ -246,10 +278,12 @@ pub fn encode_bidi_header(session: SessionId, out: &mut BytesMut) -> Result<(), 
     Ok(())
 }
 
+/// Decode a unidirectional WebTransport stream header, returning `None` if incomplete.
 pub fn parse_uni_header(input: &[u8]) -> Result<Option<(SessionId, usize)>, WebTransportError> {
     parse_header(input, WT_UNI_STREAM_TYPE)
 }
 
+/// Decode a bidirectional WebTransport stream header, returning `None` if incomplete.
 pub fn parse_bidi_header(input: &[u8]) -> Result<Option<(SessionId, usize)>, WebTransportError> {
     parse_header(input, WT_STREAM_SIGNAL)
 }
@@ -278,15 +312,37 @@ fn parse_header(
 /// A WebTransport session-control or flow-control capsule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlCapsule {
-    Close { code: u32, message: String },
+    /// Close the session with an application error code and UTF-8 message.
+    Close {
+        /// Application error code.
+        code: u32,
+        /// UTF-8 reason message (at most 1024 bytes).
+        message: String,
+    },
+    /// Request graceful draining of the session.
     Drain,
-    MaxStreams { bidi: bool, maximum: u64 },
+    /// Increase the peer's maximum stream limit.
+    MaxStreams {
+        /// `true` for bidirectional streams, `false` for unidirectional streams.
+        bidi: bool,
+        /// Updated cumulative stream limit.
+        maximum: u64,
+    },
+    /// Increase the peer's session-wide data limit.
     MaxData(u64),
-    StreamsBlocked { bidi: bool, maximum: u64 },
+    /// Notify the peer that opening streams is blocked at `maximum`.
+    StreamsBlocked {
+        /// `true` for bidirectional streams, `false` for unidirectional streams.
+        bidi: bool,
+        /// Stream limit at which the sender is blocked.
+        maximum: u64,
+    },
+    /// Notify the peer that sending data is blocked at the given byte limit.
     DataBlocked(u64),
 }
 
 impl ControlCapsule {
+    /// Encode this control message as an HTTP/3 [`Capsule`].
     pub fn to_capsule(&self) -> Result<Capsule, WebTransportError> {
         let (kind, value) = match self {
             Self::Close { code, message } if message.len() <= 1024 => {
@@ -339,6 +395,7 @@ impl ControlCapsule {
         Ok(Capsule::new(kind, value))
     }
 
+    /// Decode an HTTP/3 [`Capsule`] into a [`ControlCapsule`], returning `None` for unknown kinds.
     pub fn from_capsule(capsule: &Capsule) -> Result<Option<Self>, WebTransportError> {
         let out = match capsule.kind {
             WT_CLOSE_SESSION => {
@@ -417,30 +474,43 @@ fn parse_varint(value: &[u8]) -> Result<u64, WebTransportError> {
 /// WebTransport wire or framing error.
 #[derive(Debug, thiserror::Error)]
 pub enum WebTransportError {
+    /// Session ID is not a valid client-initiated bidirectional stream ID.
     #[error("invalid WebTransport session ID {0}")]
     InvalidSessionId(u64),
+    /// Stream header carried an unexpected type or signal varint.
     #[error("invalid WebTransport stream header {0:#x}")]
     InvalidStreamHeader(u64),
+    /// Incoming or outgoing WebTransport session request or URI is invalid.
     #[error("invalid WebTransport request: {0}")]
     InvalidRequest(String),
+    /// Request `Origin` header was rejected by [`OriginPolicy`].
     #[error("WebTransport origin rejected: {0}")]
     OriginRejected(String),
+    /// Peer or local WebTransport HTTP/3 settings are invalid or incompatible.
     #[error("bad WebTransport SETTINGS: {0}")]
     Settings(String),
+    /// Malformed or out-of-range WebTransport control capsule.
     #[error("WebTransport capsule error: {0}")]
     Capsule(String),
+    /// QUIC variable-length integer encoding or decoding failure.
     #[error("WebTransport wire error: {0}")]
     Wire(String),
+    /// Underlying HTTP/3 capsule framing error.
     #[error("HTTP/3 capsule error: {0}")]
     HttpCapsule(#[from] CapsuleError),
+    /// Underlying HTTP/3 transport error.
     #[error("HTTP/3 error: {0}")]
     Http3(String),
+    /// Underlying QUIC stream or connection error.
     #[error("QUIC error: {0}")]
     Quic(String),
+    /// HTTP status, header, or response construction error.
     #[error("HTTP error: {0}")]
     Http(String),
+    /// Operation attempted on a closed or draining session or reset stream.
     #[error("WebTransport session closed: {0}")]
     SessionClosed(String),
+    /// WebTransport stream or data flow-control limit violated.
     #[error("WebTransport flow control error: {0}")]
     FlowControl(String),
 }

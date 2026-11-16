@@ -24,6 +24,7 @@ use crate::error::NetError;
 use crate::ws::WsStream;
 
 /// Client-side heartbeat policy for a WebSocket session.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct WsSessionConfig {
     /// Send an unsolicited ping when this long has passed since the last
@@ -36,6 +37,22 @@ pub struct WsSessionConfig {
     /// A session with an outstanding ping that has not been answered within
     /// this duration is declared dead. Default 10 s.
     pub pong_timeout: Duration,
+}
+
+impl WsSessionConfig {
+    /// Set the unsolicited ping interval.
+    #[must_use]
+    pub const fn with_ping_interval(mut self, interval: Duration) -> Self {
+        self.ping_interval = interval;
+        self
+    }
+
+    /// Set the pong wait deadline before declaring the session dead.
+    #[must_use]
+    pub const fn with_pong_timeout(mut self, timeout: Duration) -> Self {
+        self.pong_timeout = timeout;
+        self
+    }
 }
 
 impl Default for WsSessionConfig {

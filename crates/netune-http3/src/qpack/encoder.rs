@@ -32,8 +32,11 @@ struct BlockRefs {
 /// before later blocks can rely on its insertions.
 #[derive(Debug, Clone)]
 pub struct EncodedSection {
+    /// Encoded QPACK field section bytes (prefix and field lines).
     pub block: Bytes,
+    /// Encoder-stream instructions emitted while encoding this section.
     pub encoder_instructions: Bytes,
+    /// Required Insert Count referenced by this section.
     pub required_insert_count: u64,
 }
 
@@ -48,6 +51,7 @@ pub struct Encoder {
 }
 
 impl Encoder {
+    /// Create a new QPACK encoder starting with zero dynamic table capacity.
     pub fn new() -> Self {
         Self {
             table: DynamicTable::encoder(0),
@@ -58,10 +62,12 @@ impl Encoder {
         }
     }
 
+    /// Return the encoder's Known Received Count.
     pub fn known_received(&self) -> u64 {
         self.known_received
     }
 
+    /// Return the active encoder dynamic table capacity in bytes.
     pub fn table_capacity(&self) -> usize {
         self.table.capacity()
     }

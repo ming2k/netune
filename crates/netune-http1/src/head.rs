@@ -26,6 +26,7 @@ use http::{HeaderMap, Method, StatusCode, Version};
 /// The body is passed separately to [`crate::write_request`] so the caller
 /// controls its length; a `Content-Length` header is written for a present body
 /// and never for an absent one.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct RequestHead {
     /// HTTP request method.
@@ -109,6 +110,7 @@ pub enum BodyKind {
 /// Separated from [`http::StatusCode`] because the phrase is not data the status
 /// implies — it is free text a server may set, replace, or omit entirely, and a
 /// caller that fingerprints HTTP responses needs to control it byte for byte.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ReasonPhrase {
     /// Use the canonical phrase for the status code (`404` → `Not Found`), or
@@ -136,6 +138,7 @@ impl ReasonPhrase {
 }
 
 /// A response head the server role builds.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ResponseHead {
     /// HTTP response status code.
@@ -159,6 +162,20 @@ impl ResponseHead {
             reason: ReasonPhrase::default(),
             body: BodyKind::Empty,
         }
+    }
+
+    /// Set a custom reason phrase for the status line.
+    #[must_use]
+    pub fn with_reason(mut self, reason: ReasonPhrase) -> Self {
+        self.reason = reason;
+        self
+    }
+
+    /// Override the body framing declaration explicitly.
+    #[must_use]
+    pub fn with_body_kind(mut self, body: BodyKind) -> Self {
+        self.body = body;
+        self
     }
 
     /// `true` when the status carries no body by definition.
@@ -229,6 +246,7 @@ impl ResponseHead {
 }
 
 /// A response head the client role received.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct IncomingResponse {
     /// HTTP version spoken by the peer (`HTTP/1.0` or `HTTP/1.1`).
@@ -241,7 +259,20 @@ pub struct IncomingResponse {
     pub body: BodyKind,
 }
 
+impl IncomingResponse {
+    /// Construct an incoming response head from decoded or adapted components.
+    pub fn new(version: Version, status: StatusCode, headers: HeaderMap, body: BodyKind) -> Self {
+        Self {
+            version,
+            status,
+            headers,
+            body,
+        }
+    }
+}
+
 /// A request head the server role received.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct IncomingRequest {
     /// HTTP request method.
@@ -267,6 +298,25 @@ pub struct IncomingRequest {
 }
 
 impl IncomingRequest {
+    /// Construct an incoming request head from decoded or adapted parts.
+    pub fn new(
+        method: Method,
+        target: bytes::Bytes,
+        form: crate::target::TargetForm,
+        version: Version,
+        headers: HeaderMap,
+        body: BodyKind,
+    ) -> Self {
+        Self {
+            method,
+            target,
+            form,
+            version,
+            headers,
+            body,
+        }
+    }
+
     /// The target decoded as text, when it is valid UTF-8.
     ///
     /// `None` rather than a lossy conversion: a request target that is not UTF-8

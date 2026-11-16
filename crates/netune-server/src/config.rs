@@ -252,14 +252,12 @@ impl H2Ingress {
     /// The codec-level bounds matching this configuration.
     #[cfg(feature = "http2")]
     pub(crate) fn local_settings(&self) -> netune_http2::LocalSettings {
-        netune_http2::LocalSettings {
-            header_table_size: self.header_table_size,
-            max_concurrent_streams: self.max_concurrent_streams,
-            initial_window_size: self.initial_window_size,
-            max_frame_size: self.max_frame_size,
-            max_header_list_size: self.max_header_list_size,
-            enable_push: false,
-        }
+        netune_http2::LocalSettings::for_ingress()
+            .with_header_table_size(self.header_table_size)
+            .with_max_concurrent_streams(self.max_concurrent_streams)
+            .with_initial_window_size(self.initial_window_size)
+            .with_max_frame_size(self.max_frame_size)
+            .with_max_header_list_size(self.max_header_list_size)
     }
 
     /// Reject values RFC 9113 §6.5.2 forbids.
@@ -859,13 +857,13 @@ impl TraceObserver for SinkObserver {
                 sink_dropped += 1;
             }
         }
-        let summary = TraceSummary {
-            events: trace.log.len(),
-            dropped_events: trace.log.dropped(),
-            diagnostics: trace.diagnostics.len(),
-            dropped_diagnostics: trace.diagnostics.dropped(),
+        let summary = TraceSummary::new(
+            trace.log.len(),
+            trace.log.dropped(),
+            trace.diagnostics.len(),
+            trace.diagnostics.dropped(),
             sink_dropped,
-        };
+        );
         self.sink.trace_finished(&trace.meta, &summary);
     }
 }

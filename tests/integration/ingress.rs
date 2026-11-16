@@ -234,19 +234,16 @@ async fn a_two_request_connection_yields_two_exchanges_from_the_real_transport()
     assert_eq!(ingress.exchanges, 2, "the transport counted two exchanges");
     assert_eq!(exchange_count(&ingress.log), 2);
 
-    let trace = netune_trace::RequestTrace {
-        meta: netune_trace::TraceMeta::new(
+    let trace = netune_trace::RequestTrace::new(
+        netune_trace::TraceMeta::new(
             netune_trace::TraceId::new("two"),
             netune_trace::Direction::Ingress,
         ),
-        authority: address_string(),
-        connection: netune_trace::ConnectionInfo::default(),
-        identity: netune_trace::ConnectionIdentity::default(),
-        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
-        fidelity: netune_trace::Fidelity::l1(),
-        log: ingress.log,
-        diagnostics: ingress.diagnostics,
-    };
+        address_string(),
+        ingress.log,
+    )
+    .with_fidelity(netune_trace::Fidelity::l1())
+    .with_diagnostics(ingress.diagnostics);
 
     // A single derivation must refuse: one set of spans cannot describe two requests.
     let whole = derive_ingress(&trace);

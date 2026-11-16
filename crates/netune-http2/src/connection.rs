@@ -61,21 +61,34 @@ pub const MIN_MAX_FRAME_SIZE: u32 = 16_384;
 pub const MAX_MAX_FRAME_SIZE: u32 = 16_777_215;
 
 /// Protocol error codes (RFC 9113 §7).
-#[allow(missing_docs)]
 pub mod error_code {
+    /// Graceful shutdown or normal closure (`0x0`).
     pub const NO_ERROR: u32 = 0x0;
+    /// Unspecific protocol error detected (`0x1`).
     pub const PROTOCOL_ERROR: u32 = 0x1;
+    /// Unexpected internal error encountered (`0x2`).
     pub const INTERNAL_ERROR: u32 = 0x2;
+    /// Flow-control limits violated by the peer (`0x3`).
     pub const FLOW_CONTROL_ERROR: u32 = 0x3;
+    /// Settings acknowledgement not received in time (`0x4`).
     pub const SETTINGS_TIMEOUT: u32 = 0x4;
+    /// Frame received for a half-closed or closed stream (`0x5`).
     pub const STREAM_CLOSED: u32 = 0x5;
+    /// Frame with an invalid length received (`0x6`).
     pub const FRAME_SIZE_ERROR: u32 = 0x6;
+    /// Stream refused prior to any application processing (`0x7`).
     pub const REFUSED_STREAM: u32 = 0x7;
+    /// Stream cancelled by the endpoint (`0x8`).
     pub const CANCEL: u32 = 0x8;
+    /// HPACK compression state failed to synchronize (`0x9`).
     pub const COMPRESSION_ERROR: u32 = 0x9;
+    /// TCP connection closed or reset during CONNECT (`0xa`).
     pub const CONNECT_ERROR: u32 = 0xa;
+    /// Excessive load or control frame rate triggered (`0xb`).
     pub const ENHANCE_YOUR_CALM: u32 = 0xb;
+    /// Negotiated transport security does not meet RFC 9113 §9.2 (`0xc`).
     pub const INADEQUATE_SECURITY: u32 = 0xc;
+    /// Endpoint requires HTTP/1.1 instead of HTTP/2 (`0xd`).
     pub const HTTP_1_1_REQUIRED: u32 = 0xd;
 }
 
@@ -129,6 +142,7 @@ impl Role {
 /// on accept). The values are the bounds the *peer* must respect when sending to us, which is
 /// why they are stated as a type rather than inferred from local buffers: a bound the peer was
 /// not told about becomes a mid-request failure instead of a limit it could have respected.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalSettings {
     /// Advertised `SETTINGS_HEADER_TABLE_SIZE`.
@@ -169,6 +183,41 @@ impl LocalSettings {
             max_header_list_size: 262_144,
             enable_push: false,
         }
+    }
+
+    /// Override `SETTINGS_HEADER_TABLE_SIZE`.
+    #[must_use]
+    pub const fn with_header_table_size(mut self, size: u32) -> Self {
+        self.header_table_size = size;
+        self
+    }
+
+    /// Override `SETTINGS_MAX_CONCURRENT_STREAMS`.
+    #[must_use]
+    pub const fn with_max_concurrent_streams(mut self, limit: u32) -> Self {
+        self.max_concurrent_streams = limit;
+        self
+    }
+
+    /// Override `SETTINGS_INITIAL_WINDOW_SIZE`.
+    #[must_use]
+    pub const fn with_initial_window_size(mut self, size: u32) -> Self {
+        self.initial_window_size = size;
+        self
+    }
+
+    /// Override `SETTINGS_MAX_FRAME_SIZE`.
+    #[must_use]
+    pub const fn with_max_frame_size(mut self, size: u32) -> Self {
+        self.max_frame_size = size;
+        self
+    }
+
+    /// Override `SETTINGS_MAX_HEADER_LIST_SIZE`.
+    #[must_use]
+    pub const fn with_max_header_list_size(mut self, size: u32) -> Self {
+        self.max_header_list_size = size;
+        self
     }
 
     /// The bounds implied by the `SETTINGS` a client is about to advertise.

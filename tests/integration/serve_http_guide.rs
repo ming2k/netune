@@ -151,19 +151,15 @@ async fn the_guide_timing_table_describes_a_real_exchange() {
     assert!(ingress.exchanges >= 1);
     let log = ingress.log;
 
-    let trace = netune_trace::RequestTrace {
-        meta: netune_trace::TraceMeta::new(
+    let trace = netune_trace::RequestTrace::new(
+        netune_trace::TraceMeta::new(
             netune_trace::TraceId::new("guide"),
             netune_trace::Direction::Ingress,
         ),
-        authority: address.to_string(),
-        connection: netune_trace::ConnectionInfo::default(),
-        identity: netune_trace::ConnectionIdentity::default(),
-        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
-        fidelity: netune_trace::Fidelity::l1(),
+        address.to_string(),
         log,
-        diagnostics: netune_trace::DiagnosticTable::default(),
-    };
+    )
+    .with_fidelity(netune_trace::Fidelity::l1());
 
     // The guide's inline example, exercised.
     let derived = derive_ingress(&trace);

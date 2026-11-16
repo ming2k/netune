@@ -7,6 +7,7 @@
 //! adapter the ingress orchestrator drives, so `netune-server` never imports a
 //! third-party H3 runtime.
 
+#![deny(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod client;

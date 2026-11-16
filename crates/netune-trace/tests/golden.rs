@@ -16,23 +16,16 @@ use netune_trace::{
 const MS: u64 = 1_000_000;
 
 fn trace_with(log: EventLog) -> RequestTrace {
-    RequestTrace {
-        meta: netune_trace::TraceMeta::new(
+    RequestTrace::new(
+        netune_trace::TraceMeta::new(
             TraceId::new("01924f4e-0000-7000-8000-000000000001"),
             netune_trace::Direction::Egress,
         ),
-        authority: "api.example.invalid:443".into(),
-        connection: ConnectionInfo {
-            reused: false,
-            local_port: Some(51_234),
-            age_ns: None,
-        },
-        identity: netune_trace::ConnectionIdentity::default(),
-        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
-        fidelity: Fidelity::l2(),
+        "api.example.invalid:443",
         log,
-        diagnostics: netune_trace::DiagnosticTable::default(),
-    }
+    )
+    .with_connection(ConnectionInfo::default().with_local_port(Some(51_234)))
+    .with_fidelity(Fidelity::l2())
 }
 
 /// A cold connection, a normal streaming answer.

@@ -299,3 +299,114 @@ async fn soak_h2_stream_churn_and_fd_bounds() {
     shutdown.notify_one();
     let _ = srv.await;
 }
+
+#[cfg(feature = "http3")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "long-running soak: run explicitly with --profile soak --run-ignored ignored-only"]
+async fn soak_h3_stream_churn_and_fd_bounds() {
+    use netune_http3::{H3Client, H3ServerConnection, H3SettingsProfile};
+    use netune_quic::QuicConnector;
+    use netune_quic::owned::{Endpoint, ServerConfigOwned};
+    use netune_quic::profile::QuicProfile;
+    use netune_quic::wire::transport_parameters::TransportParameters;
+
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert_chain = vec![rustls::pki_types::CertificateDer::from(
+        cert.cert.der().to_vec(),
+    )];
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        cert.signing_key.serialize_der(),
+    ));
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, key)
+        .unwrap();
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    let transport = TransportParameters {
+        initial_max_data: Some(16 * 1024 * 1024),
+        initial_max_stream_data_bidi_local: Some(1 << 20),
+        initial_max_stream_data_bidi_remote: Some(1 << 20),
+        initial_max_stream_data_uni: Some(1 << 20),
+        initial_max_streams_bidi: Some(1024),
+        initial_max_streams_uni: Some(1024),
+        active_connection_id_limit: Some(4),
+        ..TransportParameters::default()
+    };
+    let endpoint = Endpoint::server(
+        "127.0.0.1:0",
+        ServerConfigOwned {
+            tls: Arc::new(tls),
+            transport,
+            retry: false,
+            congestion: netune_quic::CongestionAlgorithm::NewReno,
+            enable_early_data: false,
+        },
+    )
+    .await
+    .unwrap();
+    let addr = endpoint.local_addr();
+    let srv = tokio::spawn(async move {
+        if let Ok(conn) = endpoint.accept().await
+            && let Ok(mut h3_conn) =
+                H3ServerConnection::new(conn, &H3SettingsProfile::dynamic()).await
+        {
+            while let Ok(Some(req)) = h3_conn.accept().await {
+                let (_head, mut stream) = req.into_parts();
+                tokio::spawn(async move {
+                    let mut body = Vec::new();
+                    while let Ok(Some(chunk)) = stream.recv_data().await {
+                        body.extend_from_slice(&chunk);
+                    }
+                    let resp = http::Response::builder().status(200).body(()).unwrap();
+                    if stream.send_response(resp).await.is_ok() {
+                        let _ = stream.send_data(Bytes::from(body)).await;
+                        let _ = stream.finish().await;
+                    }
+                });
+            }
+        }
+    });
+
+    let client_crypto = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(crate::common::tls::AcceptAnyCert))
+        .with_no_client_auth();
+    let connector = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto);
+    let mut h3_client = H3Client::connect_with_settings(
+        &connector,
+        addr,
+        "localhost",
+        None,
+        H3SettingsProfile::dynamic(),
+    )
+    .await
+    .unwrap();
+
+    let baseline_fds = open_fd_count();
+    for i in 0..120 {
+        let payload = Bytes::from(format!("h3-soak-stream-{i}"));
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("https://localhost/h3soak")
+            .body(payload.clone())
+            .unwrap();
+        let mut s = h3_client.send(req).await.unwrap();
+        assert_eq!(s.head().status(), 200);
+        let echoed = s.read_to_end().await.unwrap();
+        assert_eq!(echoed, payload);
+    }
+
+    drop(h3_client);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let final_fds = open_fd_count();
+    assert!(
+        final_fds <= baseline_fds + 16,
+        "fd leak after 120 HTTP/3 streams: baseline={baseline_fds}, final={final_fds}"
+    );
+    srv.abort();
+}

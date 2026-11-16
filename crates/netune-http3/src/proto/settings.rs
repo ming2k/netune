@@ -10,10 +10,15 @@ use super::varint::{self, VarIntError};
 /// A decoded peer SETTINGS payload.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Settings {
+    /// `SETTINGS_QPACK_MAX_TABLE_CAPACITY` advertised by the endpoint.
     pub qpack_max_table_capacity: u64,
+    /// `SETTINGS_MAX_FIELD_SECTION_SIZE`, if explicitly advertised.
     pub max_field_section_size: Option<u64>,
+    /// `SETTINGS_QPACK_BLOCKED_STREAMS` advertised by the endpoint.
     pub qpack_blocked_streams: u64,
+    /// Whether `SETTINGS_ENABLE_CONNECT_PROTOCOL` is enabled.
     pub enable_connect_protocol: bool,
+    /// Whether `SETTINGS_H3_DATAGRAM` is enabled.
     pub h3_datagram: bool,
     /// Reserved identifiers are ignored after validation.
     pub grease: Vec<(u64, u64)>,
@@ -22,14 +27,19 @@ pub struct Settings {
 /// A malformed SETTINGS frame.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettingsError {
+    /// The SETTINGS payload ended mid-varint.
     #[error("truncated SETTINGS payload")]
     Truncated,
+    /// A SETTINGS identifier appeared more than once in the same frame.
     #[error("duplicate SETTINGS identifier 0x{0:x}")]
     Duplicate(u64),
+    /// A boolean SETTINGS parameter held a value other than `0` or `1`.
     #[error("invalid value {1} for SETTINGS identifier 0x{0:x}")]
     InvalidValue(u64, u64),
+    /// `SETTINGS_QPACK_MAX_TABLE_CAPACITY` exceeded `2^30 - 1`.
     #[error("QPACK capacity {0} exceeds 2^30-1")]
     CapacityTooLarge(u64),
+    /// `SETTINGS_QPACK_BLOCKED_STREAMS` exceeded `65535`.
     #[error("QPACK blocked streams {0} exceeds 2^16-1")]
     TooManyBlockedStreams(u64),
 }

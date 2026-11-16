@@ -32,6 +32,7 @@ pub mod session;
 pub use session::{H2ClientSession, H2HeadFuture, H2RequestSender, H2StreamPermit, H2StreamReader};
 
 /// A parsed HTTP/2 response.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct H2Response {
     /// HTTP status code (`:status`).
@@ -45,6 +46,7 @@ pub struct H2Response {
 }
 
 /// The head of a streamed HTTP/2 response.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct H2ResponseHead {
     /// HTTP status code (`:status`).
@@ -56,6 +58,7 @@ pub struct H2ResponseHead {
 }
 
 /// One increment of a streamed HTTP/2 response.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum H2ResponseEvent {
     /// A `DATA` frame payload. `end_stream` marks the last payload.

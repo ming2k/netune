@@ -59,6 +59,7 @@ pub trait TraceSink: Send + Sync + std::fmt::Debug {
 }
 
 /// What a sink saw when an attempt ended.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraceSummary {
@@ -72,6 +73,25 @@ pub struct TraceSummary {
     pub dropped_diagnostics: u32,
     /// Events declined by the attached [`TraceSink`].
     pub sink_dropped: u32,
+}
+
+impl TraceSummary {
+    /// Construct a trace summary snapshot.
+    pub const fn new(
+        events: usize,
+        dropped_events: u32,
+        diagnostics: usize,
+        dropped_diagnostics: u32,
+        sink_dropped: u32,
+    ) -> Self {
+        Self {
+            events,
+            dropped_events,
+            diagnostics,
+            dropped_diagnostics,
+            sink_dropped,
+        }
+    }
 }
 
 /// What a sink wants done with an event.

@@ -49,20 +49,19 @@ pub(crate) async fn serve_http2<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
-    let session_config = ServerSessionConfig {
-        settings: config.http2.parameters(),
-        local: config.http2.local_settings(),
-        connection_window: config.http2.connection_window_size,
-        body_channel_capacity: 4,
+    let session_config = ServerSessionConfig::for_ingress()
+        .with_local(config.http2.local_settings())
+        .with_settings(config.http2.parameters())
+        .with_connection_window(config.http2.connection_window_size)
+        .with_body_channel_capacity(4)
         // The listener's slow-read bound, so the two protocols defend against a stalled reader the
         // same way. A constant here would have quietly made `write_timeout` mean "HTTP/1.1 only".
-        write_timeout: config.write_timeout,
+        .with_write_timeout(config.write_timeout)
         // HTTP/1.1 bounds the wait for every request head with `head_timeout`, including
         // the idle keep-alive gap. HTTP/2 has no request line, so the same number bounds
         // the connection preface and a connection with no open streams.
-        handshake_timeout: config.head_timeout,
-        idle_timeout: config.head_timeout,
-    };
+        .with_handshake_timeout(config.head_timeout)
+        .with_idle_timeout(config.head_timeout);
     let observer = Arc::new(TraceObserver {
         recorder: recorder.clone(),
     });
@@ -111,18 +110,10 @@ impl HandlerAdapter {
         // A `CONNECT` asks for a tunnel this transport cannot open (`INV-SERVER-01`). Refusing before
         // the handler keeps the two protocols from disagreeing about what they will do.
         if incoming.method == http::Method::CONNECT {
-            return H2Response {
-                status: http::StatusCode::NOT_IMPLEMENTED,
-                headers: http::HeaderMap::new(),
-                body: H2ResponseBody::Empty,
-            };
+            return H2Response::with_status(http::StatusCode::NOT_IMPLEMENTED);
         }
         if config.require_host && !incoming.headers.contains_key(http::header::HOST) {
-            return H2Response {
-                status: http::StatusCode::BAD_REQUEST,
-                headers: http::HeaderMap::new(),
-                body: H2ResponseBody::Empty,
-            };
+            return H2Response::with_status(http::StatusCode::BAD_REQUEST);
         }
 
         // The body is handed over as an orchestrator `BodySource`, so a handler reads it through the
@@ -196,14 +187,14 @@ fn incoming_request(request: &H2Request) -> IncomingRequest {
     // header HTTP/1.1 would have set and HTTP/2 cannot express.
     headers.remove(http::header::CONNECTION);
 
-    IncomingRequest {
-        method: request.method.clone(),
+    IncomingRequest::new(
+        request.method.clone(),
         target,
         form,
-        version: http::Version::HTTP_2,
+        http::Version::HTTP_2,
         headers,
-        body: body_kind(),
-    }
+        body_kind(),
+    )
 }
 
 /// What framing a request body has, as the HTTP/1.1 codec's vocabulary describes it.
@@ -259,11 +250,7 @@ fn translate_response(response: Response) -> H2Response {
             H2ResponseBody::Stream(rx)
         }
     };
-    H2Response {
-        status: head.status,
-        headers,
-        body,
-    }
+    H2Response::new(head.status, headers, body)
 }
 
 /// Pull a handler's stream into the channel the session reads.
@@ -316,6 +303,7 @@ impl SessionObserver for TraceObserver {
                 );
                 return;
             }
+            _ => return,
         };
         self.recorder.mark_stream(stream_id, kind, a, 0);
     }

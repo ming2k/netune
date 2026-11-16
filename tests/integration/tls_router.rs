@@ -382,3 +382,31 @@ async fn client_builder_http2_syncs_default_rustls_alpn_on_the_wire() {
     let alpns = server.await.expect("server join");
     assert_eq!(alpns, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
 }
+
+#[tokio::test]
+async fn client_builder_uses_custom_static_dns_resolver() {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let srv = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 1024];
+        let _ = sock.read(&mut buf).await;
+        sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .await
+            .expect("write");
+    });
+
+    let resolver = netune::StaticResolver::new();
+    resolver.insert("custom.internal", addr.ip());
+    let client = Client::builder().no_tls().dns_resolver(resolver).build();
+    let target = Target::plain(format!("custom.internal:{}", addr.port()));
+    let mut resp = client
+        .request(&target, RequestHead::new(Method::GET, "/"), None)
+        .await
+        .expect("resolved via StaticResolver");
+    assert_eq!(resp.head.status, http::StatusCode::OK);
+    assert_eq!(resp.body.read_to_end().await.expect("body").as_ref(), b"ok");
+    srv.await.expect("server");
+}

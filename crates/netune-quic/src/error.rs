@@ -9,7 +9,12 @@ use netune_trace::{Diagnose, DiagnosticCode, DiagnosticPhase, DiagnosticRecord, 
 pub enum QuicError {
     /// DNS resolution failed for the remote endpoint.
     #[error("dns resolution failed for {host}: {detail}")]
-    Dns { host: String, detail: String },
+    Dns {
+        /// Hostname that failed to resolve.
+        host: String,
+        /// Underlying resolver failure detail.
+        detail: String,
+    },
 
     /// Socket binding or option configuration failed.
     #[error("socket configuration failed: {0}")]
@@ -29,7 +34,12 @@ pub enum QuicError {
 
     /// Datagram payload exceeded the negotiated maximum datagram size (RFC 9221, [INV-QUIC-04]).
     #[error("datagram payload too large: {size} bytes exceeds maximum allowed {max} bytes")]
-    DatagramTooLarge { max: usize, size: usize },
+    DatagramTooLarge {
+        /// Negotiated maximum datagram payload size in bytes.
+        max: usize,
+        /// Attempted datagram payload size in bytes.
+        size: usize,
+    },
 
     /// Datagrams are not supported by the remote peer.
     #[error("datagrams are not supported or enabled on this quic connection")]

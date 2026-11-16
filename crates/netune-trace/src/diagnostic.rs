@@ -37,31 +37,50 @@ pub enum DiagnosticLevel {
 }
 
 /// Where in the transport the diagnostic was raised.
+/// Transport or server lifecycle phase where a diagnostic occurred.
 #[non_exhaustive]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
-#[allow(missing_docs)]
 pub enum DiagnosticPhase {
+    /// Request dispatch before name resolution or socket dialing.
     Dispatch = 0,
+    /// DNS hostname resolution.
     Dns = 1,
+    /// TCP connection establishment or socket I/O.
     Tcp = 2,
+    /// TLS handshake or record processing.
     Tls = 3,
+    /// Proxy handshake (`HTTP CONNECT` or `SOCKS5`).
     Proxy = 4,
+    /// Connection pool acquisition, limits, or idle reaping.
     Pool = 5,
+    /// HTTP/1.1 framing or state machine.
     Http1 = 6,
+    /// HTTP/2 framing, HPACK, or multiplexed session.
     Http2 = 7,
+    /// QUIC connection, stream, or packet processing.
     Quic = 8,
+    /// HTTP/3 framing, QPACK, or session processing.
     Http3 = 9,
+    /// WebSocket upgrade, framing, or heartbeat session.
     WebSocket = 10,
+    /// Request construction, encoding, or upload streaming.
     Request = 11,
+    /// Response decoding, decompression, or limits enforcement.
     Response = 12,
+    /// Ingress server accept loop or admission control.
     Server = 13,
+    /// Ingress listener binding or lifecycle.
     Listener = 14,
+    /// Graceful connection drain on server shutdown.
     Drain = 15,
+    /// Trace sink delivery or serialization.
     Sink = 16,
+    /// Trace collection, timeline, or derivation.
     Trace = 17,
+    /// Unclassified or fallback phase.
     Unknown = 18,
 }
 
@@ -245,6 +264,7 @@ pub trait Diagnose {
 }
 
 /// One bounded, human-readable diagnostic.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiagnosticRecord {
@@ -271,6 +291,7 @@ pub struct DiagnosticRecord {
 }
 
 /// One key/value field attached to a diagnostic.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiagnosticField {

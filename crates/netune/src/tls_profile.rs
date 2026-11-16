@@ -31,6 +31,7 @@ use netune_tls::key_exchange::ClientKeyShare;
 
 /// The built-in presets, selectable by name at request time
 /// ([`crate::Target::with_tls_profile`], [`crate::TlsRouterConnector`]).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
     /// netune's shipped identity: the Go-shaped hello, HTTP/1.1 ALPN only.
@@ -130,6 +131,7 @@ impl Preset {
 }
 
 /// A TLS identity as pure declarative wire data ([`INV-TLS-07`], [`INV-TLS-11`]).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsProfile {
     /// Human-facing name, reported in traces and test failures.

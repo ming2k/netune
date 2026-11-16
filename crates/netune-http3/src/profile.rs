@@ -24,6 +24,7 @@ use crate::proto::settings::Settings;
 /// cannot enforce is rejected; zero keeps the stateless path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H3SettingsProfile {
+    /// Profile name recorded in connection identity and registry lookups.
     pub name: String,
     /// `SETTINGS_MAX_FIELD_SECTION_SIZE`, in bytes.
     pub max_field_section_size: u64,
@@ -60,6 +61,7 @@ impl Default for H3SettingsProfile {
 }
 
 impl H3SettingsProfile {
+    /// Create a named SETTINGS profile initialized with default values.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -86,6 +88,7 @@ impl H3SettingsProfile {
         }
     }
 
+    /// Set `SETTINGS_MAX_FIELD_SECTION_SIZE`, in bytes.
     #[must_use]
     pub fn with_max_field_section_size(mut self, size: u64) -> Self {
         self.max_field_section_size = size;
@@ -106,6 +109,7 @@ impl H3SettingsProfile {
         self
     }
 
+    /// Configure `SETTINGS_QPACK_MAX_TABLE_CAPACITY` and `SETTINGS_QPACK_BLOCKED_STREAMS`.
     #[must_use]
     pub fn with_qpack(mut self, max_table_capacity: u64, blocked_streams: u64) -> Self {
         self.qpack_max_table_capacity = max_table_capacity;
@@ -175,11 +179,13 @@ impl Default for H3SettingsRegistry {
 }
 
 impl H3SettingsRegistry {
+    /// Insert or replace a SETTINGS profile keyed by its name.
     pub fn with_profile(mut self, profile: H3SettingsProfile) -> Self {
         self.profiles.insert(profile.name.clone(), profile);
         self
     }
 
+    /// Look up a registered SETTINGS profile by name.
     pub fn resolve(&self, name: &str) -> Result<&H3SettingsProfile, H3Error> {
         self.profiles.get(name).ok_or_else(|| {
             H3Error::Profile(format!(
@@ -189,6 +195,7 @@ impl H3SettingsRegistry {
         })
     }
 
+    /// Return all registered profile names in sorted order.
     pub fn names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
         names.sort_unstable();
@@ -199,7 +206,9 @@ impl H3SettingsRegistry {
 /// A named H3 request-header order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H3RequestProfile {
+    /// Profile name used for registry lookup.
     pub name: String,
+    /// Pseudo-header and regular header ordering policy.
     pub order: RequestHeaderOrder,
 }
 
@@ -213,6 +222,7 @@ impl Default for H3RequestProfile {
 }
 
 impl H3RequestProfile {
+    /// Create a named request-header order profile.
     pub fn new(name: impl Into<String>, order: RequestHeaderOrder) -> Self {
         Self {
             name: name.into(),
@@ -302,11 +312,13 @@ impl Default for H3RequestRegistry {
 }
 
 impl H3RequestRegistry {
+    /// Insert or replace a request profile keyed by its name.
     pub fn with_profile(mut self, profile: H3RequestProfile) -> Self {
         self.profiles.insert(profile.name.clone(), profile);
         self
     }
 
+    /// Look up a registered request profile by name.
     pub fn resolve(&self, name: &str) -> Result<&H3RequestProfile, H3Error> {
         self.profiles.get(name).ok_or_else(|| {
             H3Error::Profile(format!(
@@ -316,6 +328,7 @@ impl H3RequestRegistry {
         })
     }
 
+    /// Return all registered profile names in sorted order.
     pub fn names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
         names.sort_unstable();

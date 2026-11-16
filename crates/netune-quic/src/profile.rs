@@ -14,9 +14,12 @@ use crate::error::QuicError;
 /// Congestion-control algorithm carried by a QUIC profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CongestionAlgorithm {
+    /// RFC 5681 / RFC 9002 NewReno congestion control.
     #[default]
     NewReno,
+    /// RFC 9438 CUBIC congestion control.
     Cubic,
+    /// BBRv1-style bandwidth and RTT congestion control.
     Bbr,
 }
 
@@ -87,11 +90,13 @@ impl Default for QuicProfileRegistry {
 }
 
 impl QuicProfileRegistry {
+    /// Insert or replace a named profile in this registry and return the updated registry.
     pub fn with_profile(mut self, profile: QuicProfile) -> Self {
         self.profiles.insert(profile.name.to_string(), profile);
         self
     }
 
+    /// Resolve a profile by name, returning [`QuicError::Config`] if not registered.
     pub fn resolve(&self, name: &str) -> Result<&QuicProfile, QuicError> {
         self.profiles.get(name).ok_or_else(|| {
             QuicError::Config(format!(
@@ -101,6 +106,7 @@ impl QuicProfileRegistry {
         })
     }
 
+    /// Sorted list of all registered profile names.
     pub fn names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.profiles.keys().map(String::as_str).collect();
         names.sort_unstable();

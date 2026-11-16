@@ -10,17 +10,27 @@ use super::prefix::{decode_int, decode_string, encode_int, encode_string};
 /// An instruction sent on the encoder stream (encoder -> decoder).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncoderInstruction {
+    /// Set Dynamic Table Capacity (RFC 9204 Section 4.3.1).
     SetCapacity(usize),
+    /// Insert With Name Reference (RFC 9204 Section 4.3.2).
     InsertWithNameRef {
+        /// Whether `index` addresses the static table (`true`) or dynamic table (`false`).
         static_table: bool,
+        /// Static index or encoder-relative dynamic index of the header name.
         index: u64,
+        /// Header value bytes.
         value: Vec<u8>,
     },
+    /// Insert With Literal Name (RFC 9204 Section 4.3.3).
     InsertWithLiteralName {
+        /// Header name bytes.
         name: Vec<u8>,
+        /// Header value bytes.
         value: Vec<u8>,
     },
+    /// Duplicate an existing dynamic-table entry (RFC 9204 Section 4.3.4).
     Duplicate {
+        /// Encoder-relative index of the entry to duplicate.
         index: u64,
     },
 }
@@ -28,8 +38,11 @@ pub enum EncoderInstruction {
 /// An instruction sent on the decoder stream (decoder -> encoder).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderInstruction {
+    /// Section Acknowledgement for `stream_id` (RFC 9204 Section 4.4.1).
     SectionAck(u64),
+    /// Stream Cancellation for `stream_id` (RFC 9204 Section 4.4.2).
     StreamCancellation(u64),
+    /// Insert Count Increment by `increment` entries (RFC 9204 Section 4.4.3).
     InsertCountIncrement(u64),
 }
 

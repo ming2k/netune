@@ -8,6 +8,7 @@
 //!
 //! Enforces `[INV-QUIC-01]`: all components compile strictly against `aws-lc-rs`.
 
+#![deny(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod connector;

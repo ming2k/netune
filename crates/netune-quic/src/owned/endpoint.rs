@@ -29,10 +29,13 @@ type IncomingDatagram = (Vec<u8>, SocketAddr);
 /// A client configuration for the owned endpoint.
 #[derive(Clone)]
 pub struct ClientConfigOwned {
+    /// TLS 1.3 client configuration.
     pub tls: Arc<ClientConfig>,
+    /// Local QUIC transport parameters advertised to the server.
     pub transport: TransportParameters,
     /// Preferred QUIC version first; later entries are Version Negotiation fallbacks.
     pub versions: Vec<u32>,
+    /// Congestion-control algorithm used when `congestion_factory` is `None`.
     pub congestion: crate::profile::CongestionAlgorithm,
     /// Overrides the profile's built-in controller when present.
     pub congestion_factory: Option<Arc<dyn CongestionControllerFactory>>,
@@ -47,7 +50,9 @@ pub struct ClientConfigOwned {
 /// A server configuration for the owned endpoint.
 #[derive(Clone)]
 pub struct ServerConfigOwned {
+    /// TLS 1.3 server configuration.
     pub tls: Arc<ServerConfig>,
+    /// Local QUIC transport parameters advertised to clients.
     pub transport: TransportParameters,
     /// Require a Retry token before allocating connection state.
     ///
@@ -57,6 +62,7 @@ pub struct ServerConfigOwned {
     /// `false` on an internet-facing listener removes that bound; such a caller
     /// must supply its own address validation or upstream amplification limit.
     pub retry: bool,
+    /// Congestion-control algorithm used for accepted connections.
     pub congestion: crate::profile::CongestionAlgorithm,
     /// Accept 0-RTT tickets using a stateful, single-use resumption cache.
     pub enable_early_data: bool,
@@ -254,6 +260,7 @@ impl Endpoint {
         })
     }
 
+    /// Local socket address the endpoint is bound to.
     pub fn local_addr(&self) -> SocketAddr {
         self.inner.local
     }
@@ -355,6 +362,7 @@ impl Endpoint {
         }
     }
 
+    /// Mark the endpoint closed, wake waiters, and abort the endpoint UDP driver task.
     pub fn close(&self) {
         self.inner.closed.store(true, Ordering::SeqCst);
         let _ = self.inner.close_tx.send(());
@@ -598,14 +606,17 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Current remote peer socket address for this connection.
     pub fn remote_address(&self) -> SocketAddr {
         *self.inner.peer.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Local socket address bound by the owning endpoint.
     pub fn local_address(&self) -> SocketAddr {
         self.inner.local
     }
 
+    /// Current smoothed round-trip time estimate, once an RTT sample has been measured.
     pub fn rtt(&self) -> Option<std::time::Duration> {
         self.inner
             .core
@@ -641,6 +652,7 @@ impl Connection {
             .peer_certificates()
     }
 
+    /// Maximum unreliable datagram payload size accepted by the peer, if enabled.
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.inner
             .core
@@ -649,6 +661,7 @@ impl Connection {
             .max_datagram_size()
     }
 
+    /// Queue one RFC 9221 unreliable datagram for transmission.
     pub async fn send_datagram(&self, data: Bytes) -> Result<(), QuicError> {
         {
             let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());
@@ -658,6 +671,7 @@ impl Connection {
         Ok(())
     }
 
+    /// Wait for and return the next received RFC 9221 unreliable datagram.
     pub async fn recv_datagram(&self) -> Result<Bytes, QuicError> {
         loop {
             let notified = self.inner.readable.notified();
@@ -674,6 +688,7 @@ impl Connection {
         }
     }
 
+    /// Whether 0-RTT early data keys are available on this connection.
     pub fn early_data_available(&self) -> bool {
         self.inner
             .core
@@ -682,6 +697,7 @@ impl Connection {
             .early_data_available()
     }
 
+    /// Whether the peer accepted 0-RTT early data during the handshake.
     pub fn early_data_accepted(&self) -> bool {
         self.inner
             .core
@@ -727,6 +743,7 @@ impl Connection {
         }
     }
 
+    /// Whether the QUIC handshake has completed and 1-RTT keys are established.
     pub fn is_established(&self) -> bool {
         self.inner
             .core
@@ -747,6 +764,7 @@ impl Connection {
                 .is_closed()
     }
 
+    /// Wait until the connection or its owning endpoint has closed.
     pub async fn closed(&self) {
         let mut closed = self.inner.closed.subscribe();
         let mut close_rx = self.inner.close_rx.resubscribe();
@@ -779,6 +797,7 @@ impl Connection {
         self.inner.notify.notify_one();
     }
 
+    /// Open a new locally-initiated bidirectional stream.
     pub async fn open_bi(&self) -> Result<(SendStream, RecvStream), QuicError> {
         let id = {
             let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());
@@ -797,6 +816,7 @@ impl Connection {
         ))
     }
 
+    /// Open a new locally-initiated unidirectional send stream.
     pub async fn open_uni(&self) -> Result<SendStream, QuicError> {
         let id = {
             let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());
@@ -809,6 +829,7 @@ impl Connection {
         })
     }
 
+    /// Accept the next peer-initiated bidirectional stream.
     pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream), QuicError> {
         loop {
             let notified = self.inner.readable.notified();
@@ -834,6 +855,7 @@ impl Connection {
         }
     }
 
+    /// Accept the next peer-initiated unidirectional receive stream.
     pub async fn accept_uni(&self) -> Result<RecvStream, QuicError> {
         loop {
             let notified = self.inner.readable.notified();
@@ -862,10 +884,12 @@ pub struct SendStream {
 }
 
 impl SendStream {
+    /// Numeric QUIC stream ID.
     pub fn id(&self) -> u64 {
         self.id
     }
 
+    /// Queue `data` for transmission on this stream.
     pub async fn write_all(&mut self, data: &[u8]) -> Result<(), QuicError> {
         {
             let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());
@@ -875,6 +899,7 @@ impl SendStream {
         Ok(())
     }
 
+    /// Signal the end of the send stream (`FIN`) after queued data is sent.
     pub async fn finish(&mut self) -> Result<(), QuicError> {
         {
             let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());
@@ -884,6 +909,7 @@ impl SendStream {
         Ok(())
     }
 
+    /// Abruptly terminate the send stream with an application error `code` (`RESET_STREAM`).
     pub fn reset(&mut self, code: u64) {
         {
             let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());
@@ -912,10 +938,12 @@ pub struct RecvStream {
 }
 
 impl RecvStream {
+    /// Numeric QUIC stream ID.
     pub fn id(&self) -> u64 {
         self.id
     }
 
+    /// Read up to `max` bytes from the stream, returning `Ok(None)` on clean `FIN`.
     pub async fn read(&mut self, max: usize) -> Result<Option<Bytes>, QuicError> {
         loop {
             let notified = self.inner.readable.notified();
@@ -938,6 +966,7 @@ impl RecvStream {
         }
     }
 
+    /// Request that the peer stop transmitting on this stream (`STOP_SENDING`).
     pub fn stop(&mut self, code: u64) {
         {
             let mut core = self.inner.core.lock().unwrap_or_else(|e| e.into_inner());

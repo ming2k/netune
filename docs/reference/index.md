@@ -14,6 +14,7 @@ not to learn a task.
 | [System Architecture](architecture.md) | The layering model, how the crates fit together, and the invariants that hold across them. |
 | [Diagnostic Codes](diagnostics.md) | Stable failure codes, their phases and retry verdicts, and the trace-bundle review workflow. |
 | [Stability and Production Boundaries](stability.md) | Support tiers, production defaults, and the gates an owned-TLS, HTTP/3 or WebTransport production claim must pass. |
+| [Migrating to 0.2.0](migration-0.2.0.md) | Complete `#[non_exhaustive]` coverage across Stable public types, `ClientBuilder::dns_resolver`, and workspace-wide documentation enforcement. |
 | [WebTransport Browser Interoperability](webtransport-interop.md) | Pinned browser matrix, executable harness contract, and the evidence required before WebTransport leaves Experimental. |
 | [Migrating to 0.1.0 (GA)](migration-0.1.0.md) | Breaking changes from `0.0.x` to `0.1.0`, `#[non_exhaustive]` builders, `Client::builder()`, and post-GA SemVer guarantees. |
 | [Migrating to 0.0.26](migration-0.0.26.md) | The breaking trace, sink, error-boundary and configuration changes. |

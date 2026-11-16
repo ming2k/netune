@@ -17,8 +17,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use netune_http2::client::H2ClientConnection;
 use netune_http2::server::{
-    H2Body, H2Handler, H2Request, H2Response, H2ResponseBody, ResponseFuture, ServerSession,
-    ServerSessionConfig, SessionEnd,
+    H2Body, H2Handler, H2Request, H2Response, ResponseFuture, ServerSession, ServerSessionConfig,
+    SessionEnd,
 };
 use netune_http2::{H2Fingerprint, LocalSettings};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,16 +35,12 @@ impl H2Handler for Echo {
             let path = String::from_utf8_lossy(&request.path).into_owned();
             let mut body = request.body;
             let bytes = body.read_to_end().await;
-            H2Response {
-                status: http::StatusCode::OK,
-                headers: http::HeaderMap::new(),
-                body: H2ResponseBody::Bytes(Bytes::from(format!(
-                    "{} {} {}",
-                    method.as_str(),
-                    path,
-                    String::from_utf8_lossy(&bytes)
-                ))),
-            }
+            H2Response::ok(Bytes::from(format!(
+                "{} {} {}",
+                method.as_str(),
+                path,
+                String::from_utf8_lossy(&bytes)
+            )))
         })
     }
 }
@@ -135,10 +131,8 @@ async fn connect(address: std::net::SocketAddr) -> H2ClientConnection<TcpStream>
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_that_never_sends_settings_is_cut_off_at_the_handshake_bound() {
-    let config = ServerSessionConfig {
-        handshake_timeout: Duration::from_millis(100),
-        ..ServerSessionConfig::for_tests()
-    };
+    let config =
+        ServerSessionConfig::for_tests().with_handshake_timeout(Duration::from_millis(100));
     let address = spawn_server(Arc::new(Echo), config).await;
     let mut socket = TcpStream::connect(address).await.expect("connect");
 
@@ -159,21 +153,14 @@ async fn a_peer_that_never_sends_settings_is_cut_off_at_the_handshake_bound() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_idle_h2_connection_is_closed_at_the_idle_bound() {
-    let config = ServerSessionConfig {
-        idle_timeout: Duration::from_millis(100),
-        ..ServerSessionConfig::for_tests()
-    };
+    let config = ServerSessionConfig::for_tests().with_idle_timeout(Duration::from_millis(100));
     let address = spawn_server(Arc::new(Echo), config).await;
     let mut socket = TcpStream::connect(address).await.expect("connect");
     socket
         .write_all(netune_http2::CLIENT_PREFACE)
         .await
         .expect("preface");
-    let settings = netune_http2::Frame::Settings {
-        ack: false,
-        settings: Vec::new(),
-    }
-    .encode();
+    let settings = netune_http2::Frame::settings(false, Vec::new()).encode();
     socket.write_all(&settings).await.expect("settings");
 
     let closed = tokio::time::timeout(Duration::from_secs(2), async {
@@ -388,28 +375,14 @@ async fn a_protocol_error_ends_the_connection_with_a_goaway() {
         .await
         .expect("preface");
     socket
-        .write_all(
-            &Frame::Settings {
-                ack: false,
-                settings: Vec::new(),
-            }
-            .encode(),
-        )
+        .write_all(&Frame::settings(false, Vec::new()).encode())
         .await
         .expect("settings");
 
     // An even stream id from a client is a connection error: it collides with the parity a server
     // uses for its own streams.
     socket
-        .write_all(
-            &Frame::Headers {
-                stream_id: 2,
-                end_stream: true,
-                end_headers: true,
-                header_block: Bytes::new(),
-            }
-            .encode(),
-        )
+        .write_all(&Frame::headers(2, true, true, Bytes::new()).encode())
         .await
         .expect("headers");
 
@@ -487,6 +460,7 @@ async fn a_request_body_larger_than_the_stream_window_is_accepted() {
             }
             netune_http2::H2ResponseEvent::Trailers(_) => {}
             netune_http2::H2ResponseEvent::End => break,
+            _ => {}
         }
     }
     assert_eq!(

@@ -69,14 +69,22 @@ struct ExtensionConfig {
 
 /// A stream routed to an HTTP/3 extension protocol.
 pub enum H3ExtensionStream {
+    /// An inbound unidirectional extension stream.
     Uni {
+        /// The extension unidirectional stream type identifier.
         stream_type: u64,
+        /// The session identifier decoded immediately after the stream type.
         session_id: u64,
+        /// The underlying QUIC receive stream.
         recv: RecvStream,
     },
+    /// An inbound bidirectional extension stream.
     Bidi {
+        /// The session identifier decoded after the bidirectional signal varint.
         session_id: u64,
+        /// The underlying QUIC send half of the stream.
         send: SendStream,
+        /// The underlying QUIC receive half of the stream.
         recv: RecvStream,
     },
 }

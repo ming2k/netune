@@ -193,12 +193,7 @@ pub(super) async fn exchange_on_session(
         .map_or(BodyKind::Chunked, BodyKind::Length);
 
     Ok(Exchange {
-        head: IncomingResponse {
-            version: Version::HTTP_3,
-            status,
-            headers,
-            body: body_kind,
-        },
+        head: IncomingResponse::new(Version::HTTP_3, status, headers, body_kind),
         body: Box::new(Body {
             stream: Some(resp_stream),
             recorder: recorder.clone(),

@@ -24,11 +24,17 @@ const ETH_HEADER_LEN: usize = 14;
 /// A parsed TCP segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TcpSegment {
+    /// Source IPv4 address and TCP port.
     pub source: ([u8; 4], u16),
+    /// Destination IPv4 address and TCP port.
     pub destination: ([u8; 4], u16),
+    /// TCP sequence number.
     pub seq: u32,
+    /// TCP acknowledgement number.
     pub ack: u32,
+    /// TCP header flags byte.
     pub flags: u8,
+    /// TCP payload byte length.
     pub payload_len: u32,
 }
 
@@ -162,9 +168,13 @@ pub struct FrameSpec {
     pub source_mac: [u8; 6],
     /// Destination MAC (6 bytes).
     pub destination_mac: [u8; 6],
+    /// Source IPv4 address and TCP port.
     pub source: ([u8; 4], u16),
+    /// Destination IPv4 address and TCP port.
     pub destination: ([u8; 4], u16),
+    /// TCP sequence number.
     pub seq: u32,
+    /// TCP acknowledgement number.
     pub ack: u32,
     /// TCP header flags (`FLAG_*` ORed together).
     pub flags: u8,

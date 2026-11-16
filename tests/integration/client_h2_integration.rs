@@ -77,10 +77,7 @@ async fn handshake(socket: &mut TcpStream) {
 
     write_frame(
         socket,
-        Frame::Settings {
-            ack: false,
-            settings: vec![(SETTING_MAX_CONCURRENT_STREAMS, 100)],
-        },
+        Frame::settings(false, vec![(SETTING_MAX_CONCURRENT_STREAMS, 100)]),
     )
     .await;
 
@@ -88,14 +85,7 @@ async fn handshake(socket: &mut TcpStream) {
     assert_eq!(ack.frame_type, FRAME_SETTINGS);
     assert_eq!(ack.flags & FLAG_ACK, FLAG_ACK);
 
-    write_frame(
-        socket,
-        Frame::Settings {
-            ack: true,
-            settings: Vec::new(),
-        },
-    )
-    .await;
+    write_frame(socket, Frame::settings(true, Vec::new())).await;
 }
 
 /// Read frames until the next request HEADERS, skipping housekeeping.
@@ -125,12 +115,12 @@ async fn write_response_head(
 ) {
     write_frame(
         socket,
-        Frame::Headers {
+        Frame::headers(
             stream_id,
             end_stream,
-            end_headers: true,
-            header_block: encoder.encode(vec![(":status", status)]),
-        },
+            true,
+            encoder.encode(vec![(":status", status)]),
+        ),
     )
     .await;
 }
@@ -138,11 +128,7 @@ async fn write_response_head(
 async fn write_body(socket: &mut TcpStream, stream_id: u32, payload: &'static [u8]) {
     write_frame(
         socket,
-        Frame::Data {
-            stream_id,
-            end_stream: true,
-            payload: Bytes::from_static(payload),
-        },
+        Frame::data(stream_id, true, Bytes::from_static(payload)),
     )
     .await;
 }
@@ -444,20 +430,12 @@ async fn concurrent_cold_http2_requests_coalesce_and_multiplex_on_one_connection
         write_response_head(&mut socket, &mut encoder, s1, "200", false).await;
         write_frame(
             &mut socket,
-            Frame::Data {
-                stream_id: s2,
-                end_stream: true,
-                payload: Bytes::from(p2.into_bytes()),
-            },
+            Frame::data(s2, true, Bytes::from(p2.into_bytes())),
         )
         .await;
         write_frame(
             &mut socket,
-            Frame::Data {
-                stream_id: s1,
-                end_stream: true,
-                payload: Bytes::from(p1.into_bytes()),
-            },
+            Frame::data(s1, true, Bytes::from(p1.into_bytes())),
         )
         .await;
         drain_credit(&mut socket).await;
@@ -568,11 +546,7 @@ async fn dropping_http2_body_early_cancels_only_that_stream_and_keeps_connection
         write_response_head(&mut socket, &mut encoder, s1, "200", false).await;
         write_frame(
             &mut socket,
-            Frame::Data {
-                stream_id: s1,
-                end_stream: false,
-                payload: Bytes::from(vec![b'a'; 128]),
-            },
+            Frame::data(s1, false, Bytes::from(vec![b'a'; 128])),
         )
         .await;
 

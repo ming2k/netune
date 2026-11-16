@@ -25,7 +25,9 @@ pub struct ExtendedConnectProtocol(pub String);
 /// cannot lose a required pseudo-header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestHeaderOrder {
+    /// Ordered pseudo-header names (e.g. `:method`, `:scheme`).
     pub pseudo: Vec<&'static str>,
+    /// Ordered lowercase regular header names emitted before remaining headers.
     pub regular: Vec<&'static str>,
 }
 
@@ -46,6 +48,7 @@ impl Default for RequestHeaderOrder {
 }
 
 impl RequestHeaderOrder {
+    /// Construct a request header ordering from pseudo-header and regular header lists.
     pub fn new(
         pseudo: impl IntoIterator<Item = &'static str>,
         regular: impl IntoIterator<Item = &'static str>,
@@ -75,28 +78,40 @@ impl RequestHeaderOrder {
 /// A malformed HTTP/3 field section.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HeaderError {
+    /// A pseudo-header appeared in a context where it is disallowed.
     #[error("HTTP/3 pseudo-header {0} is not allowed here")]
     UnexpectedPseudo(&'static str),
+    /// A pseudo-header appeared more than once in the same field section.
     #[error("duplicate HTTP/3 pseudo-header {0}")]
     DuplicatePseudo(&'static str),
+    /// A pseudo-header appeared after a regular header field.
     #[error("HTTP/3 pseudo-header {0} appears after a regular header")]
     PseudoAfterRegular(String),
+    /// A required pseudo-header was absent from the field section.
     #[error("missing HTTP/3 pseudo-header {0}")]
     MissingPseudo(&'static str),
+    /// A header name was invalid or contained uppercase/disallowed bytes.
     #[error("invalid HTTP/3 header name")]
     InvalidName,
+    /// A header or pseudo-header value was invalid.
     #[error("invalid HTTP/3 header value")]
     InvalidValue,
+    /// Both `:authority` and `Host` were present with different values.
     #[error("HTTP/3 authority and Host disagree")]
     ContradictedAuthority,
+    /// A connection-specific header forbidden in HTTP/3 was present.
     #[error("HTTP/3 connection-specific header {0} is forbidden")]
     ForbiddenHeader(&'static str),
+    /// The `te` header was present with a value other than `trailers`.
     #[error("HTTP/3 `te` must be `trailers`")]
     InvalidTe,
+    /// [`ExtendedConnectProtocol`] was attached to a non-`CONNECT` request.
     #[error("extended CONNECT is not supported")]
     ExtendedConnectUnsupported,
+    /// Reconstructing the `http::Uri` from decoded pseudo-headers failed.
     #[error("invalid HTTP/3 request URI: {0}")]
     InvalidUri(String),
+    /// Constructing the `http::Request` or `http::Response` failed.
     #[error("HTTP/3 HTTP type error: {0}")]
     Http(String),
 }

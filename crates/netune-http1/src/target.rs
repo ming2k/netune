@@ -58,6 +58,7 @@ impl TargetForm {
 }
 
 /// Why a target is not well formed.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetError {
     /// The target is empty, which no form permits.

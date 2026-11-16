@@ -32,6 +32,16 @@ pub trait DnsResolver: Send + Sync + std::fmt::Debug {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemResolver;
 
+impl DnsResolver for Arc<dyn DnsResolver> {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<SocketAddr>, NetError>> + Send + 'a>> {
+        (**self).resolve(host, port)
+    }
+}
+
 impl DnsResolver for SystemResolver {
     fn resolve<'a>(
         &'a self,

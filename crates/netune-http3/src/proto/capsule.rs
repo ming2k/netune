@@ -17,22 +17,28 @@ pub const MAX_CAPSULE_VALUE: usize = 16 * 1024 * 1024;
 /// A decoded RFC 9297 capsule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capsule {
+    /// Capsule type identifier.
     pub kind: u64,
+    /// Raw capsule value bytes.
     pub value: Bytes,
 }
 
 /// A malformed or oversized capsule.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CapsuleError {
+    /// Capsule type or length could not be decoded or encoded as a QUIC varint.
     #[error("capsule varint is invalid: {0}")]
     VarInt(#[from] VarIntError),
+    /// Capsule value length exceeded the configured ceiling.
     #[error("capsule value length {0} exceeds the configured maximum")]
     TooLarge(usize),
+    /// The underlying stream ended in the middle of a capsule header or value.
     #[error("stream ended inside a capsule header or value")]
     Truncated,
 }
 
 impl Capsule {
+    /// Construct a capsule from its type identifier and value payload.
     pub fn new(kind: u64, value: impl Into<Bytes>) -> Self {
         Self {
             kind,

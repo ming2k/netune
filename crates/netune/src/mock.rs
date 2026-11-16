@@ -517,16 +517,16 @@ impl Mock {
         }
         let total: u64 = chunks.iter().map(|chunk| chunk.len() as u64).sum();
         Ok(Exchange {
-            head: IncomingResponse {
-                version: http::Version::HTTP_11,
+            head: IncomingResponse::new(
+                http::Version::HTTP_11,
                 status,
-                headers: header_map,
-                body: if chunks.len() > 1 {
+                header_map,
+                if chunks.len() > 1 {
                     BodyKind::Chunked
                 } else {
                     BodyKind::Length(total)
                 },
-            },
+            ),
             body: Box::new(Body {
                 chunks: chunks.into(),
                 delivered: 0,

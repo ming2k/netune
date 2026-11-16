@@ -14,18 +14,25 @@ use crate::wire::packet::{LongPacket, ShortPacket};
 /// A TLS-handshake or packet-protection failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CryptoError {
+    /// No QUIC-capable TLS 1.3 cipher suite was available.
     #[error("no QUIC-capable TLS 1.3 cipher suite is available")]
     NoQuicSuite,
+    /// TLS handshake processing failed.
     #[error("TLS handshake error: {0}")]
     Handshake(String),
+    /// AEAD sealing, opening, or header protection failed.
     #[error("packet protection error: {0}")]
     PacketProtection(String),
+    /// Packet buffer is too short to contain the header and header-protection sample.
     #[error("packet is too short for header protection")]
     PacketTooShort,
+    /// Packet buffer does not contain enough bytes for the 16-byte header-protection sample.
     #[error("packet sample is too short")]
     SampleTooShort,
+    /// Packet number decoding or length validation failed.
     #[error("packet number recovery failed")]
     PacketNumber,
+    /// Underlying wire-format decoding or encoding error.
     #[error("wire error: {0}")]
     Wire(#[from] WireError),
 }
@@ -354,6 +361,7 @@ pub fn long_packet_number_offset(packet: &[u8]) -> Result<usize, CryptoError> {
     long_header_info(packet).map(|(offset, _)| offset)
 }
 
+/// Return `(packet_number_offset, packet_end)` for a protected long-header packet.
 pub fn long_header_info(packet: &[u8]) -> Result<(usize, usize), CryptoError> {
     use crate::wire::packet::LongType;
     use crate::wire::varint;

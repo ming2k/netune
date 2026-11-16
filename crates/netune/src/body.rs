@@ -26,7 +26,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use netune_trace::{
     ConnectionIdentity, ConnectionInfo, Counters, DiagnosticPhase, EventKind, Fidelity,
-    RequestTrace, TRACE_SCHEMA_VERSION, TapArtifact, TraceCollector,
+    RequestTrace, TapArtifact, TraceCollector,
 };
 
 use crate::decompress::Decoder;
@@ -290,16 +290,13 @@ impl Body {
             return None;
         }
         let snapshot = self.recorder.snapshot(self.fidelity);
-        Some(RequestTrace {
-            meta: snapshot.meta,
-            authority: self.authority.clone(),
-            connection: self.connection,
-            identity: self.identity.clone(),
-            schema_version: TRACE_SCHEMA_VERSION,
-            fidelity: self.fidelity,
-            log: snapshot.log,
-            diagnostics: snapshot.diagnostics,
-        })
+        Some(
+            RequestTrace::new(snapshot.meta, self.authority.clone(), snapshot.log)
+                .with_connection(self.connection)
+                .with_identity(self.identity.clone())
+                .with_fidelity(self.fidelity)
+                .with_diagnostics(snapshot.diagnostics),
+        )
     }
 }
 

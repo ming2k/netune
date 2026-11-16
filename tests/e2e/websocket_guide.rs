@@ -116,6 +116,7 @@ async fn guide_connect_and_echo() {
                 println!("server closed: {reason:?}");
                 break;
             }
+            _ => {}
         }
     }
     assert!(saw_text, "guide's echo loop must observe the scripted text");
@@ -139,7 +140,7 @@ async fn guide_trace_what_happened() {
     );
     let target = Target::plain(format!("127.0.0.1:{port}"));
 
-    use netune_trace::{ConnectionInfo, Fidelity, RequestTrace, TraceId, derive};
+    use netune_trace::{Fidelity, RequestTrace, TraceId, derive};
 
     let recorder = TraceCollector::start(1024);
     let mut ws = client
@@ -157,16 +158,12 @@ async fn guide_trace_what_happened() {
         .expect("close");
 
     let log = recorder.log();
-    let trace = RequestTrace {
-        meta: netune_trace::TraceMeta::new(TraceId::new("guide"), netune_trace::Direction::Egress),
-        authority: format!("127.0.0.1:{port}"),
-        connection: ConnectionInfo::default(),
-        identity: netune_trace::ConnectionIdentity::default(),
-        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
-        fidelity: Fidelity::l1(),
+    let trace = RequestTrace::new(
+        netune_trace::TraceMeta::new(TraceId::new("guide"), netune_trace::Direction::Egress),
+        format!("127.0.0.1:{port}"),
         log,
-        diagnostics: netune_trace::DiagnosticTable::default(),
-    };
+    )
+    .with_fidelity(Fidelity::l1());
     let timings = derive(&trace);
     // TTFB: the upgrade round-trip anchor. Measured or not-applicable, it must
     // be a `Reading` the guide can render.
@@ -211,12 +208,11 @@ async fn guide_keep_a_long_session_alive() {
 
     let mut session = netune::WsSession::new(
         ws,
-        netune::WsSessionConfig {
+        netune::WsSessionConfig::default()
             // Default 20 s, aligned with the pool's idle bound and the 30–60 s
             // cull window edge gateways actually apply (ADR-0005).
-            ping_interval: Duration::from_secs(20),
-            pong_timeout: Duration::from_secs(10),
-        },
+            .with_ping_interval(Duration::from_secs(20))
+            .with_pong_timeout(Duration::from_secs(10)),
     );
 
     // The guide's loop shape: `while let Some(message) = session.next().await?`

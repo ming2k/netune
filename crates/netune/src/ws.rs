@@ -228,6 +228,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                 }
                 Frame::close(code, &desc)
             }
+            _ => {
+                return Err(NetError::Protocol(
+                    "unsupported outbound WebSocket message variant".into(),
+                ));
+            }
         };
 
         self.write_frame(&frame).await
@@ -358,6 +363,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                             Message::Binary(_) => FrameClass::Binary,
                             Message::Ping(_) | Message::Pong(_) => FrameClass::KeepAlive,
                             Message::Close(_) => FrameClass::Close,
+                            _ => FrameClass::Unknown,
                         };
                         rec.mark(EventKind::ProtocolFrame, class.code() as u32, 0);
                     }

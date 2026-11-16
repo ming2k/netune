@@ -27,7 +27,12 @@ pub enum QpackError {
 
     /// A dynamic reference points at or beyond the declared Required Insert Count.
     #[error("QPACK dynamic reference {reference} is outside required insert count {required}")]
-    ReferenceOutsideSection { reference: u64, required: u64 },
+    ReferenceOutsideSection {
+        /// Referenced absolute dynamic-table index.
+        reference: u64,
+        /// Section's Required Insert Count.
+        required: u64,
+    },
 
     /// A Reference Insert Count cannot be reconstructed from the prefix.
     #[error("invalid QPACK Required Insert Count encoding")]
@@ -47,11 +52,19 @@ pub enum QpackError {
 
     /// The decoder waited for an insertion that the encoder never sent.
     #[error("QPACK required insert count {required} exceeds received {received}")]
-    MissingInsertions { required: u64, received: u64 },
+    MissingInsertions {
+        /// Required Insert Count declared by the section.
+        required: u64,
+        /// Insertions received so far by the decoder.
+        received: u64,
+    },
 
     /// More streams are blocked than the advertised budget.
     #[error("QPACK blocked-stream budget {limit} exceeded")]
-    TooManyBlockedStreams { limit: usize },
+    TooManyBlockedStreams {
+        /// Configured maximum number of blocked streams.
+        limit: usize,
+    },
 
     /// The huffman bit stream is malformed.
     #[error("invalid HPACK huffman code")]
@@ -67,7 +80,10 @@ pub enum QpackError {
 
     /// A decoded field section exceeds the configured maximum size.
     #[error("QPACK field section exceeds {limit} bytes")]
-    HeaderTooLarge { limit: usize },
+    HeaderTooLarge {
+        /// Configured maximum field-section size in bytes.
+        limit: usize,
+    },
 
     /// An encoder-stream instruction is invalid.
     #[error("invalid QPACK encoder instruction")]

@@ -650,14 +650,14 @@ mod tests {
                 http::HeaderValue::from_str(value).expect("value"),
             );
         }
-        IncomingRequest {
-            method: http::Method::GET,
-            target: Bytes::from_static(b"/"),
-            form: TargetForm::Origin,
+        IncomingRequest::new(
+            http::Method::GET,
+            Bytes::from_static(b"/"),
+            TargetForm::Origin,
             version,
             headers,
-            body: BodyKind::Empty,
-        }
+            BodyKind::Empty,
+        )
     }
 
     #[test]

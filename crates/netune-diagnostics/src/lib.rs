@@ -31,6 +31,7 @@ use netune_trace::{
 };
 
 /// Which diagnostic fields a sink or bundle may render.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RedactionPolicy {
     /// Keep `Internal` fields. `Secret` fields are always removed.
@@ -221,6 +222,7 @@ impl TraceSink for FanoutSink {
 }
 
 /// A written review bundle.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceBundle {
     /// Directory containing the written bundle files.
@@ -457,16 +459,7 @@ mod tests {
         let sink = JsonLinesSink::new(Shared(Arc::clone(&buffer)));
         let meta = TraceMeta::egress();
         assert_eq!(
-            sink.event(
-                &meta,
-                Event {
-                    at_ns: 1,
-                    stream: 7,
-                    kind: EventKind::Read,
-                    a: 10,
-                    b: 0,
-                }
-            ),
+            sink.event(&meta, Event::new(1, EventKind::Read, 7, 10, 0)),
             Flow::Continue
         );
         let text = String::from_utf8(buffer.lock().unwrap().clone()).expect("utf8");

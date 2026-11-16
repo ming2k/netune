@@ -382,13 +382,7 @@ async fn shared_h2_session_bounds_concurrent_permits_and_evicts_on_goaway() {
             .expect("settings payload");
 
         socket
-            .write_all(
-                &Frame::Settings {
-                    ack: false,
-                    settings: vec![(SETTING_MAX_CONCURRENT_STREAMS, 2)],
-                }
-                .encode(),
-            )
+            .write_all(&Frame::settings(false, vec![(SETTING_MAX_CONCURRENT_STREAMS, 2)]).encode())
             .await
             .expect("server settings");
 
@@ -404,26 +398,13 @@ async fn shared_h2_session_bounds_concurrent_permits_and_evicts_on_goaway() {
             }
         }
         socket
-            .write_all(
-                &Frame::Settings {
-                    ack: true,
-                    settings: Vec::new(),
-                }
-                .encode(),
-            )
+            .write_all(&Frame::settings(true, Vec::new()).encode())
             .await
             .expect("ack");
 
         goaway_rx.await.expect("trigger goaway");
         socket
-            .write_all(
-                &Frame::GoAway {
-                    last_stream_id: 0,
-                    error_code: 0,
-                    debug_data: bytes::Bytes::new(),
-                }
-                .encode(),
-            )
+            .write_all(&Frame::goaway(0, 0, bytes::Bytes::new()).encode())
             .await
             .expect("goaway");
         let mut buf = [0u8; 8];

@@ -29,6 +29,7 @@ use netune_trace::{
 use crate::body::{Body, BodyContext};
 use crate::connect::{Connector, EgressConfinement, HttpProtocol, Target, TcpConnector};
 use crate::decompress::Decoder;
+use crate::dns::DnsResolver;
 use crate::error::{AttemptError, NetError};
 use crate::exchange::{Attempt, ObservationLevel, Request, RequestBody, RoundTrip};
 use crate::pool::{Pool, PoolConfig, PoolKey};
@@ -295,6 +296,7 @@ pub struct ClientBuilder {
     pool: Option<Pool>,
     pool_config: PoolConfig,
     confinement: EgressConfinement,
+    dns_resolver: Option<Arc<dyn DnsResolver>>,
     socket_config: SocketConfig,
     connect_timeout: Option<Duration>,
     proxy: Option<Proxy>,
@@ -330,6 +332,7 @@ impl ClientBuilder {
             pool: None,
             pool_config: PoolConfig::default(),
             confinement: EgressConfinement::Unrestricted,
+            dns_resolver: None,
             socket_config: SocketConfig::default(),
             connect_timeout: Some(crate::connect::CONNECT_TIMEOUT),
             proxy: None,
@@ -441,6 +444,13 @@ impl ClientBuilder {
     #[must_use]
     pub fn confinement(mut self, confinement: EgressConfinement) -> Self {
         self.confinement = confinement;
+        self
+    }
+
+    /// Override the DNS resolver (defaults to [`crate::SystemResolver`]).
+    #[must_use]
+    pub fn dns_resolver<R: DnsResolver + 'static>(mut self, resolver: R) -> Self {
+        self.dns_resolver = Some(Arc::new(resolver));
         self
     }
 
@@ -624,25 +634,39 @@ impl ClientBuilder {
         client
     }
 
+    fn finish_connector<C: Connector + 'static>(mut self, connector: C, pool: Pool) -> Client {
+        if let Some(proxy) = self.proxy.take() {
+            let proxied = ProxyConnector::new(connector, proxy);
+            self.finish_tls(proxied, pool)
+        } else {
+            self.finish_tls(connector, pool)
+        }
+    }
+
     /// Assemble the configured [`Client`].
     pub fn build(mut self) -> Client {
         let pool = self
             .pool
             .take()
             .unwrap_or_else(|| Pool::new(self.pool_config));
-        let mut tcp = match self.confinement {
-            EgressConfinement::Unrestricted => TcpConnector::new(),
-            EgressConfinement::StrictPublic => TcpConnector::strict_public(),
-        };
-        tcp = tcp
-            .with_socket_config(self.socket_config.clone())
-            .with_connect_timeout(self.connect_timeout);
+        let socket_config = self.socket_config.clone();
+        let connect_timeout = self.connect_timeout;
+        let confinement = self.confinement;
 
-        if let Some(proxy) = self.proxy.take() {
-            let proxied = ProxyConnector::new(tcp, proxy);
-            self.finish_tls(proxied, pool)
+        if let Some(resolver) = self.dns_resolver.take() {
+            let mut tcp = TcpConnector::with_resolver(Arc::new(resolver))
+                .with_socket_config(socket_config)
+                .with_connect_timeout(connect_timeout);
+            tcp.confinement = confinement;
+            self.finish_connector(tcp, pool)
         } else {
-            self.finish_tls(tcp, pool)
+            let tcp = match confinement {
+                EgressConfinement::Unrestricted => TcpConnector::new(),
+                EgressConfinement::StrictPublic => TcpConnector::strict_public(),
+            }
+            .with_socket_config(socket_config)
+            .with_connect_timeout(connect_timeout);
+            self.finish_connector(tcp, pool)
         }
     }
 }
@@ -1706,11 +1730,11 @@ mod identity_tests {
     fn a_custom_h2_request_profile_is_resolved_without_changing_the_pool_key() {
         let client = keyed_client().with_h2_request_profile(
             "my-order",
-            netune_http2::H2RequestProfile {
-                name: "my-order",
-                pseudo_headers_order: netune_http2::PseudoHeaderOrder::AuthorityMethodPathScheme,
-                regular_header_order: netune_http2::RegularHeaderOrder::CallerOrder,
-            },
+            netune_http2::H2RequestProfile::new(
+                "my-order",
+                netune_http2::PseudoHeaderOrder::AuthorityMethodPathScheme,
+                netune_http2::RegularHeaderOrder::CallerOrder,
+            ),
         );
         let target = Target::plain("203.0.113.10:80")
             .with_protocol(HttpProtocol::Http2)

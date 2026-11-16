@@ -635,14 +635,14 @@ fn incoming_request(request: &http::Request<()>) -> IncomingRequest {
     headers.remove(header::TRANSFER_ENCODING);
     headers.remove(header::UPGRADE);
 
-    IncomingRequest {
-        method: request.method().clone(),
+    IncomingRequest::new(
+        request.method().clone(),
         target,
         form,
-        version: http::Version::HTTP_3,
+        http::Version::HTTP_3,
         headers,
-        body: BodyKind::UntilClose,
-    }
+        BodyKind::UntilClose,
+    )
 }
 
 async fn write_response(

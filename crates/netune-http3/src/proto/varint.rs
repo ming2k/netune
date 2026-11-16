@@ -10,8 +10,10 @@ use bytes::{Buf, BufMut};
 /// A QUIC varint error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum VarIntError {
+    /// The input buffer ended before all bytes of the varint were available.
     #[error("unexpected end of QUIC varint")]
     UnexpectedEnd,
+    /// The value exceeded [`MAX`] (`2^62 - 1`).
     #[error("QUIC varint exceeds 2^62-1")]
     TooLarge,
 }

@@ -52,6 +52,7 @@ pub const SETTING_MAX_FRAME_SIZE: u16 = 0x5;
 pub const SETTING_MAX_HEADER_LIST_SIZE: u16 = 0x6;
 
 /// A parsed 9-byte HTTP/2 frame header.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
     /// 24-bit payload length in bytes.
@@ -65,6 +66,16 @@ pub struct FrameHeader {
 }
 
 impl FrameHeader {
+    /// Construct an HTTP/2 frame header from its raw fields.
+    pub const fn new(length: u32, frame_type: u8, flags: u8, stream_id: u32) -> Self {
+        Self {
+            length,
+            frame_type,
+            flags,
+            stream_id,
+        }
+    }
+
     /// Parse a 9-byte slice into a frame header.
     pub fn parse(buf: &[u8]) -> Option<Self> {
         if buf.len() < FRAME_HEADER_LEN {
@@ -97,65 +108,139 @@ impl FrameHeader {
 }
 
 /// An HTTP/2 frame representation.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(missing_docs)]
 pub enum Frame {
+    /// Application or request/response body data frame (RFC 9113 §6.1).
     Data {
+        /// Stream identifier (`> 0`).
         stream_id: u32,
+        /// Whether this frame terminates the stream.
         end_stream: bool,
+        /// Frame payload bytes (with padding stripped).
         payload: Bytes,
     },
+    /// Opening header block fragment (RFC 9113 §6.2).
     Headers {
+        /// Stream identifier (`> 0`).
         stream_id: u32,
+        /// Whether this frame terminates the stream.
         end_stream: bool,
+        /// Whether the header block completes without `CONTINUATION`.
         end_headers: bool,
+        /// HPACK-encoded header block fragment (with padding/priority stripped).
         header_block: Bytes,
     },
+    /// Connection-level `SETTINGS` frame (RFC 9113 §6.5).
     Settings {
+        /// Whether this is a settings acknowledgement (`ACK` flag).
         ack: bool,
         /// In-order parameters (critical for Akamai H2 fingerprinting!).
         settings: Vec<(u16, u32)>,
     },
+    /// Connection liveness `PING` probe or response (RFC 9113 §6.7).
     Ping {
+        /// Whether this frame is a `PING` acknowledgement (`ACK` flag).
         ack: bool,
+        /// 8-byte opaque payload echoed by the peer.
         opaque_data: [u8; 8],
     },
+    /// Graceful connection shutdown `GOAWAY` frame (RFC 9113 §6.8).
     GoAway {
+        /// Highest peer-initiated stream identifier processed.
         last_stream_id: u32,
+        /// HTTP/2 error code (`u32`).
         error_code: u32,
+        /// Optional diagnostic debug bytes.
         debug_data: Bytes,
     },
+    /// Flow-control `WINDOW_UPDATE` increment (RFC 9113 §6.9).
     WindowUpdate {
+        /// Target stream identifier (`0` for connection-level flow control).
         stream_id: u32,
+        /// Window size increment in octets.
         increment: u32,
     },
+    /// Stream termination `RST_STREAM` frame (RFC 9113 §6.4).
     RstStream {
+        /// Aborted stream identifier (`> 0`).
         stream_id: u32,
+        /// HTTP/2 error code (`u32`).
         error_code: u32,
     },
+    /// Deprecated stream priority frame (RFC 9113 §6.3).
     Priority {
+        /// Dependent stream identifier.
         stream_id: u32,
+        /// Exclusive dependency flag.
         exclusive: bool,
+        /// Parent stream identifier.
         stream_dependency: u32,
+        /// Stream priority weight (`0..=255` representing `1..=256`).
         weight: u8,
     },
     /// A continuation of the header block started by the preceding `HEADERS` or
     /// `PUSH_PROMISE` frame (RFC 9113 §6.10).
     Continuation {
+        /// Stream identifier matching the preceding `HEADERS` or `PUSH_PROMISE`.
         stream_id: u32,
+        /// Whether this fragment terminates the header block.
         end_headers: bool,
+        /// HPACK-encoded continuation fragment.
         header_block: Bytes,
     },
     /// A server push the client did not ask for (RFC 9113 §6.6).
     PushPromise {
+        /// Associated client stream identifier.
         stream_id: u32,
+        /// Promised server-initiated stream identifier.
         promised_stream_id: u32,
+        /// Whether this frame terminates the header block.
         end_headers: bool,
+        /// HPACK-encoded promised request headers.
         header_block: Bytes,
     },
 }
 
 impl Frame {
+    /// Construct a `DATA` frame.
+    pub fn data(stream_id: u32, end_stream: bool, payload: Bytes) -> Self {
+        Self::Data {
+            stream_id,
+            end_stream,
+            payload,
+        }
+    }
+
+    /// Construct a `HEADERS` frame.
+    pub fn headers(
+        stream_id: u32,
+        end_stream: bool,
+        end_headers: bool,
+        header_block: Bytes,
+    ) -> Self {
+        Self::Headers {
+            stream_id,
+            end_stream,
+            end_headers,
+            header_block,
+        }
+    }
+
+    /// Construct a `SETTINGS` frame.
+    pub fn settings(ack: bool, settings: Vec<(u16, u32)>) -> Self {
+        Self::Settings { ack, settings }
+    }
+
+    /// Construct a `GOAWAY` frame.
+    pub fn goaway(last_stream_id: u32, error_code: u32, debug_data: Bytes) -> Self {
+        Self::GoAway {
+            last_stream_id,
+            error_code,
+            debug_data,
+        }
+    }
+
     /// Encode the frame into a byte buffer ready for the wire.
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();

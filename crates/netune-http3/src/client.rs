@@ -9,10 +9,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
-use netune_trace::{
-    ConnectionIdentity, ConnectionInfo, EventKind, Fidelity, RequestTrace, TRACE_SCHEMA_VERSION,
-    TraceCollector,
-};
+use netune_trace::{ConnectionIdentity, EventKind, Fidelity, RequestTrace, TraceCollector};
 
 use crate::connection::{Connection, H3Stream, Role};
 use crate::error::H3Error;
@@ -49,15 +46,20 @@ impl Default for H3ClientConfig {
 /// QUIC profile as `h3_profile`, plus the TLS server name.
 #[derive(Debug, Clone)]
 pub struct H3TraceContext {
+    /// Target authority string (host and port) for the connection.
     pub authority: String,
+    /// TLS server name verified for the session.
     pub server_name: String,
+    /// Resolved connection identity recorded in traces.
     pub identity: ConnectionIdentity,
 }
 
 /// The result of a buffered HTTP/3 exchange.
 #[derive(Debug)]
 pub struct H3Response {
+    /// Decoded response status and headers.
     pub head: http::Response<()>,
+    /// Buffered response body bytes.
     pub body: Bytes,
     /// Present when the session was created through [`H3Client::connect`] and
     /// the body was observed to completion.
@@ -65,10 +67,12 @@ pub struct H3Response {
 }
 
 impl H3Response {
+    /// Return the HTTP response status code.
     pub fn status(&self) -> http::StatusCode {
         self.head.status()
     }
 
+    /// Borrow the buffered response body bytes.
     pub fn body(&self) -> &Bytes {
         &self.body
     }
@@ -339,6 +343,7 @@ impl std::fmt::Debug for H3ResponseStream {
 }
 
 impl H3ResponseStream {
+    /// Borrow the decoded HTTP response head (status and headers).
     pub fn head(&self) -> &http::Response<()> {
         &self.head
     }
@@ -448,16 +453,16 @@ impl H3ResponseStream {
         let recorder = self.recorder.as_ref()?;
         let context = self.context.as_ref()?;
         let snapshot = recorder.snapshot(Fidelity::l0());
-        Some(RequestTrace {
-            meta: snapshot.meta,
-            authority: context.authority.clone(),
-            connection: ConnectionInfo::default(),
-            identity: context.identity.clone(),
-            schema_version: TRACE_SCHEMA_VERSION,
-            fidelity: Fidelity::l0(),
-            log: snapshot.log.for_exchange(self.exchange),
-            diagnostics: snapshot.diagnostics,
-        })
+        Some(
+            RequestTrace::new(
+                snapshot.meta,
+                context.authority.clone(),
+                snapshot.log.for_exchange(self.exchange),
+            )
+            .with_identity(context.identity.clone())
+            .with_fidelity(Fidelity::l0())
+            .with_diagnostics(snapshot.diagnostics),
+        )
     }
 }
 

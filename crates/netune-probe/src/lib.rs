@@ -34,6 +34,7 @@
 //! capability, for one flow, for a bounded window — never as a service.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![deny(missing_docs)]
 
 pub mod packet;
 

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-16
+
+Complete API-stability, documentation, and CI-gate convergence release. See
+[Migrating to 0.2.0](docs/reference/migration-0.2.0.md).
+
+### Added
+
+- `netune`: `ClientBuilder::dns_resolver(...)` and `impl DnsResolver for Arc<dyn DnsResolver>` so custom resolvers (`StaticResolver`, etc.) compose directly through `Client::builder()`.
+- `tests/e2e/soak.rs`: added `soak_h3_stream_churn_and_fd_bounds` (120 sequential HTTP/3 POST echoes with file-descriptor bound checks).
+- `.github/workflows/ci.yml`: added `cargo hack` feature-powerset checks across the workspace and orchestrators, `cargo clippy --all-targets --no-default-features -- -D warnings`, and `cargo semver-checks` patch-compatibility enforcement on Stable crates.
+- `crates/netune-webtransport/Cargo.toml`: completed `repository`, `keywords`, and `categories` package metadata.
+
+### Changed
+
+- **Breaking:** Completed the `#[non_exhaustive]` audit across all extensible Stable public structs and enums (`SocketConfig`, `TcpSample`, `WsSessionConfig`, `Proxy`, `Preset`, `TlsProfile`, `HeaderCasing`, `RequestHead`, `ResponseHead`, `ReasonPhrase`, `IncomingResponse`, `IncomingRequest`, `TargetError`, `LocalSettings`, `ServerSessionConfig`, `H2ConnectionProfile`, `H2RequestProfile`, `H2Fingerprint`, `FrameHeader`, `Frame`, `H2Request`, `H2Response`, `H2ResponseBody`, `SessionEnd`, `StreamEvent`, `H2ResponseHead`, `H2ResponseEvent`, `WsError`, `ws::Frame`, `Message`, `CloseReason`, `Fault`, `RedactionPolicy`, `TraceBundle`, `DerivedTimings`, `DerivedIngress`, `DerivedQuic`, `DerivedH3`, `Outcome`, `Diagnosis`, `DiagnosticRecord`, `DiagnosticField`, `EventView`, `Divergence`, `TraceDiff`, `Reason`, `Validity`, `TimeSource`, `FrameClass`, `Alpn`, `Event`, `TraceSummary`, `TracePropagation`, `TraceMeta`, `ConnectionInfo`, `EvasionPolicy`, `RequestTrace`, `TraceSnapshot`), paired with `new(...)` / `with_*` constructors.
+- **Breaking:** Removed all remaining `#[allow(missing_docs)]` exemptions (`DiagnosticPhase`, `netune_http2::Frame`, `netune_http2::connection::error_code`) and enabled `#![deny(missing_docs)]` across all 14 publishable crates (`netune-probe`, `netune-quic`, `netune-http3`, and `netune-webtransport` included).
+- Updated stale `v0.0.29` documentation snippets (`getting-started.md`, `serve-http.md`, `release-and-versioning.md`) to `v0.2.0`.
+
+### Removed
+
+- Removed unused `quinn-proto` from root `Cargo.toml` `[workspace.dependencies]` and dead helper placeholders from `crates/netune-http2/tests/differential.rs`.
+
 ## [0.1.0] - 2026-11-16
 
 First Generally Available (GA) release of the **Stable** tier (`netune`,

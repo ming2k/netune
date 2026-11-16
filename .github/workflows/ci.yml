@@ -67,17 +67,13 @@ jobs:
         with:
           toolchain: "1.95.0"
       - uses: Swatinem/rust-cache@v2
-      - name: Verify feature isolation across orchestrators
+      - uses: taiki-e/install-action@cargo-hack
+      - name: Verify feature powerset across workspace and orchestrators
         run: |
+          cargo hack check --each-feature --no-dev-deps --workspace
+          cargo hack check --feature-powerset --no-dev-deps -p netune -p netune-server -p netune-trace
           cargo check --all-targets --all-features
           cargo check --all-targets --no-default-features
-          cargo check -p netune --no-default-features
-          cargo check -p netune --no-default-features --features http2
-          cargo check -p netune --no-default-features --features ws
-          cargo check -p netune --no-default-features --features http3
-          cargo check -p netune-server --no-default-features
-          cargo check -p netune-server --no-default-features --features tls
-          cargo check -p netune-server --no-default-features --features http3
       - name: Verify package manifests (cargo package --list)
         run: |
           for manifest in crates/*/Cargo.toml; do
@@ -134,6 +130,7 @@ jobs:
             exit 1
           fi
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
       - name: Zero-cost instruction gate (INV-TRACE-04)
         run: |
           sudo apt-get update
@@ -180,3 +177,35 @@ jobs:
         run: python3 .github/scripts/check-architecture.py
       - name: Architecture gate self-test
         run: python3 .github/scripts/test-check-architecture.py
+
+  semver:
+    name: SemVer compatibility (Stable tier)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: taiki-e/install-action@cargo-semver-checks
+      - uses: Swatinem/rust-cache@v2
+      - name: Check Stable API compatibility on patch bumps
+        run: |
+          version="$(awk '/^\[workspace\.package\]/{seen=1} seen && /^version *=/{gsub(/[" ]/,"",$3); print $3; exit}' Cargo.toml)"
+          major_minor="${version%.*}"
+          patch="${version##*.}"
+          baseline="v${major_minor}.0"
+          if [ "$patch" = "0" ]; then
+            echo "Minor/initial release ${version}: no patch-compatibility baseline required against ${baseline}"
+            exit 0
+          fi
+          if ! git rev-parse -q --verify "refs/tags/${baseline}" >/dev/null; then
+            echo "::error::Missing minor baseline tag ${baseline} for patch release ${version}"
+            exit 1
+          fi
+          cargo semver-checks check-release --baseline-rev "${baseline}" \
+            -p netune -p netune-server -p netune-http1 -p netune-http2 \
+            -p netune-ws -p netune-io -p netune-egress -p netune-trace -p netune-diagnostics

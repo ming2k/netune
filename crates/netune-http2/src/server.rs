@@ -57,6 +57,7 @@ use crate::frame::{Frame, SETTING_INITIAL_WINDOW_SIZE};
 ///
 /// Passed by value so the role holds no policy: an orchestrator that wants different limits builds
 /// a different config, and the numbers it sets are the numbers the peer is *told*.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ServerSessionConfig {
     /// The SETTINGS to advertise, in wire order.
@@ -130,9 +131,60 @@ impl ServerSessionConfig {
             idle_timeout: std::time::Duration::from_secs(2),
         }
     }
+
+    /// Replace local HTTP/2 bounds and recompute wire SETTINGS parameters.
+    #[must_use]
+    pub fn with_local(mut self, local: LocalSettings) -> Self {
+        self.settings = local.parameters();
+        self.local = local;
+        self
+    }
+
+    /// Override explicit wire `SETTINGS` pairs without changing enforcement bounds.
+    #[must_use]
+    pub fn with_settings(mut self, settings: Vec<(u16, u32)>) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Set the connection-level advertised receive window.
+    #[must_use]
+    pub const fn with_connection_window(mut self, window: u32) -> Self {
+        self.connection_window = window;
+        self
+    }
+
+    /// Set the per-stream buffered body chunk capacity.
+    #[must_use]
+    pub const fn with_body_channel_capacity(mut self, cap: usize) -> Self {
+        self.body_channel_capacity = cap;
+        self
+    }
+
+    /// Set the single-frame write timeout.
+    #[must_use]
+    pub const fn with_write_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.write_timeout = timeout;
+        self
+    }
+
+    /// Set the connection preface and initial `SETTINGS` timeout.
+    #[must_use]
+    pub const fn with_handshake_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.handshake_timeout = timeout;
+        self
+    }
+
+    /// Set the idle connection timeout when no streams are open.
+    #[must_use]
+    pub const fn with_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.idle_timeout = timeout;
+        self
+    }
 }
 
 /// One request, as the server role hands it to the orchestrator.
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct H2Request {
     /// The stream this request arrived on. It is the exchange identity a trace records.
@@ -249,6 +301,7 @@ impl H2Body {
 }
 
 /// The response a handler produces for one stream.
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct H2Response {
     /// HTTP status code (`:status`).
@@ -260,6 +313,7 @@ pub struct H2Response {
 }
 
 /// How a response body is delivered.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum H2ResponseBody {
     /// No body; the head carries `END_STREAM`.
@@ -271,6 +325,15 @@ pub enum H2ResponseBody {
 }
 
 impl H2Response {
+    /// Construct a response from status, headers, and body.
+    pub fn new(status: http::StatusCode, headers: http::HeaderMap, body: H2ResponseBody) -> Self {
+        Self {
+            status,
+            headers,
+            body,
+        }
+    }
+
     /// A `200` with the given bytes.
     pub fn ok(body: impl Into<Bytes>) -> Self {
         Self {
@@ -326,6 +389,7 @@ pub trait H2Handler: Send + Sync + 'static {
 }
 
 /// Why a session ended.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum SessionEnd {
     /// The peer closed the connection.
@@ -346,6 +410,7 @@ pub enum SessionEnd {
 /// depend on the trace model (it is a leaf, ADR-0003). The orchestrator adapts these to `EventKind`
 /// and attaches the exchange identity the trace needs — which is exactly the translation that
 /// belongs in the crate that owns the recorder.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamEvent {
     /// A request head was decoded; `payload` bytes.

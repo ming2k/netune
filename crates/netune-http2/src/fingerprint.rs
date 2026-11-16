@@ -72,6 +72,7 @@ impl PseudoHeaderOrder {
 ///
 /// This is what a peer observes during the preface and SETTINGS exchange, and
 /// therefore what can make two HTTP/2 connections non-interchangeable.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H2ConnectionProfile {
     /// Name of the connection profile (e.g. "chrome-130", "go-nethttp").
@@ -90,6 +91,7 @@ pub struct H2ConnectionProfile {
 ///
 /// Pseudo-header and regular-header order change one HEADERS block, not the
 /// connection. They must not key a pool.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct H2RequestProfile {
     /// Human-readable profile name.
@@ -100,10 +102,26 @@ pub struct H2RequestProfile {
     pub regular_header_order: RegularHeaderOrder,
 }
 
+impl H2RequestProfile {
+    /// Construct a custom HTTP/2 request header-ordering profile.
+    pub const fn new(
+        name: &'static str,
+        pseudo_headers_order: PseudoHeaderOrder,
+        regular_header_order: RegularHeaderOrder,
+    ) -> Self {
+        Self {
+            name,
+            pseudo_headers_order,
+            regular_header_order,
+        }
+    }
+}
+
 /// A connection profile paired with the request profile it normally uses.
 ///
 /// The pair is a convenience for presets. The connection half keys the pool;
 /// the request half can be applied per exchange without opening a new socket.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct H2Fingerprint {
     /// Connection-scoped SETTINGS and initial window profile.

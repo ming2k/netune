@@ -144,11 +144,10 @@ impl<C: Connector> Wire<C> {
             {
                 let age_ms = h2.age.as_millis() as u32;
                 attempt.recorder.mark(EventKind::ConnectReused, age_ms, 0);
-                let info = ConnectionInfo {
-                    reused: true,
-                    local_port: h2.local_port,
-                    age_ns: u64::try_from(h2.age.as_nanos()).ok(),
-                };
+                let info = ConnectionInfo::default()
+                    .with_reused(true)
+                    .with_local_port(h2.local_port)
+                    .with_age_ns(u64::try_from(h2.age.as_nanos()).ok());
                 match h2::exchange_on_session(
                     &h2.session,
                     h2.permit,
@@ -184,11 +183,10 @@ impl<C: Connector> Wire<C> {
                     buffered: idle.buffered,
                     local_port: idle.local_port,
                     socket: idle.socket,
-                    info: ConnectionInfo {
-                        reused: true,
-                        local_port: idle.local_port,
-                        age_ns: u64::try_from(idle.age.as_nanos()).ok(),
-                    },
+                    info: ConnectionInfo::default()
+                        .with_reused(true)
+                        .with_local_port(idle.local_port)
+                        .with_age_ns(u64::try_from(idle.age.as_nanos()).ok()),
                 };
                 match h1::exchange(
                     &self.pool,
@@ -251,11 +249,10 @@ impl<C: Connector> Wire<C> {
             if let Some(h3) = self.pool.checkout_http3(key) {
                 let age_ms = h3.age.as_millis() as u32;
                 attempt.recorder.mark(EventKind::ConnectReused, age_ms, 0);
-                let info = ConnectionInfo {
-                    reused: true,
-                    local_port: h3.local_port,
-                    age_ns: u64::try_from(h3.age.as_nanos()).ok(),
-                };
+                let info = ConnectionInfo::default()
+                    .with_reused(true)
+                    .with_local_port(h3.local_port)
+                    .with_age_ns(u64::try_from(h3.age.as_nanos()).ok());
                 match h3::exchange_on_session(&h3.session, info, attempt, request, in_flight).await
                 {
                     Ok(exchange) => return Ok(exchange),
@@ -288,11 +285,7 @@ impl<C: Connector> Wire<C> {
             let session =
                 h3::dial_and_handshake(&self.quic, self.connector.egress_confinement(), attempt)
                     .await?;
-            let info = ConnectionInfo {
-                reused: false,
-                local_port: session.local_port(),
-                age_ns: None,
-            };
+            let info = ConnectionInfo::default().with_local_port(session.local_port());
             self.pool.register_http3(key, session.clone());
             drop(dial_guard);
             return h3::exchange_on_session(&session, info, attempt, request, in_flight).await;
@@ -310,11 +303,7 @@ impl<C: Connector> Wire<C> {
         let plan = attempt.plan;
         let recorder = attempt.recorder;
         let established = self.connector.connect(&plan.target, recorder).await?;
-        let info = ConnectionInfo {
-            reused: false,
-            local_port: established.local_port,
-            age_ns: None,
-        };
+        let info = ConnectionInfo::default().with_local_port(established.local_port);
 
         if speaks_http2(plan.http2_mode(), &established) {
             // Without the `http2` feature this fails closed instead of falling

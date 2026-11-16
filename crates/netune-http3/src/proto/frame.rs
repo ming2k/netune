@@ -11,6 +11,7 @@ use super::varint;
 /// Async byte source used by the frame reader.
 #[allow(async_fn_in_trait)]
 pub trait FrameRead {
+    /// Read up to `buf.len()` bytes, returning `Ok(None)` on clean EOF.
     async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, FrameError>;
 }
 
@@ -23,6 +24,7 @@ impl<T: FrameRead + Unpin + ?Sized> FrameRead for &mut T {
 /// Async byte sink used by the frame writer.
 #[allow(async_fn_in_trait)]
 pub trait FrameWrite {
+    /// Write all bytes in `buf` to the underlying stream.
     async fn write_all(&mut self, buf: &[u8]) -> Result<(), FrameError>;
 }
 
@@ -31,14 +33,21 @@ pub trait FrameWrite {
 pub enum Frame {
     /// A DATA frame header. The caller reads exactly `len` payload bytes.
     Data(u64),
+    /// A `HEADERS` frame carrying an encoded QPACK field section.
     Headers(Bytes),
+    /// A `SETTINGS` frame carrying decoded connection settings.
     Settings(Settings),
+    /// A `GOAWAY` frame carrying the stream or push identifier.
     GoAway(u64),
+    /// A `CANCEL_PUSH` frame carrying the cancelled push identifier.
     CancelPush(u64),
+    /// A `MAX_PUSH_ID` frame carrying the maximum allowed push identifier.
     MaxPushId(u64),
     /// An unknown extension frame, already skipped.
     Unknown {
+        /// Wire frame type identifier.
         ty: u64,
+        /// Payload length in bytes that was skipped.
         len: u64,
     },
 }
@@ -46,19 +55,30 @@ pub enum Frame {
 /// A malformed frame or a transport read failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FrameError {
+    /// The stream ended in the middle of a frame header or payload.
     #[error("unexpected end of HTTP/3 frame")]
     UnexpectedEnd,
+    /// A frame type, length, or single-varint payload was not a valid QUIC varint.
     #[error("invalid QUIC varint in HTTP/3 frame")]
     VarInt,
+    /// A known frame's payload length exceeded the configured limit.
     #[error("HTTP/3 frame payload {len} exceeds limit {limit}")]
-    TooLarge { len: u64, limit: usize },
+    TooLarge {
+        /// Declared payload length in bytes.
+        len: u64,
+        /// Configured maximum payload length in bytes.
+        limit: usize,
+    },
+    /// Decoding a `SETTINGS` frame payload failed.
     #[error("invalid SETTINGS frame: {0}")]
     Settings(#[from] SettingsError),
+    /// The underlying stream read or write failed.
     #[error("HTTP/3 stream read failed: {0}")]
     Io(String),
 }
 
 impl Frame {
+    /// Return the wire frame type identifier for this frame.
     pub fn frame_type(&self) -> u64 {
         match self {
             Self::Data(_) => frame_type::DATA,

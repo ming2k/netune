@@ -17,8 +17,11 @@ use super::static_table;
 /// A successfully decoded field section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedSection {
+    /// Decoded header field lines in section order.
     pub fields: Vec<HeaderField>,
+    /// Required Insert Count reconstructed from the section prefix.
     pub required_insert_count: u64,
+    /// Whether the section referenced the dynamic table (`required_insert_count > 0`).
     pub dynamic: bool,
 }
 
@@ -32,6 +35,7 @@ pub struct Decoder {
 }
 
 impl Decoder {
+    /// Create a new QPACK decoder with the given maximum dynamic table capacity.
     pub fn new(max_capacity: usize) -> Self {
         Self {
             table: DynamicTable::decoder(max_capacity),
@@ -41,22 +45,27 @@ impl Decoder {
         }
     }
 
+    /// Return the configured maximum dynamic table capacity in bytes.
     pub fn max_capacity(&self) -> usize {
         self.max_capacity
     }
 
+    /// Return the configured maximum number of blocked streams.
     pub fn max_blocked(&self) -> usize {
         self.max_blocked
     }
 
+    /// Return the total number of insertions applied to the decoder's dynamic table.
     pub fn total_inserted(&self) -> u64 {
         self.table.total_inserted()
     }
 
+    /// Return the active dynamic table capacity in bytes.
     pub fn table_capacity(&self) -> usize {
         self.table.capacity()
     }
 
+    /// Update the maximum allowed dynamic table capacity in bytes.
     pub fn set_max_capacity(&mut self, capacity: usize) -> Result<(), QpackError> {
         if capacity > 1_073_741_823 {
             return Err(QpackError::CapacityTooLarge(capacity, 1_073_741_823));
@@ -65,6 +74,7 @@ impl Decoder {
         self.table.set_max_capacity(capacity)
     }
 
+    /// Update the maximum allowed number of blocked streams.
     pub fn set_max_blocked(&mut self, blocked: usize) -> Result<(), QpackError> {
         if blocked > 65_535 {
             return Err(QpackError::CapacityTooLarge(blocked, 65_535));
@@ -73,6 +83,7 @@ impl Decoder {
         Ok(())
     }
 
+    /// Set the maximum permitted decoded field-section size in bytes.
     pub fn set_max_field_section_size(&mut self, size: usize) {
         self.max_field_section_size = size;
     }

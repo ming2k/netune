@@ -6,19 +6,22 @@ rust-version.workspace = true
 license.workspace = true
 readme.workspace = true
 description = "Owned WebTransport over HTTP/3 (draft-ietf-webtrans-http3-17) for netune."
+repository = "https://github.com/ming2k/netune"
+keywords = ["webtransport", "http3", "quic", "networking"]
+categories = ["network-programming", "web-programming"]
 
 [dependencies]
 bytes = { workspace = true }
 http = { workspace = true }
-netune-http3 = { path = "../netune-http3", version = "0.1.0" }
-netune-quic = { path = "../netune-quic", version = "0.1.0" }
+netune-http3 = { path = "../netune-http3", version = "0.2.0" }
+netune-quic = { path = "../netune-quic", version = "0.2.0" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 rcgen = { workspace = true }
 rustls = { workspace = true }
-test-support = { path = "../test-support", version = "0.1.0" }
+test-support = { path = "../test-support", version = "0.2.0" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]

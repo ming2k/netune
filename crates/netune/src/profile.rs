@@ -49,6 +49,7 @@ impl From<&str> for ProfileId {
 }
 
 /// How an HTTP/1 profile spells header names.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderCasing {
     /// Emit header names in canonical lowercase (`content-type`).

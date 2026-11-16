@@ -12,8 +12,7 @@ use netune::{
     Client, ClientConfig, Connector, Pool, RequestHead, Target, TcpConnector, TlsRouterConnector,
 };
 use netune_trace::{
-    Alpn, ConnectionInfo, EventKind, Fidelity, FrameClass, Reason, RequestTrace, TraceCollector,
-    TraceId, Validity,
+    Alpn, EventKind, Fidelity, FrameClass, Reason, RequestTrace, TraceCollector, TraceId, Validity,
 };
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -59,19 +58,12 @@ async fn serve_tls(listener: TcpListener, acceptor: TlsAcceptor, responses: usiz
 }
 
 fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
-    RequestTrace {
-        meta: netune_trace::TraceMeta::new(
-            TraceId::new("tls-e2e"),
-            netune_trace::Direction::Egress,
-        ),
-        authority: authority.to_string(),
-        connection: ConnectionInfo::default(),
-        identity: netune_trace::ConnectionIdentity::default(),
-        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
-        fidelity: Fidelity::l1(),
+    RequestTrace::new(
+        netune_trace::TraceMeta::new(TraceId::new("tls-e2e"), netune_trace::Direction::Egress),
+        authority,
         log,
-        diagnostics: netune_trace::DiagnosticTable::default(),
-    }
+    )
+    .with_fidelity(Fidelity::l1())
 }
 
 async fn request_once(client: &Client, target: &Target, recorder: TraceCollector) {

@@ -23,7 +23,9 @@ use crate::{
 
 /// A reliable bidirectional WebTransport stream (header already consumed).
 pub struct WebTransportBidi {
+    /// Send half of the bidirectional stream.
     pub send: WebTransportSendStream,
+    /// Receive half of the bidirectional stream.
     pub recv: WebTransportRecvStream,
 }
 
@@ -56,9 +58,11 @@ pub struct WebTransportSendStream {
 }
 
 impl WebTransportSendStream {
+    /// Return the underlying QUIC stream ID.
     pub fn id(&self) -> u64 {
         self.inner.id()
     }
+    /// Write all of `data` to the stream, enforcing session data flow control.
     pub async fn write_all(&mut self, data: &[u8]) -> Result<(), WebTransportError> {
         if self.reset {
             return Err(WebTransportError::SessionClosed(
@@ -79,6 +83,7 @@ impl WebTransportSendStream {
         }
         self.inner.write_all(data).await.map_err(quic_error)
     }
+    /// Cleanly finish the send side of the stream.
     pub async fn finish(&mut self) -> Result<(), WebTransportError> {
         if self.reset {
             return Err(WebTransportError::SessionClosed(
@@ -87,6 +92,7 @@ impl WebTransportSendStream {
         }
         self.inner.finish().await.map_err(quic_error)
     }
+    /// Reset the stream immediately with `code`.
     pub fn reset(&mut self, code: u64) {
         self.reset = true;
         self.inner.reset(code);
@@ -117,9 +123,11 @@ pub struct WebTransportRecvStream {
 }
 
 impl WebTransportRecvStream {
+    /// Return the underlying QUIC stream ID.
     pub fn id(&self) -> u64 {
         self.inner.id()
     }
+    /// Read up to `max` bytes from the stream, enforcing session receive flow control.
     pub async fn read(&mut self, max: usize) -> Result<Option<Bytes>, WebTransportError> {
         let data = self.inner.read(max).await.map_err(quic_error)?;
         if let Some(data) = &data {
@@ -134,6 +142,7 @@ impl WebTransportRecvStream {
         }
         Ok(data)
     }
+    /// Send `STOP_SENDING` on the stream with `code`.
     pub fn stop(&mut self, code: u64) {
         self.inner.stop(code);
     }
@@ -229,6 +238,7 @@ pub enum OriginPolicy {
 type Routes = Arc<Mutex<HashMap<u64, tokio::sync::mpsc::UnboundedSender<H3ExtensionStream>>>>;
 type Pending = Arc<Mutex<HashMap<u64, VecDeque<H3ExtensionStream>>>>;
 
+/// A WebTransport client endpoint over one H3 connection.
 pub struct WebTransportClient {
     h3: H3Client,
     settings: WebTransportSettings,
@@ -240,6 +250,7 @@ pub struct WebTransportClient {
 }
 
 impl WebTransportClient {
+    /// Connect to a WebTransport-capable HTTP/3 server and negotiate settings.
     pub async fn connect(
         connector: &netune_quic::QuicConnector,
         target: std::net::SocketAddr,
@@ -303,6 +314,7 @@ impl WebTransportClient {
         self.version
     }
 
+    /// Open a new WebTransport session via Extended CONNECT to `uri`.
     pub async fn connect_session(
         &mut self,
         uri: &str,
@@ -375,6 +387,7 @@ pub struct WebTransportServer {
 }
 
 impl WebTransportServer {
+    /// Wrap an accepted QUIC connection as a WebTransport HTTP/3 server endpoint.
     pub async fn new(
         connection: QuicConnection,
         settings: WebTransportSettings,
@@ -433,6 +446,7 @@ impl WebTransportServer {
         self.h3.shutdown().await.map_err(http3_error)
     }
 
+    /// Accept the next valid incoming WebTransport session, or `None` on connection close.
     pub async fn accept(&mut self) -> Result<Option<WebTransportSession>, WebTransportError> {
         loop {
             let Some(request) = self.h3.accept().await.map_err(http3_error)? else {
@@ -558,14 +572,17 @@ pub struct WebTransportSession {
 }
 
 impl WebTransportSession {
+    /// Return the session's [`SessionId`].
     pub fn id(&self) -> SessionId {
         self.id
     }
 
+    /// Return the local endpoint's [`WebTransportSettings`].
     pub fn settings(&self) -> WebTransportSettings {
         self.settings
     }
 
+    /// Return the peer's advertised [`WebTransportSettings`].
     pub fn peer_settings(&self) -> WebTransportSettings {
         self.peer
     }
@@ -575,6 +592,7 @@ impl WebTransportSession {
         self.version
     }
 
+    /// Return a reference to the underlying QUIC connection.
     pub fn quic(&self) -> &QuicConnection {
         match &self.transport {
             SessionTransport::Client(stream) => stream.quic_connection(),
@@ -582,6 +600,7 @@ impl WebTransportSession {
         }
     }
 
+    /// Open a new bidirectional WebTransport stream and write its session header.
     pub async fn open_bidi(&self) -> Result<WebTransportBidi, WebTransportError> {
         {
             let mut flow = self.flow.lock().unwrap_or_else(|e| e.into_inner());
@@ -618,6 +637,7 @@ impl WebTransportSession {
         })
     }
 
+    /// Open a new unidirectional WebTransport stream and write its session header.
     pub async fn open_uni(&self) -> Result<WebTransportSendStream, WebTransportError> {
         {
             let mut flow = self.flow.lock().unwrap_or_else(|e| e.into_inner());
@@ -648,6 +668,7 @@ impl WebTransportSession {
         })
     }
 
+    /// Accept the next incoming bidirectional WebTransport stream for this session.
     pub async fn accept_bidi(&mut self) -> Result<WebTransportBidi, WebTransportError> {
         if self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed {
             return Err(WebTransportError::SessionClosed("session closed".into()));
@@ -687,6 +708,7 @@ impl WebTransportSession {
         }
     }
 
+    /// Accept the next incoming unidirectional WebTransport stream for this session.
     pub async fn accept_uni(&mut self) -> Result<WebTransportRecvStream, WebTransportError> {
         if self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed {
             return Err(WebTransportError::SessionClosed("session closed".into()));
@@ -728,6 +750,7 @@ impl WebTransportSession {
             .ok_or_else(|| WebTransportError::SessionClosed("stream router stopped".to_string()))
     }
 
+    /// Send an HTTP/3 datagram associated with this session.
     pub async fn send_datagram(&mut self, data: &[u8]) -> Result<(), WebTransportError> {
         if self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed {
             return Err(WebTransportError::SessionClosed("session closed".into()));
@@ -742,6 +765,7 @@ impl WebTransportSession {
         }
     }
 
+    /// Receive the next HTTP/3 datagram associated with this session.
     pub async fn next_datagram(&mut self) -> Result<Bytes, WebTransportError> {
         match &mut self.transport {
             SessionTransport::Client(stream) => stream.next_datagram().await.ok_or_else(|| {
@@ -753,6 +777,7 @@ impl WebTransportSession {
         }
     }
 
+    /// Encode and send a [`ControlCapsule`] on the session's control stream.
     pub async fn send_control(
         &mut self,
         capsule: &ControlCapsule,
@@ -761,6 +786,7 @@ impl WebTransportSession {
         self.send_capsule(&capsule).await
     }
 
+    /// Send a raw HTTP/3 [`Capsule`] on the session's control stream.
     pub async fn send_capsule(&mut self, capsule: &Capsule) -> Result<(), WebTransportError> {
         if self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed {
             return Err(WebTransportError::SessionClosed("session closed".into()));
@@ -775,6 +801,7 @@ impl WebTransportSession {
         }
     }
 
+    /// Read and process the next capsule from the session stream, returning `None` on EOF or unknown capsule kinds.
     pub async fn next_control(&mut self) -> Result<Option<ControlCapsule>, WebTransportError> {
         if self.flow.lock().unwrap_or_else(|e| e.into_inner()).closed {
             return Err(WebTransportError::SessionClosed("session closed".into()));
@@ -840,6 +867,7 @@ impl WebTransportSession {
         Ok(parsed)
     }
 
+    /// Send a `WT_CLOSE_SESSION` capsule, finish the session stream, and mark the session closed.
     pub async fn close(&mut self, code: u32, message: &str) -> Result<(), WebTransportError> {
         self.send_control(&ControlCapsule::Close {
             code,
@@ -856,6 +884,7 @@ impl WebTransportSession {
         Ok(())
     }
 
+    /// Send a `WT_DRAIN_SESSION` capsule and mark the session as draining.
     pub async fn drain(&mut self) -> Result<(), WebTransportError> {
         self.send_control(&ControlCapsule::Drain).await?;
         self.flow.lock().unwrap_or_else(|e| e.into_inner()).draining = true;

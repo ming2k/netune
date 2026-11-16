@@ -15,7 +15,9 @@ use super::packet::CryptoError;
 
 /// A client or server QUIC TLS session.
 pub enum TlsSession {
+    /// Client-side `rustls` QUIC connection state.
     Client(rustls::quic::ClientConnection),
+    /// Server-side `rustls` QUIC connection state.
     Server(rustls::quic::ServerConnection),
 }
 

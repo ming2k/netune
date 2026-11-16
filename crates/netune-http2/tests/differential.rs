@@ -9,9 +9,6 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -19,7 +16,7 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 use netune_http2::client::session::H2ClientSession;
-use netune_http2::frame::{FRAME_CONTINUATION, FRAME_HEADERS, FrameHeader};
+use netune_http2::frame::{FRAME_CONTINUATION, FrameHeader};
 use netune_http2::server::{
     H2Handler, H2Request, H2Response as ServerH2Response, NoObserver, ResponseFuture,
     ServerSession, ServerSessionConfig, SessionEnd,
@@ -58,6 +55,7 @@ async fn read_our_body(mut reader: netune_http2::H2StreamReader) -> (Bytes, Vec<
                 break;
             }
             H2ResponseEvent::End => break,
+            _ => {}
         }
     }
     (out.freeze(), trailers)
@@ -713,21 +711,11 @@ async fn both_implementations_reject_unexpected_continuation_frame() {
                 .unwrap();
         }
         // Empty SETTINGS
-        let settings = FrameHeader {
-            length: 0,
-            frame_type: netune_http2::FRAME_SETTINGS,
-            flags: 0,
-            stream_id: 0,
-        };
+        let settings = FrameHeader::new(0, netune_http2::FRAME_SETTINGS, 0, 0);
         let mut buf = BytesMut::new();
         buf.extend_from_slice(&settings.encode());
         // Stray CONTINUATION on stream 1 with no preceding HEADERS
-        let stray = FrameHeader {
-            length: 4,
-            frame_type: FRAME_CONTINUATION,
-            flags: 0x4,
-            stream_id: 1,
-        };
+        let stray = FrameHeader::new(4, FRAME_CONTINUATION, 0x4, 1);
         buf.extend_from_slice(&stray.encode());
         buf.extend_from_slice(&[0x82, 0x84, 0x86, 0x41]);
         let _ = stream.write_all(&buf).await;
@@ -791,37 +779,13 @@ async fn both_implementations_reject_unexpected_continuation_frame() {
         raw_server.read_exact(&mut preface).await.unwrap();
         let mut buf = BytesMut::new();
         // Server SETTINGS + SETTINGS ACK
-        buf.extend_from_slice(
-            &FrameHeader {
-                length: 0,
-                frame_type: netune_http2::FRAME_SETTINGS,
-                flags: 0,
-                stream_id: 0,
-            }
-            .encode(),
-        );
-        buf.extend_from_slice(
-            &FrameHeader {
-                length: 0,
-                frame_type: netune_http2::FRAME_SETTINGS,
-                flags: 0x1,
-                stream_id: 0,
-            }
-            .encode(),
-        );
+        buf.extend_from_slice(&FrameHeader::new(0, netune_http2::FRAME_SETTINGS, 0, 0).encode());
+        buf.extend_from_slice(&FrameHeader::new(0, netune_http2::FRAME_SETTINGS, 0x1, 0).encode());
         raw_server.write_all(&buf).await.unwrap();
         raw_server.flush().await.unwrap();
         send_bad_wait.notified().await;
         let mut bad = BytesMut::new();
-        bad.extend_from_slice(
-            &FrameHeader {
-                length: 2,
-                frame_type: FRAME_CONTINUATION,
-                flags: 0x4,
-                stream_id: 1,
-            }
-            .encode(),
-        );
+        bad.extend_from_slice(&FrameHeader::new(2, FRAME_CONTINUATION, 0x4, 1).encode());
         bad.extend_from_slice(&[0x88, 0x00]);
         let _ = raw_server.write_all(&bad).await;
         let _ = raw_server.flush().await;
@@ -850,9 +814,6 @@ async fn both_implementations_reject_unexpected_continuation_frame() {
     send_bad.notify_one();
     assert!(head_fut.await_head().await.is_err());
     let _ = raw_peer.await;
-
-    // Suppress unused import warning on FRAME_HEADERS if needed
-    let _ = FRAME_HEADERS;
 }
 
 async fn futures_poll_ready<B: bytes::Buf>(client: &mut h2::client::SendRequest<B>) {
@@ -860,8 +821,3 @@ async fn futures_poll_ready<B: bytes::Buf>(client: &mut h2::client::SendRequest<
         .await
         .expect("h2 client poll_ready");
 }
-
-#[allow(dead_code)]
-fn _check_map(_: BTreeMap<String, String>) {}
-#[allow(dead_code)]
-fn _check_pin(_: Pin<Box<dyn Future<Output = ()> + Send>>) {}

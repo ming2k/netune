@@ -316,19 +316,15 @@ async fn test_http3_client_request_response_and_trace() {
     // The trace must be derivable, not merely populated: [INV-QUIC-03] promises a pure
     // function of the recorded events, and this is that function. A multi-exchange log
     // must not be attributed to the first request.
-    let trace = netune_trace::RequestTrace {
-        meta: netune_trace::TraceMeta::new(
+    let trace = netune_trace::RequestTrace::new(
+        netune_trace::TraceMeta::new(
             netune_trace::TraceId::new("http3-e2e"),
             netune_trace::Direction::Egress,
         ),
-        authority: addr.to_string(),
-        connection: netune_trace::ConnectionInfo::default(),
-        identity: netune_trace::ConnectionIdentity::default(),
-        schema_version: netune_trace::TRACE_SCHEMA_VERSION,
-        fidelity: netune_trace::Fidelity::l0(),
+        addr.to_string(),
         log,
-        diagnostics: netune_trace::DiagnosticTable::default(),
-    };
+    )
+    .with_fidelity(netune_trace::Fidelity::l0());
     let single = netune_trace::derive_h3(&trace);
     assert_eq!(
         single.ttfb_us.validity().reason(),

@@ -696,6 +696,9 @@ impl Connection {
         let mut closed = self.inner.closed.subscribe();
         let mut close_rx = self.inner.close_rx.resubscribe();
         loop {
+            if self.inner.endpoint.closed.load(Ordering::SeqCst) {
+                return Err(QuicError::Closed("endpoint closed".to_string()));
+            }
             if *established.borrow() {
                 return Ok(());
             }
@@ -734,7 +737,8 @@ impl Connection {
 
     /// Whether the connection has closed, locally or by peer.
     pub fn is_closed(&self) -> bool {
-        self.inner.closed.borrow().is_some()
+        self.inner.endpoint.closed.load(Ordering::SeqCst)
+            || self.inner.closed.borrow().is_some()
             || self
                 .inner
                 .core
@@ -746,7 +750,7 @@ impl Connection {
     pub async fn closed(&self) {
         let mut closed = self.inner.closed.subscribe();
         let mut close_rx = self.inner.close_rx.resubscribe();
-        if closed.borrow().is_some() {
+        if self.inner.endpoint.closed.load(Ordering::SeqCst) || closed.borrow().is_some() {
             return;
         }
         tokio::select! {

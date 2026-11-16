@@ -3,6 +3,11 @@
 This guide shows how to select and define TLS ClientHello identities, route
 requests to them, and keep the connection pool from mixing them.
 
+A plain `Target::tls` uses **rustls with the platform verifier**, the audited
+production default ([ADR-0054](../adr/0054-audited-tls-default-and-owned-fingerprint-opt-in.md)).
+A `TlsProfile` selects the owned `netune-tls` engine for a measured ClientHello
+identity; that path is Preview until its independent audit closes.
+
 A `TlsProfile` is **data**: it describes a ClientHello identity via a declarative
 `ClientHelloBlueprint` ([ADR-0048](../adr/0048-declarative-clienthello-blueprints.md))
 fed to the owned `netune-tls` engine ([ADR-0045](../adr/0045-owned-egress-tls-engine.md)).
@@ -98,11 +103,12 @@ preset's definition.
 
 ## Pool Slicing and Isolation
 
-Connections are keyed by `authority#profile`. A connection handshook under
+Connections are keyed by the typed `(authority, ConnectionIdentity)` pair,
+including the profile and engine. A connection handshook under
 `antigravity-cli-stream` is never handed to a request that asked for
-`netune-default`, because the pooled session's ClientHello is already on the
-wire and cannot be changed. Fingerprint leakage across identities is therefore a
-key-space property, not a policy someone has to remember.
+`netune-default` or rustls, because the pooled session's ClientHello is already
+on the wire and cannot be changed. Fingerprint leakage across identities is
+therefore a key-space property, not a policy someone has to remember.
 
 An unknown profile name is a **loud** failure at connection time; the error
 lists every registered name. Silently falling back to a default identity would

@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Plain egress TLS targets now use rustls with the platform verifier. The owned `netune-tls` engine is selected by `Target::with_tls_profile` or `Target::with_tls_engine("netune-tls")`; a profile is never silently downgraded. See [ADR-0054](docs/adr/0054-audited-tls-default-and-owned-fingerprint-opt-in.md).
 - `netune`: Production defaults are now bounded: `response_head_timeout` 30 s, `body_idle_timeout` 60 s, `request_timeout` 300 s, `max_in_flight_per_authority` 64, `max_in_flight_total` 512. `None` is an explicit opt-out.
 - `netune`: `Decoder::push` / `Decoder::finish` require the remaining decoded-body budget; a compressed chunk can no longer expand past the configured limit before failing.
+- `netune`: HTTP/3 client uploads and body chunks now inherit `request_timeout` / `body_idle_timeout` instead of the previous one-day internal sentinel.
+
+### Fixed
+
+- `netune-quic`: `Endpoint::close` is observable by `Connection::wait_established`, `Connection::closed` and `Connection::is_closed` even when the close races the waiter's subscription; the endpoint flag is authoritative, not just the broadcast notification.
 
 ## [0.0.33] - 2026-11-16
 

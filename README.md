@@ -39,9 +39,9 @@ object you can inspect, fingerprint, and change:
 **Fingerprint** — inspect and configure TLS identity:
 
 - Pure wire parser: `netune-trace::ja4` parses ClientHello bytes and computes the JA4 fingerprint, cross-tool anchored against FoxIO's published test vectors.
-- Profile presets: named presets (`netune-default`, `codex-reqwest`, `codex-network-proxy`) configure ALPN, protocol versions, ciphers, and key-exchange groups.
+- Profile presets: named presets (`netune-default`, `antigravity-cli-stream`, `go-standard`, `chrome-current`, `firefox-current`, `safari-current`) configure the owned engine's declarative ClientHello; a plain TLS target uses rustls by default (ADR-0054).
 - Per-request selection: `Target::with_tls_profile` picks the identity at request time; unknown profile names fail loudly.
-- Pool isolation: connection pool keys on `authority#profile`, preventing connection reuse across disparate TLS identities.
+- Pool isolation: connection pool keys on the typed `(authority, ConnectionIdentity)` pair, preventing connection reuse across disparate TLS profiles or engines.
 
 **Intervene & Mock** — change behaviour at two privilege levels or script requests in memory:
 

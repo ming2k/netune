@@ -92,12 +92,18 @@ pub(super) async fn exchange_on_session(
         .map_err(|error| NetError::Protocol(format!("HTTP/3 request invalid: {error}")))?;
 
     let h3_config = H3ClientConfig {
-        request_timeout: NO_INTERNAL_TIMEOUT,
+        request_timeout: attempt
+            .config
+            .request_timeout
+            .unwrap_or(NO_INTERNAL_TIMEOUT),
         response_head_timeout: attempt
             .config
             .response_head_timeout
             .unwrap_or(NO_INTERNAL_TIMEOUT),
-        body_chunk_timeout: NO_INTERNAL_TIMEOUT,
+        body_chunk_timeout: attempt
+            .config
+            .body_idle_timeout
+            .unwrap_or(NO_INTERNAL_TIMEOUT),
         max_body_bytes: usize::MAX,
     };
 

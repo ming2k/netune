@@ -32,9 +32,9 @@ use crate::decompress::Decoder;
 use crate::error::{AttemptError, NetError};
 use crate::exchange::{Attempt, ObservationLevel, Request, RequestBody, RoundTrip};
 use crate::pool::{Pool, PoolConfig, PoolKey};
-use crate::profile::{ConnectionPlan, H1Registry, H1WireProfile, Http2Mode, PlannedTransport};
 #[cfg(any(feature = "http2", feature = "http3"))]
 use crate::profile::ProfileId;
+use crate::profile::{ConnectionPlan, H1Registry, H1WireProfile, Http2Mode, PlannedTransport};
 #[cfg(feature = "http2")]
 use crate::profile::{H2Registry, H2RequestRegistry};
 use crate::proxy::{Proxy, ProxyConnector};

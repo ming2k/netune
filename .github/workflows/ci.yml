@@ -108,11 +108,11 @@ jobs:
       - name: Generate CycloneDX SBOM
         run: |
           cargo install cargo-cyclonedx --locked
-          cargo cyclonedx --format json --output-prefix netune-sbom
+          cargo cyclonedx --format json --all --override-filename netune-sbom
       - uses: actions/upload-artifact@v4
         with:
           name: sbom-cyclonedx
-          path: "*netune-sbom*.json"
+          path: "**/netune-sbom*"
           if-no-files-found: error
 
   lint:

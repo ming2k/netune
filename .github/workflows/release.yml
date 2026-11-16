@@ -12,6 +12,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.1.0)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -24,25 +30,34 @@ jobs:
     name: Tag matches workspace version & is annotated
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
       - name: Verify annotated tag object and version match
+        id: check
         run: |
-          if ! git rev-parse -q --verify "refs/tags/${GITHUB_REF_NAME}^{tag}" >/dev/null; then
-            echo "::error::tag ${GITHUB_REF_NAME} must be an annotated (preferably signed) tag, not a lightweight tag"
+          tag_name="${{ inputs.tag || github.ref_name }}"
+          git fetch origin "refs/tags/${tag_name}:refs/tags/${tag_name}" --force
+          tag_type="$(git cat-file -t "refs/tags/${tag_name}")"
+          echo "tag=${tag_name} type=${tag_type}"
+          if [ "${tag_type}" != "tag" ]; then
+            echo "::error::tag ${tag_name} must be an annotated (preferably signed) tag, not lightweight (got ${tag_type})"
             exit 1
           fi
           version="$(awk '/^\[workspace\.package\]/{seen=1} seen && /^version *=/{gsub(/[" ]/,"",$3); print $3; exit}' Cargo.toml)"
-          echo "tag=${GITHUB_REF_NAME} workspace_version=${version}"
-          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match workspace version ${version}"
+          echo "tag=${tag_name} workspace_version=${version}"
+          if [ "${tag_name}" != "v${version}" ]; then
+            echo "::error::tag ${tag_name} does not match workspace version ${version}"
             exit 1
           fi
+          echo "tag=${tag_name}" >> "$GITHUB_OUTPUT"
 
   release:
-    name: GitHub Release ${{ github.ref_name }}
+    name: GitHub Release ${{ needs.verify.outputs.tag }}
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -50,6 +65,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+          fetch-tags: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.95.0"
@@ -57,10 +75,11 @@ jobs:
       - name: Generate CycloneDX SBOM for release tag
         run: |
           cargo install cargo-cyclonedx --locked
-          cargo cyclonedx --format json --output-prefix "netune-${GITHUB_REF_NAME}-sbom"
+          cargo cyclonedx --format json --all --override-filename "netune-${{ needs.verify.outputs.tag }}-sbom"
       - name: Assemble the release body from CHANGELOG.md
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          tag_name="${{ needs.verify.outputs.tag }}"
+          version="${tag_name#v}"
           notes="$RUNNER_TEMP/notes.md"
           body="$RUNNER_TEMP/body.md"
           awk -v v="$version" '
@@ -87,7 +106,7 @@ jobs:
             echo "Consume from this tag:"
             echo
             echo '```toml'
-            echo "netune = { git = \"https://github.com/${GITHUB_REPOSITORY}\", tag = \"${GITHUB_REF_NAME}\" }"
+            echo "netune = { git = \"https://github.com/${GITHUB_REPOSITORY}\", tag = \"${tag_name}\" }"
             echo '```'
             echo
             echo "---"
@@ -99,11 +118,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release edit "${GITHUB_REF_NAME}" --notes-file "$RUNNER_TEMP/notes.md"
+          tag_name="${{ needs.verify.outputs.tag }}"
+          if gh release view "${tag_name}" >/dev/null 2>&1; then
+            gh release edit "${tag_name}" --notes-file "$RUNNER_TEMP/notes.md"
           else
-            gh release create "${GITHUB_REF_NAME}" \
-              --title "netune ${GITHUB_REF_NAME#v}" \
+            gh release create "${tag_name}" \
+              --title "netune ${tag_name#v}" \
               --notes-file "$RUNNER_TEMP/notes.md"
           fi
-          gh release upload "${GITHUB_REF_NAME}" *netune-${GITHUB_REF_NAME}-sbom*.json --clobber
+          mapfile -t sboms < <(find . -maxdepth 4 -name "netune-${tag_name}-sbom*" -type f | sort)
+          if [ "${#sboms[@]}" -eq 0 ]; then
+            echo "::error::no SBOM files generated"
+            exit 1
+          fi
+          tar -czf "netune-${tag_name}-sboms.tar.gz" "${sboms[@]}"
+          gh release upload "${tag_name}" "netune-${tag_name}-sboms.tar.gz" --clobber

@@ -50,10 +50,11 @@ selection".
 1. **Plain TLS targets use rustls.** A `Target::tls` with no `TlsProfile` and no
    explicit engine handshakes with rustls using the platform certificate
    verifier. This is the production default.
-2. **A profile selects the owned engine.** `Target::with_tls_profile` (or a
-   custom profile registered with `TlsRouterConnector::with_profile_named`)
-   uses `netune-tls`. The profile is a declarative ClientHello blueprint and
-   cannot be reproduced by rustls, so this selection is never downgraded.
+2. **A profile selects the owned engine.** A target that names a profile with
+   `Target::with_tls_profile` (including a custom profile registered through
+   `TlsRouterConnector::with_profile_named`) uses `netune-tls`. The profile is a
+   declarative ClientHello blueprint and cannot be reproduced by rustls, so
+   this selection is never downgraded.
 3. **An explicit engine wins only when it is compatible.** `netune-tls` selects
    the owned engine; `rustls` selects rustls. A profile plus `rustls` is an
    error, as is a connector configured with an owned verifier plus `rustls`.

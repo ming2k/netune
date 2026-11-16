@@ -226,6 +226,7 @@ This document provides a factual overview of all crates comprising the `netune` 
   - `SessionId`: a validated client-initiated bidirectional stream ID.
   - `WebTransportSendStream::reset_reliable` / `WebTransportRecvStream`: reliable partial reset includes the WT stream header and delivers exactly the application prefix before surfacing the reset.
   - `WebTransportSettings`: draft-17 and draft-16 `SETTINGS_WT_ENABLED` codepoints, plus initial WT stream/data limits. The server ignores the client's enable setting (draft-17 Section 3.1).
+  - `WebTransportVersion`: the negotiated draft (`Draft17` preferred, `Draft16` compatibility), exposed on `WebTransportClient`, `WebTransportServer` and `WebTransportSession`; invalid enable values fail closed.
   - `OriginPolicy` / `WebTransportOrigin`: same-origin default, `Any`, or normalized allowlist; `WebTransportServer::with_origin_policy` selects it. Invalid requests get 400, disallowed Origins 403.
   - `ControlCapsule`: `WT_CLOSE_SESSION`, `WT_DRAIN_SESSION`, `WT_MAX_STREAMS`, `WT_MAX_DATA`, `WT_STREAMS_BLOCKED`, `WT_DATA_BLOCKED`.
   - `Connection::peer_reset_stream_at`: whether the peer advertised the

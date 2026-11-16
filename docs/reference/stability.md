@@ -91,7 +91,8 @@ need an audited TLS implementation.
 WebTransport is **Experimental** until:
 
 - reliable `RESET_STREAM_AT` remains covered by the prefix/reset tests (landed);
-- at least two independent browser engines pass a published interop matrix;
+- at least two independent browser engines pass the pinned interop matrix in
+  [WebTransport Browser Interoperability](webtransport-interop.md);
 - draft-version negotiation is tested across the supported browser versions;
 - the Web Platform Tests / external differential scenarios are part of CI.
 

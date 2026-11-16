@@ -18,7 +18,7 @@ use crate::{
     ControlCapsule, SETTINGS_WT_ENABLED, SETTINGS_WT_ENABLED_DRAFT16, SETTINGS_WT_INITIAL_MAX_DATA,
     SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI, SETTINGS_WT_INITIAL_MAX_STREAMS_UNI, SessionId,
     WT_STREAM_SIGNAL, WT_UNI_STREAM_TYPE, WebTransportError, WebTransportSettings,
-    encode_bidi_header, encode_uni_header,
+    WebTransportVersion, encode_bidi_header, encode_uni_header,
 };
 
 /// A reliable bidirectional WebTransport stream (header already consumed).
@@ -233,6 +233,7 @@ pub struct WebTransportClient {
     h3: H3Client,
     settings: WebTransportSettings,
     peer: WebTransportSettings,
+    version: WebTransportVersion,
     routes: Routes,
     pending: Pending,
     router: tokio::task::JoinHandle<()>,
@@ -268,15 +269,10 @@ impl WebTransportClient {
                 "peer did not advertise reset_stream_at".to_string(),
             ));
         }
-        let enabled = h3
-            .peer_setting(SETTINGS_WT_ENABLED)
-            .or_else(|| h3.peer_setting(SETTINGS_WT_ENABLED_DRAFT16))
-            .unwrap_or(0);
-        if enabled != 1 {
-            return Err(WebTransportError::Settings(
-                "peer did not enable WebTransport over HTTP/3".to_string(),
-            ));
-        }
+        let version = WebTransportVersion::from_peer_settings(
+            h3.peer_setting(SETTINGS_WT_ENABLED),
+            h3.peer_setting(SETTINGS_WT_ENABLED_DRAFT16),
+        )?;
         if h3.peer_setting(0x33).unwrap_or(0) != 1 || h3.peer_setting(0x08).unwrap_or(0) != 1 {
             return Err(WebTransportError::Settings(
                 "peer lacks H3 datagram or extended CONNECT support".to_string(),
@@ -295,10 +291,16 @@ impl WebTransportClient {
             h3,
             settings,
             peer,
+            version,
             routes,
             pending,
             router,
         })
+    }
+
+    /// The WebTransport draft negotiated with the server.
+    pub const fn version(&self) -> WebTransportVersion {
+        self.version
     }
 
     pub async fn connect_session(
@@ -326,6 +328,7 @@ impl WebTransportClient {
             pending: VecDeque::new(),
             settings: self.settings,
             peer: self.peer,
+            version: self.version,
             flow: initial_flow(self.settings, self.peer),
         })
     }
@@ -364,6 +367,7 @@ pub struct WebTransportServer {
     h3: H3ServerConnection,
     settings: WebTransportSettings,
     peer: WebTransportSettings,
+    version: WebTransportVersion,
     origin_policy: OriginPolicy,
     routes: Routes,
     pending: Pending,
@@ -405,6 +409,10 @@ impl WebTransportServer {
             h3,
             settings,
             peer,
+            // Draft-17 is the server's authoritative version. The client
+            // selected it (or the draft-16 compatibility codepoint) from the
+            // settings this server advertised.
+            version: WebTransportVersion::Draft17,
             origin_policy: OriginPolicy::default(),
             routes,
             pending,
@@ -485,6 +493,7 @@ impl WebTransportServer {
                 pending: VecDeque::new(),
                 settings: self.settings,
                 peer: self.peer,
+                version: self.version,
                 flow: initial_flow(self.settings, self.peer),
             }));
         }
@@ -544,6 +553,7 @@ pub struct WebTransportSession {
     pending: VecDeque<H3ExtensionStream>,
     settings: WebTransportSettings,
     peer: WebTransportSettings,
+    version: WebTransportVersion,
     flow: Arc<Mutex<FlowState>>,
 }
 
@@ -558,6 +568,11 @@ impl WebTransportSession {
 
     pub fn peer_settings(&self) -> WebTransportSettings {
         self.peer
+    }
+
+    /// The WebTransport draft negotiated for this session.
+    pub const fn version(&self) -> WebTransportVersion {
+        self.version
     }
 
     pub fn quic(&self) -> &QuicConnection {

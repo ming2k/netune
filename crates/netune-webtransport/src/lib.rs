@@ -27,6 +27,55 @@ pub use session::{
 
 pub const DRAFT_VERSION: &str = "draft-ietf-webtrans-http3-17";
 
+/// The WebTransport over HTTP/3 draft selected for one session.
+///
+/// Draft-17 is preferred. Draft-16 is the compatibility codepoint advertised
+/// by older peers; selecting it does not claim draft-16 feature completeness,
+/// only the shared wire subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WebTransportVersion {
+    Draft16,
+    Draft17,
+}
+
+impl WebTransportVersion {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft16 => "draft-ietf-webtrans-http3-16",
+            Self::Draft17 => "draft-ietf-webtrans-http3-17",
+        }
+    }
+
+    /// Select the highest common version from the peer's enable codepoints.
+    ///
+    /// `draft17` and `draft16` are the peer's values for
+    /// `SETTINGS_WT_ENABLED` and `SETTINGS_WT_ENABLED_DRAFT16`. A value other
+    /// than 0 or 1 is a settings error; an absent/zero pair means the peer did
+    /// not enable WebTransport.
+    pub fn from_peer_settings(
+        draft17: Option<u64>,
+        draft16: Option<u64>,
+    ) -> Result<Self, WebTransportError> {
+        let enabled = |value: Option<u64>| match value {
+            None => Ok(false),
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            Some(_) => Err(WebTransportError::Settings(
+                "SETTINGS_WT_ENABLED must be 0 or 1".to_string(),
+            )),
+        };
+        let draft17 = enabled(draft17)?;
+        let draft16 = enabled(draft16)?;
+        match (draft17, draft16) {
+            (true, _) => Ok(Self::Draft17),
+            (false, true) => Ok(Self::Draft16),
+            (false, false) => Err(WebTransportError::Settings(
+                "peer did not enable WebTransport over HTTP/3".to_string(),
+            )),
+        }
+    }
+}
+
 pub const SETTINGS_WT_ENABLED: u64 = 0x20b8_933b;
 /// Draft-16 `SETTINGS_WT_ENABLED` codepoint. Draft-17 endpoints advertise both
 /// codepoints when they can speak the draft-16 wire subset; the highest common
@@ -425,6 +474,30 @@ mod tests {
         let mut extra = settings.extra_settings();
         extra.push((SETTINGS_WT_ENABLED, 2));
         assert!(WebTransportSettings::from_extra(&extra).is_err());
+    }
+
+    #[test]
+    fn draft_negotiation_prefers_17_and_rejects_unknown_values() {
+        assert_eq!(
+            WebTransportVersion::from_peer_settings(Some(1), None).expect("draft 17"),
+            WebTransportVersion::Draft17
+        );
+        assert_eq!(
+            WebTransportVersion::from_peer_settings(None, Some(1)).expect("draft 16"),
+            WebTransportVersion::Draft16
+        );
+        assert_eq!(
+            WebTransportVersion::from_peer_settings(Some(1), Some(1)).expect("highest common"),
+            WebTransportVersion::Draft17
+        );
+        assert!(
+            WebTransportVersion::from_peer_settings(Some(0), Some(0)).is_err(),
+            "a disabled peer is not a WebTransport peer"
+        );
+        assert!(
+            WebTransportVersion::from_peer_settings(Some(2), None).is_err(),
+            "values other than 0/1 are invalid"
+        );
     }
 
     #[test]

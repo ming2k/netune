@@ -212,6 +212,33 @@ pub enum RecordCipher12 {
     },
 }
 
+impl Drop for RecordCipher12 {
+    fn drop(&mut self) {
+        match self {
+            Self::AesGcm {
+                key, explicit_seed, ..
+            } => {
+                key.fill(0);
+                explicit_seed.fill(0);
+            }
+            Self::ChaCha20 { key, iv } => {
+                key.fill(0);
+                iv.fill(0);
+            }
+            Self::AesCbcSha1 {
+                mac_key,
+                write_key,
+                fixed_iv,
+                ..
+            } => {
+                mac_key.fill(0);
+                write_key.fill(0);
+                fixed_iv.fill(0);
+            }
+        }
+    }
+}
+
 /// The TLS 1.2 explicit IV for one CBC record.
 fn cbc_record_iv(fixed_iv: &[u8; 16], sequence: u64) -> Result<[u8; 16], Unspecified> {
     let mac = hmac::sign(

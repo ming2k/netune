@@ -87,4 +87,6 @@ Out of scope:
   `EgressConfinement` against every resolved address before opening a socket.
 
 See [Stability and Production Boundaries](../docs/reference/stability.md) for
-the support tiers and the exact feature/default matrix.
+the support tiers and the exact feature/default matrix. The audit scope,
+threat model and acceptance criteria are maintained for contributors under
+`docs/dev/security/tls-audit.md`.

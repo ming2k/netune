@@ -90,6 +90,12 @@ pub struct Secret {
     hash: Hash,
 }
 
+impl Drop for Secret {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
+    }
+}
+
 /// The traffic keys one traffic secret expands into.
 ///
 /// The IV is the 12-byte per-record static IV every TLS 1.3 AEAD uses;
@@ -101,6 +107,13 @@ pub struct TrafficKeys {
     pub key: Vec<u8>,
     /// The 12-byte static IV.
     pub iv: [u8; 12],
+}
+
+impl Drop for TrafficKeys {
+    fn drop(&mut self) {
+        self.key.fill(0);
+        self.iv.fill(0);
+    }
 }
 
 /// An expansion length adapter: `aws-lc-rs` types its HKDF-Expand output by

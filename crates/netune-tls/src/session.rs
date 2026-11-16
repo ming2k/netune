@@ -36,6 +36,8 @@ pub struct ResumptionTicket {
     pub ticket: Vec<u8>,
     /// Resumption PSK derived via `HKDF-Expand-Label(resumption_master_secret, "resumption", ticket_nonce, Hash.length)`.
     pub psk: Vec<u8>,
+    // The fields above are public for parsing and profile tests; the secret
+    // half is still wiped when the ticket leaves the cache.
     /// Transcript hash of the cipher suite that issued this ticket.
     pub hash: Hash,
     /// Cipher suite negotiated when this ticket was issued.
@@ -46,6 +48,12 @@ pub struct ResumptionTicket {
     pub lifetime_secs: u32,
     /// Monotonic timestamp when the ticket was received.
     pub received_at: Instant,
+}
+
+impl Drop for ResumptionTicket {
+    fn drop(&mut self) {
+        self.psk.fill(0);
+    }
 }
 
 impl ResumptionTicket {

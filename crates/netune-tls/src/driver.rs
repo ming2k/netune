@@ -1317,7 +1317,7 @@ mod tests {
             hello
                 .attach_psk_and_sign(
                     PskIdentity {
-                        identity: ticket.ticket,
+                        identity: ticket.ticket.clone(),
                         obfuscated_ticket_age: age_ms,
                     },
                     &ticket.psk,
@@ -1332,7 +1332,7 @@ mod tests {
                     socket,
                     OwnedConnectParams { hello, shares },
                     AcceptAny,
-                    Some(ticket.psk),
+                    Some(ticket.psk.clone()),
                     Some((cache.clone(), key.clone())),
                 )
                 .await

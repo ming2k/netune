@@ -194,7 +194,7 @@ impl<C: Connector> TlsRouterConnector<C> {
             hello
                 .attach_psk_and_sign(
                     netune_tls::hello::PskIdentity {
-                        identity: ticket.ticket,
+                        identity: ticket.ticket.clone(),
                         obfuscated_ticket_age: age_ms,
                     },
                     &ticket.psk,
@@ -206,7 +206,7 @@ impl<C: Connector> TlsRouterConnector<C> {
                         format!("TLS PSK binder: {error}"),
                     ))
                 })?;
-            Some(ticket.psk)
+            Some(ticket.psk.clone())
         } else {
             None
         };

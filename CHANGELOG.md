@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `netune-http3`: `H3RequestBody::split` returns a concurrent response-head future and an upload sender; `netune` uses it so an early HTTP/3 response is surfaced and the remaining upload is cancelled instead of stalling behind a server that stopped reading.
 - `netune`: HTTP/1.1 exchange now splits its transport into read/write halves sharing the socket tap, so the response head/body can be read while a request body is still uploading. An early response cancels the upload and a half-written connection is never pooled.
 - `netune-http1`: `Http1Reader::read_response_head` skips `100`/`102`/`103` interim heads, treats `101` as final, and bounds a peer that emits interim heads forever.
+- `netune-webtransport`: added `WebTransportVersion` negotiation and exposed the selected draft on the client/server/session; draft-17 is preferred and unknown enable values fail closed.
+- `netune-tls`: secret-bearing key-schedule and TLS 1.2 record-cipher values zeroize on drop; added the contributor audit-readiness package in `docs/dev/security/tls-audit.md`.
 
 ### Fixed
 

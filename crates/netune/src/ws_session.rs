@@ -24,7 +24,6 @@ use crate::error::NetError;
 use crate::ws::WsStream;
 
 /// Client-side heartbeat policy for a WebSocket session.
-#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct WsSessionConfig {
     /// Send an unsolicited ping when this long has passed since the last

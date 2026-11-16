@@ -26,7 +26,6 @@ use http::{HeaderMap, Method, StatusCode, Version};
 /// The body is passed separately to [`crate::write_request`] so the caller
 /// controls its length; a `Content-Length` header is written for a present body
 /// and never for an absent one.
-#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct RequestHead {
     /// HTTP request method.
@@ -110,7 +109,6 @@ pub enum BodyKind {
 /// Separated from [`http::StatusCode`] because the phrase is not data the status
 /// implies — it is free text a server may set, replace, or omit entirely, and a
 /// caller that fingerprints HTTP responses needs to control it byte for byte.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ReasonPhrase {
     /// Use the canonical phrase for the status code (`404` → `Not Found`), or
@@ -138,7 +136,6 @@ impl ReasonPhrase {
 }
 
 /// A response head the server role builds.
-#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ResponseHead {
     /// HTTP response status code.
@@ -246,7 +243,6 @@ impl ResponseHead {
 }
 
 /// A response head the client role received.
-#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct IncomingResponse {
     /// HTTP version spoken by the peer (`HTTP/1.0` or `HTTP/1.1`).
@@ -272,7 +268,6 @@ impl IncomingResponse {
 }
 
 /// A request head the server role received.
-#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct IncomingRequest {
     /// HTTP request method.

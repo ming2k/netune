@@ -303,7 +303,6 @@ impl SessionObserver for TraceObserver {
                 );
                 return;
             }
-            _ => return,
         };
         self.recorder.mark_stream(stream_id, kind, a, 0);
     }

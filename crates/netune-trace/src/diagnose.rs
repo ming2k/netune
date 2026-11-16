@@ -17,7 +17,6 @@ use crate::trace::{Fidelity, TraceMeta};
 
 /// How an attempt ended, as far as the record can prove.
 #[repr(u8)]
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -31,7 +30,6 @@ pub enum Outcome {
 }
 
 /// A pure root-cause summary of one trace.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Diagnosis {

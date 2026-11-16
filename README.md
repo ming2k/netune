@@ -88,8 +88,8 @@ The crates are consumed from this repository by tag (`0.1.0` GA for the Stable t
 
 ```toml
 [dependencies]
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.2.0" }
-netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.2.0" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.1.1" }
+netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.1.1" }
 ```
 
 Pin a `tag` (or a `rev` for the strictest reproducibility) and upgrade
@@ -156,7 +156,6 @@ stages as if they had not happened.
   - [Crates Reference](docs/reference/crates.md)
   - [System Architecture](docs/reference/architecture.md)
   - [Stability and Production Boundaries](docs/reference/stability.md)
-  - [Migrating to 0.2.0](docs/reference/migration-0.2.0.md)
   - [Migrating to 0.1.0 (GA)](docs/reference/migration-0.1.0.md)
 - **Security**: [Security Policy](.github/SECURITY.md)
 - **Explanation**: [all articles](docs/explanation/index.md)
@@ -167,7 +166,7 @@ stages as if they had not happened.
 
 ## Status
 
-**`0.2.0` (Stable tier GA line)**. Every workspace crate is lockstep-versioned at `0.2.0`; HTTP/3, owned TLS (`netune-tls`), and `netune-probe` are Preview; WebTransport is Experimental (see [Stability and Production Boundaries](docs/reference/stability.md)).
+**`0.1.1` (Stable tier GA line)**. Every workspace crate is lockstep-versioned at `0.1.1`; HTTP/3, owned TLS (`netune-tls`), and `netune-probe` are Preview; WebTransport is Experimental (see [Stability and Production Boundaries](docs/reference/stability.md)).
 
 MSRV: 1.95.0. Tier-1 OS: Linux. License: MIT.
 

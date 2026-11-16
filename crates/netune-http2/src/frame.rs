@@ -52,7 +52,6 @@ pub const SETTING_MAX_FRAME_SIZE: u16 = 0x5;
 pub const SETTING_MAX_HEADER_LIST_SIZE: u16 = 0x6;
 
 /// A parsed 9-byte HTTP/2 frame header.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
     /// 24-bit payload length in bytes.
@@ -108,7 +107,6 @@ impl FrameHeader {
 }
 
 /// An HTTP/2 frame representation.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     /// Application or request/response body data frame (RFC 9113 §6.1).

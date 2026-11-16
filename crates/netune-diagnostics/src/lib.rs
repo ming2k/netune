@@ -31,7 +31,6 @@ use netune_trace::{
 };
 
 /// Which diagnostic fields a sink or bundle may render.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RedactionPolicy {
     /// Keep `Internal` fields. `Secret` fields are always removed.
@@ -222,7 +221,6 @@ impl TraceSink for FanoutSink {
 }
 
 /// A written review bundle.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceBundle {
     /// Directory containing the written bundle files.

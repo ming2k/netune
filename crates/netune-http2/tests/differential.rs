@@ -55,7 +55,6 @@ async fn read_our_body(mut reader: netune_http2::H2StreamReader) -> (Bytes, Vec<
                 break;
             }
             H2ResponseEvent::End => break,
-            _ => {}
         }
     }
     (out.freeze(), trailers)

@@ -45,7 +45,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("server closed: {reason:?}");
                 break;
             }
-            _ => {}
         }
     }
 

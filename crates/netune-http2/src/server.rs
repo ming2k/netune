@@ -57,7 +57,6 @@ use crate::frame::{Frame, SETTING_INITIAL_WINDOW_SIZE};
 ///
 /// Passed by value so the role holds no policy: an orchestrator that wants different limits builds
 /// a different config, and the numbers it sets are the numbers the peer is *told*.
-#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ServerSessionConfig {
     /// The SETTINGS to advertise, in wire order.
@@ -184,7 +183,6 @@ impl ServerSessionConfig {
 }
 
 /// One request, as the server role hands it to the orchestrator.
-#[non_exhaustive]
 #[derive(Debug)]
 pub struct H2Request {
     /// The stream this request arrived on. It is the exchange identity a trace records.
@@ -301,7 +299,6 @@ impl H2Body {
 }
 
 /// The response a handler produces for one stream.
-#[non_exhaustive]
 #[derive(Debug)]
 pub struct H2Response {
     /// HTTP status code (`:status`).
@@ -313,7 +310,6 @@ pub struct H2Response {
 }
 
 /// How a response body is delivered.
-#[non_exhaustive]
 #[derive(Debug)]
 pub enum H2ResponseBody {
     /// No body; the head carries `END_STREAM`.
@@ -389,7 +385,6 @@ pub trait H2Handler: Send + Sync + 'static {
 }
 
 /// Why a session ended.
-#[non_exhaustive]
 #[derive(Debug)]
 pub enum SessionEnd {
     /// The peer closed the connection.
@@ -410,7 +405,6 @@ pub enum SessionEnd {
 /// depend on the trace model (it is a leaf, ADR-0003). The orchestrator adapts these to `EventKind`
 /// and attaches the exchange identity the trace needs — which is exactly the translation that
 /// belongs in the crate that owns the recorder.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamEvent {
     /// A request head was decoded; `payload` bytes.

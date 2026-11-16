@@ -460,7 +460,6 @@ async fn a_request_body_larger_than_the_stream_window_is_accepted() {
             }
             netune_http2::H2ResponseEvent::Trailers(_) => {}
             netune_http2::H2ResponseEvent::End => break,
-            _ => {}
         }
     }
     assert_eq!(

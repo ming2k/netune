@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "netune"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "brotli",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "netune-diagnostics"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "netune-trace",
  "serde",
@@ -849,11 +849,11 @@ dependencies = [
 
 [[package]]
 name = "netune-egress"
-version = "0.2.0"
+version = "0.1.1"
 
 [[package]]
 name = "netune-http1"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "http",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http2"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "h2",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "netune-http3"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "h3",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "netune-io"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "netune-trace",
  "tokio",
@@ -904,14 +904,14 @@ dependencies = [
 
 [[package]]
 name = "netune-probe"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "netune-quic"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "netune-server"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "h2",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "netune-tls"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "aws-lc-rs",
  "aws-lc-sys",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "netune-trace"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "netune-webtransport"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "http",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "netune-ws"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "bytes",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "test-support"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "rcgen",
  "rustls",
@@ -2050,7 +2050,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "workspace-tests"
-version = "0.2.0"
+version = "0.1.1"
 dependencies = [
  "brotli",
  "bytes",

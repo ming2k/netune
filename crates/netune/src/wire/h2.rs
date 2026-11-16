@@ -309,7 +309,6 @@ impl BodySource for Body {
                         }
                         return Ok(None);
                     }
-                    _ => continue,
                 }
             }
         })

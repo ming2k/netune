@@ -59,7 +59,6 @@ pub trait TraceSink: Send + Sync + std::fmt::Debug {
 }
 
 /// What a sink saw when an attempt ended.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraceSummary {

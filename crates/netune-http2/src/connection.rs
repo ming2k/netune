@@ -142,7 +142,6 @@ impl Role {
 /// on accept). The values are the bounds the *peer* must respect when sending to us, which is
 /// why they are stated as a type rather than inferred from local buffers: a bound the peer was
 /// not told about becomes a mid-request failure instead of a limit it could have respected.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalSettings {
     /// Advertised `SETTINGS_HEADER_TABLE_SIZE`.

@@ -1030,7 +1030,6 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
                 }
                 Box::new(segmented)
             }
-            _ => Box::new(stream),
         };
 
         Ok(Established {

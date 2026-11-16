@@ -154,8 +154,9 @@ async fn serve_then_drop_idle(listener: TcpListener) {
     socket.write_all(frame).await.expect("chunk");
     socket.write_all(b"\r\n0\r\n\r\n").await.expect("end");
     socket.flush().await.expect("flush");
-    // Now behave like an idle-culling gateway: hard-close with no alert. The
-    // socket sits in the client's pool in this state.
+    // Now behave like an idle-culling gateway: close the socket cleanly at the
+    // TCP layer so the peer sits with an idle, closed socket in its pool.
+    let _ = socket.shutdown().await;
     drop(socket);
 }
 
@@ -175,6 +176,9 @@ async fn a_pooled_socket_the_peer_dropped_is_replaced_transparently() {
     let first = request_once(&client, &target, TraceCollector::start(4096)).await;
     assert_eq!(first, 1, "the first response is served in full");
     server.await.expect("join");
+    // Give Tokio's I/O reactor a moment to observe the peer FIN on loaded CI
+    // runners so the non-blocking checkout probe does not race epoll delivery.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     assert_eq!(
         pool.idle_count(&client.pool_key(&target).expect("plan")),
         1,

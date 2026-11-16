@@ -69,7 +69,6 @@ impl<T> SegmentingIo<T> {
                 }
                 Some(wrapped)
             }
-            _ => None,
         }
     }
 

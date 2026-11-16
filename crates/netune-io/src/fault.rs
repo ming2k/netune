@@ -44,7 +44,6 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// One misbehaviour, positioned by the payload-byte offset it fires at.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Fault {
     /// Stall for `duration` before delivering further bytes, then continue.

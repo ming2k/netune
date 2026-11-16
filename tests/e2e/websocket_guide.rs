@@ -116,7 +116,6 @@ async fn guide_connect_and_echo() {
                 println!("server closed: {reason:?}");
                 break;
             }
-            _ => {}
         }
     }
     assert!(saw_text, "guide's echo loop must observe the scripted text");

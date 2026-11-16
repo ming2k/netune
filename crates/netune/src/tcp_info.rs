@@ -21,7 +21,6 @@ use std::time::Duration;
 use netune_trace::TraceCollector;
 
 /// One `TCP_INFO` reading.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TcpSample {
     /// Kernel-smoothed round-trip time, microseconds.

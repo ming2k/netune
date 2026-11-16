@@ -267,7 +267,6 @@ impl EventKind {
 /// timestamps on another), so the source travels with the event instead of being
 /// assumed from the trace's fidelity level.
 #[repr(u8)]
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -305,7 +304,6 @@ impl TimeSource {
 /// exchange, carried data, carried bookkeeping, proved liveness or closed. A
 /// consumer with a richer vocabulary (an event-stream schema, an RPC framing)
 /// maps its shapes onto these and keeps its own labels outside the trace.
-#[non_exhaustive]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -351,7 +349,6 @@ impl FrameClass {
 
 /// ALPN protocol negotiated on a TLS connection, as recorded in
 /// [`EventKind::TlsInfo`].
-#[non_exhaustive]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -393,7 +390,6 @@ impl Alpn {
 }
 
 /// One decoded event, positioned by its offset from the trace origin.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Event {

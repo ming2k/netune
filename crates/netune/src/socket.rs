@@ -14,7 +14,6 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpStream;
 
 /// L3/L4 transport tuning parameters.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SocketConfig {
     /// Disable Nagle's algorithm (`TCP_NODELAY`). Default is `true`.

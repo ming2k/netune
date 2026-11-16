@@ -13,7 +13,6 @@
 /// Reason codes are stable identifiers, not prose: the UI owns the wording, and
 /// an aggregate can filter on a code (`Batched` samples must not enter a
 /// server-side efficiency average) without parsing English.
-#[non_exhaustive]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -77,7 +76,6 @@ impl Reason {
 }
 
 /// The verdict attached to every derived quantity.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]

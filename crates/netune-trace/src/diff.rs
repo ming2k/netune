@@ -9,7 +9,6 @@ use crate::event::{Event, EventKind};
 use crate::trace::TraceSnapshot;
 
 /// One side of a divergence, with only the fields that are stable across runs.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EventView {
@@ -32,7 +31,6 @@ impl From<Event> for EventView {
 }
 
 /// The first event where two logs disagree.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Divergence {
@@ -45,7 +43,6 @@ pub struct Divergence {
 }
 
 /// What changed between two attempts.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TraceDiff {

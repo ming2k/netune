@@ -264,7 +264,6 @@ pub trait Diagnose {
 }
 
 /// One bounded, human-readable diagnostic.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiagnosticRecord {
@@ -291,7 +290,6 @@ pub struct DiagnosticRecord {
 }
 
 /// One key/value field attached to a diagnostic.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiagnosticField {

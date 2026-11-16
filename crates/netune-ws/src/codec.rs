@@ -96,9 +96,13 @@ impl FrameDecoder {
                 if buf.len() < 10 {
                     return Ok(None);
                 }
-                let len = u64::from_be_bytes([
+                let raw_len = u64::from_be_bytes([
                     buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8], buf[9],
-                ]) as usize;
+                ]);
+                let len = usize::try_from(raw_len).map_err(|_| WsError::PayloadTooLarge {
+                    length: usize::MAX,
+                    max: max_frame_bytes,
+                })?;
                 let header = 10 + if is_masked { 4 } else { 0 };
                 (len, header)
             }

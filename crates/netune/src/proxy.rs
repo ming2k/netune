@@ -28,7 +28,6 @@ use crate::connect::{Connector, Established, Target, Transport, parse_authority}
 use crate::error::{ConnectError, NetError};
 
 /// Which proxy to use.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Proxy {
     /// HTTP `CONNECT` tunnel over a plaintext hop

@@ -26,7 +26,6 @@ use crate::trace::RequestTrace;
 use crate::verdict::{Reading, Reason};
 
 /// Everything derivable from a trace.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DerivedTimings {

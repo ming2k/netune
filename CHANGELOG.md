@@ -7,23 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-11-16
+## [0.1.1] - 2026-11-16
 
-Complete API-stability, documentation, and CI-gate convergence release. See
-[Migrating to 0.2.0](docs/reference/migration-0.2.0.md).
+SemVer-compatible stabilization, documentation, and CI hardening release on the
+`0.1.z` GA line.
 
 ### Added
 
 - `netune`: `ClientBuilder::dns_resolver(...)` and `impl DnsResolver for Arc<dyn DnsResolver>` so custom resolvers (`StaticResolver`, etc.) compose directly through `Client::builder()`.
+- `netune`, `netune-http1`, `netune-http2`, `netune-trace`: additive `new(...)` and `with_*` builders across configuration, head, frame, and trace types (`RequestHead`, `IncomingResponse`, `IncomingRequest`, `LocalSettings`, `ServerSessionConfig`, `H2RequestProfile`, `FrameHeader`, `Frame`, `H2Response`, `Event`, `TraceSummary`, `ConnectionInfo`, `RequestTrace`, `WsSessionConfig`).
 - `tests/e2e/soak.rs`: added `soak_h3_stream_churn_and_fd_bounds` (120 sequential HTTP/3 POST echoes with file-descriptor bound checks).
 - `.github/workflows/ci.yml`: added `cargo hack` feature-powerset checks across the workspace and orchestrators, `cargo clippy --all-targets --no-default-features -- -D warnings`, and `cargo semver-checks` patch-compatibility enforcement on Stable crates.
 - `crates/netune-webtransport/Cargo.toml`: completed `repository`, `keywords`, and `categories` package metadata.
 
 ### Changed
 
-- **Breaking:** Completed the `#[non_exhaustive]` audit across all extensible Stable public structs and enums (`SocketConfig`, `TcpSample`, `WsSessionConfig`, `Proxy`, `Preset`, `TlsProfile`, `HeaderCasing`, `RequestHead`, `ResponseHead`, `ReasonPhrase`, `IncomingResponse`, `IncomingRequest`, `TargetError`, `LocalSettings`, `ServerSessionConfig`, `H2ConnectionProfile`, `H2RequestProfile`, `H2Fingerprint`, `FrameHeader`, `Frame`, `H2Request`, `H2Response`, `H2ResponseBody`, `SessionEnd`, `StreamEvent`, `H2ResponseHead`, `H2ResponseEvent`, `WsError`, `ws::Frame`, `Message`, `CloseReason`, `Fault`, `RedactionPolicy`, `TraceBundle`, `DerivedTimings`, `DerivedIngress`, `DerivedQuic`, `DerivedH3`, `Outcome`, `Diagnosis`, `DiagnosticRecord`, `DiagnosticField`, `EventView`, `Divergence`, `TraceDiff`, `Reason`, `Validity`, `TimeSource`, `FrameClass`, `Alpn`, `Event`, `TraceSummary`, `TracePropagation`, `TraceMeta`, `ConnectionInfo`, `EvasionPolicy`, `RequestTrace`, `TraceSnapshot`), paired with `new(...)` / `with_*` constructors.
-- **Breaking:** Removed all remaining `#[allow(missing_docs)]` exemptions (`DiagnosticPhase`, `netune_http2::Frame`, `netune_http2::connection::error_code`) and enabled `#![deny(missing_docs)]` across all 14 publishable crates (`netune-probe`, `netune-quic`, `netune-http3`, and `netune-webtransport` included).
-- Updated stale `v0.0.29` documentation snippets (`getting-started.md`, `serve-http.md`, `release-and-versioning.md`) to `v0.2.0`.
+- Enabled `#![deny(missing_docs)]` and documented all public items across all 14 publishable crates (`netune-probe`, `netune-quic`, `netune-http3`, and `netune-webtransport` included), removing all remaining `#[allow(missing_docs)]` exemptions (`DiagnosticPhase`, `netune_http2::Frame`, `netune_http2::connection::error_code`).
+- Updated stale `v0.0.29` documentation snippets (`getting-started.md`, `serve-http.md`, `release-and-versioning.md`) to `v0.1.1`.
+- Fixed CI scheduler timing flake in `tests/e2e/request_lifecycle.rs::a_pooled_socket_the_peer_dropped_is_replaced_transparently` by explicitly shutting down the closed idle peer socket and allowing the reactor loop to observe FIN before checkout.
 
 ### Removed
 

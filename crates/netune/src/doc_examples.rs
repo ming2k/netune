@@ -57,6 +57,3 @@ pub struct ProductionOperationsExamples;
 
 #[doc = include_str!("../../../docs/reference/migration-0.1.0.md")]
 pub struct Migration010Examples;
-
-#[doc = include_str!("../../../docs/reference/migration-0.2.0.md")]
-pub struct Migration020Examples;

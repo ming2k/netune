@@ -128,7 +128,6 @@ pub enum Role {
 }
 
 /// A decoded or in-flight WebSocket wire frame (RFC 6455 §5.2).
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
     /// Final fragment flag (`FIN`).

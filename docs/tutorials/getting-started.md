@@ -28,8 +28,8 @@ crates are distributed by git tag, not from a registry:
 
 ```toml
 [dependencies]
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.2.0" }
-netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.2.0" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.1.1" }
+netune-trace = { git = "https://github.com/ming2k/netune", tag = "v0.1.1" }
 http = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```

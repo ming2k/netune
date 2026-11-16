@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.34] - 2026-11-16
+
 ### Added
 
 - `netune`: `ClientConfig::request_timeout` bounds the whole attempt, including redirects and the response body. `PoolConfig::max_in_flight_total` bounds concurrent exchanges across all authorities. `docs/reference/stability.md` defines the Stable/Preview/Experimental tiers and the gates for owned TLS, HTTP/3 and WebTransport production claims.

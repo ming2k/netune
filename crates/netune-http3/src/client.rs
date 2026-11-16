@@ -145,7 +145,7 @@ impl H3RequestBody {
             context: self.context.take(),
             config: self.config.clone(),
             exchange: self.exchange,
-            permit: self.permit.take(),
+            permit: self.permit.clone(),
         };
         (self, response)
     }
@@ -392,15 +392,23 @@ impl H3ResponseStream {
     }
 }
 
+#[derive(Clone)]
 struct H3StreamPermit {
-    inner: Arc<H3SessionInner>,
+    /// The field exists solely to keep the shared permit alive; the decrement
+    /// lives in `H3StreamPermitInner::drop`, so no method reads it.
+    #[allow(dead_code)]
+    inner: Arc<H3StreamPermitInner>,
 }
 
-impl Drop for H3StreamPermit {
+struct H3StreamPermitInner {
+    session: Arc<H3SessionInner>,
+}
+
+impl Drop for H3StreamPermitInner {
     fn drop(&mut self) {
-        if self.inner.active_streams.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let ms = u64::try_from(self.inner.created.elapsed().as_millis()).unwrap_or(u64::MAX);
-            self.inner.idle_since_ms.store(ms, Ordering::Release);
+        if self.session.active_streams.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let ms = u64::try_from(self.session.created.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.session.idle_since_ms.store(ms, Ordering::Release);
         }
     }
 }
@@ -568,7 +576,9 @@ impl H3Session {
     ) -> Result<H3RequestBody, H3Error> {
         self.inner.active_streams.fetch_add(1, Ordering::AcqRel);
         let permit = H3StreamPermit {
-            inner: Arc::clone(&self.inner),
+            inner: Arc::new(H3StreamPermitInner {
+                session: Arc::clone(&self.inner),
+            }),
         };
         let exchange = self.inner.next_exchange.fetch_add(1, Ordering::AcqRel);
 

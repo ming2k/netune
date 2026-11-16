@@ -20,7 +20,7 @@ http = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "time", "net"] }
-tokio-tungstenite = { version = "0.28", default-features = false }
+tokio-tungstenite = { version = "0.30", default-features = false }
 
 [lints]
 workspace = true

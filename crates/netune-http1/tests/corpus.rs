@@ -40,6 +40,32 @@ async fn chunked_body_decodes_extensions_and_trailers() {
 }
 
 #[tokio::test]
+async fn informational_heads_are_skipped_until_the_final_response() {
+    let data = b"HTTP/1.1 100 Continue\r\n\r\n\
+                 HTTP/1.1 103 Early Hints\r\nlink: </style.css>; rel=preload\r\n\r\n\
+                 HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
+    let (status, headers, body) = read_all(data, 3, Method::POST).await.expect("parse");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], b"ok");
+    assert!(
+        headers.get("link").is_none(),
+        "interim headers must not leak into the final response"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_of_interim_heads_is_bounded() {
+    let mut data = Vec::new();
+    for _ in 0..17 {
+        data.extend_from_slice(b"HTTP/1.1 100 Continue\r\n\r\n");
+    }
+    let error = read_all(&data, 7, Method::POST)
+        .await
+        .expect_err("unbounded interim heads must fail");
+    assert!(matches!(error, HttpError::Protocol(_)), "{error:?}");
+}
+
+#[tokio::test]
 async fn a_close_delimited_body_reads_until_eof() {
     let (_, _, body) = read_all(UNTIL_CLOSE_RESPONSE, 5, Method::GET)
         .await

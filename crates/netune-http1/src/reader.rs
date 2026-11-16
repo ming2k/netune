@@ -64,34 +64,47 @@ impl<R: AsyncRead + Unpin> Http1Reader<R> {
         &mut self,
         request_method: &Method,
     ) -> Result<IncomingResponse, HttpError> {
-        let status_line = self.io.read_line(self.io.limits.max_head_bytes).await?;
-        let status_line = std::str::from_utf8(&status_line)
-            .map_err(|_| HttpError::Protocol("status line is not UTF-8"))?;
-        let mut parts = status_line.splitn(3, ' ');
-        let version = match parts.next() {
-            Some("HTTP/1.1") => Version::HTTP_11,
-            Some("HTTP/1.0") => Version::HTTP_10,
-            _ => return Err(HttpError::Protocol("unsupported HTTP version")),
-        };
-        let code = parts
-            .next()
-            .ok_or(HttpError::Protocol("status line has no status code"))?;
-        let status = code
-            .parse::<u16>()
-            .ok()
-            .filter(|code| (100..1000).contains(code))
-            .and_then(|code| StatusCode::from_u16(code).ok())
-            .ok_or(HttpError::Protocol("invalid status code"))?;
+        // 100 Continue, 102 Processing and 103 Early Hints are interim heads:
+        // they carry no body and do not end the exchange. 101 Switching
+        // Protocols is final (the connection changes protocol underneath).
+        // The cap bounds a peer that would otherwise emit interim heads
+        // forever; the caller's attempt bound is the outer backstop.
+        for _ in 0..16 {
+            let status_line = self.io.read_line(self.io.limits.max_head_bytes).await?;
+            let status_line = std::str::from_utf8(&status_line)
+                .map_err(|_| HttpError::Protocol("status line is not UTF-8"))?;
+            let mut parts = status_line.splitn(3, ' ');
+            let version = match parts.next() {
+                Some("HTTP/1.1") => Version::HTTP_11,
+                Some("HTTP/1.0") => Version::HTTP_10,
+                _ => return Err(HttpError::Protocol("unsupported HTTP version")),
+            };
+            let code = parts
+                .next()
+                .ok_or(HttpError::Protocol("status line has no status code"))?;
+            let status = code
+                .parse::<u16>()
+                .ok()
+                .filter(|code| (100..1000).contains(code))
+                .and_then(|code| StatusCode::from_u16(code).ok())
+                .ok_or(HttpError::Protocol("invalid status code"))?;
 
-        let headers = self.io.read_header_block(status_line.len()).await?;
-        let body = Self::body_kind(&headers, &status, request_method)?;
-        self.io.set_body(body);
-        Ok(IncomingResponse {
-            version,
-            status,
-            headers,
-            body,
-        })
+            let headers = self.io.read_header_block(status_line.len()).await?;
+            if status.is_informational() && status.as_u16() != 101 {
+                continue;
+            }
+            let body = Self::body_kind(&headers, &status, request_method)?;
+            self.io.set_body(body);
+            return Ok(IncomingResponse {
+                version,
+                status,
+                headers,
+                body,
+            });
+        }
+        Err(HttpError::Protocol(
+            "too many informational response heads before a final response",
+        ))
     }
 
     fn body_kind(

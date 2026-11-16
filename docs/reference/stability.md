@@ -43,16 +43,16 @@ sets `None` owns the corresponding liveness/memory risk.
 
 ## 3. Known stable-tier other limits
 
-- **HTTP/1.1 request uploads are serialized.** The request body is written
-  before the response head is read. `request_timeout` bounds the whole attempt,
-  so an origin that answers early and stops reading cannot hold the attempt
-  forever, but this is not full-duplex. A full-duplex H1 path requires a
-  transport split that preserves the socket tap; until that lands, large
-  uploads to untrusted origins should use HTTP/2 or a shorter
-  `request_timeout`.
+- **HTTP/1.1 uploads are concurrent but early responses cancel the upload.**
+  The request writer and response reader share a split transport, so the
+  response head and body are readable while the upload is still in flight. If
+  the origin answers before the upload finishes, the remaining upload is
+  cancelled and the connection is not returned to the pool. A half-written
+  HTTP/1.1 connection is never reused.
 - **HTTP/1.1 `Expect: 100-continue` is caller-controlled.** The client does not
   synthesize the header automatically because it changes the HTTP/1 identity
-  fingerprint. A caller that needs early rejection inserts it explicitly.
+  fingerprint. A caller that needs a pre-body rejection inserts it explicitly;
+  the reader handles informational heads without treating them as final.
 - **WebSocket is never pooled.** An upgraded socket belongs to its `WsStream`;
   reconnection is a session policy, not a transport behavior.
 

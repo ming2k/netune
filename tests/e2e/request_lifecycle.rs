@@ -11,7 +11,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use http::Method;
 use netune::{
-    AttemptError, Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TraceConfig,
+    AttemptError, Client, ClientConfig, Pool, RequestBody, RequestHead, Target, TcpConnector,
+    TraceConfig,
 };
 use netune_trace::{
     ConnectionInfo, EventKind, Fidelity, FrameClass, Reason, RequestTrace, TRACE_SCHEMA_VERSION,
@@ -352,6 +353,133 @@ async fn inv_transport_06_a_get_swallowed_by_a_reused_socket_is_replayed() {
     );
     server.await.expect("join");
     replacement.await.expect("join");
+}
+
+async fn serve_early_413(listener: TcpListener) {
+    let (mut socket, _) = listener.accept().await.expect("accept");
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = socket.read(&mut buffer).await.expect("read head");
+        if read == 0 {
+            return;
+        }
+        request.extend_from_slice(&buffer[..read]);
+    }
+    socket
+        .write_all(
+            b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await
+        .expect("respond");
+    socket.flush().await.expect("flush");
+    // Deliberately never read the request body.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_early_h1_response_does_not_wait_for_the_upload() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(serve_early_413(listener));
+    let client = client();
+    let target = Target::plain(address.to_string());
+
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+    let uploader = tokio::spawn(async move {
+        for _ in 0..1024 {
+            if upload_tx
+                .send(Bytes::from_static(b"upload-chunk"))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let mut response = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.request(
+            &target,
+            RequestHead::new(Method::POST, "/upload"),
+            RequestBody::stream(upload_rx),
+        ),
+    )
+    .await
+    .expect("the response head must not wait for the upload")
+    .expect("413 response");
+    assert_eq!(response.head.status, http::StatusCode::PAYLOAD_TOO_LARGE);
+    response.body.abandon();
+    uploader.abort();
+    let _ = uploader.await;
+    server.await.expect("join");
+}
+
+async fn serve_early_body(listener: TcpListener) {
+    let (mut socket, _) = listener.accept().await.expect("accept");
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = socket.read(&mut buffer).await.expect("read head");
+        if read == 0 {
+            return;
+        }
+        request.extend_from_slice(&buffer[..read]);
+    }
+    socket
+        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nbody")
+        .await
+        .expect("respond");
+    socket.flush().await.expect("flush");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_h1_response_body_is_readable_while_the_upload_is_still_running() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(serve_early_body(listener));
+    let client = client();
+    let target = Target::plain(address.to_string());
+
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel::<Bytes>(1);
+    let uploader = tokio::spawn(async move {
+        loop {
+            if upload_tx
+                .send(Bytes::from_static(b"still-uploading"))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+
+    let mut response = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.request(
+            &target,
+            RequestHead::new(Method::POST, "/upload"),
+            RequestBody::stream(upload_rx),
+        ),
+    )
+    .await
+    .expect("the head must arrive while the upload runs")
+    .expect("response");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), response.body.read_to_end())
+            .await
+            .expect("the body must be readable while the upload runs")
+            .expect("body")
+            .as_ref(),
+        b"body"
+    );
+    uploader.abort();
+    let _ = uploader.await;
+    server.await.expect("join");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -82,6 +82,8 @@ println!("bundle: {}", bundle.directory.display());
 
 The bundle contains `manifest.json`, `trace.json`, `diagnosis.json`, `diagnosis.txt`, and optional `notes.md`. `RedactionPolicy::default()` is production-safe: only `Public` fields and text survive. Use `RedactionPolicy::internal()` for a local investigation where internal fields and messages are wanted; `Secret` text is removed under both policies.
 
+When a request succeeds in returning response headers and then fails or is dropped mid-stream, `response.body.trace()` remains available on every terminal body state (finished, failed, or dropped early; [ADR-0051](../adr/0051-attempt-evidence-is-neutral-socket-level-and-always-reachable.md)).
+
 ## 4. Add a regression test
 
 A bug fix starts with a failing test named for the diagnostic code, for example `diag_egress_tls_failed_keeps_the_retry_verdict`. When the failure is reproducible through `FaultIo`, assert both the error code and the recorded diagnostic. Then link the test from the postmortem action item.

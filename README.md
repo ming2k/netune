@@ -18,7 +18,7 @@ object you can inspect, fingerprint, and change:
 | [`netune-io`] | The byte path both directions share: `TimedIo` records every syscall boundary, `FaultIo` injects chaos. No socket, no policy. |
 | [`netune-diagnostics`] | Native diagnostic sinks and review bundles: stderr/JSONL output, redaction, manifest + trace + diagnosis artifacts. No socket, no orchestrator. |
 | [`netune-egress`] | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the one predicate every outbound transport (TCP, UDP, QUIC) checks before opening a socket. No I/O. |
-| [`netune`] | **Egress**: DNS, TCP, TLS (rustls), connection pool (`Pool`), TLS fingerprint presets and routing (`TlsProfile`, `Preset`), proxies (HTTP CONNECT & SOCKS5), egress confinement, redirects, decompression, client WebSocket upgrade (`connect_ws`), stale-socket absorption. |
+| [`netune`] | **Egress**: DNS, TCP, owned TLS engine, connection pool (`Pool`), TLS fingerprint presets and routing (`TlsProfile`, `Preset`), proxies (HTTP CONNECT & SOCKS5), egress confinement, redirects, decompression, client WebSocket upgrade (`connect_ws`), safe stale-socket recovery. |
 | [`netune-server`] | **Ingress**: an observable listener serving **HTTP/1.1, HTTP/2 and optional HTTP/3** behind one handler — accept loop, admission control that sheds instead of queueing, separate phase bounds, streaming responses, request validation before dispatch, per-connection ingress traces, graceful drain. HTTP/3 is a peer QUIC listener, not a mode of the TCP server. A transport, not a framework. |
 | [`netune-webtransport`] | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, flow-control/close capsules and multi-session routing. Reliable `RESET_STREAM_AT` and browser interop remain outstanding (ADR-0033). |
 | [`netune-probe`] | The L2 probe: `AF_PACKET` capture of one TCP flow, pure Ethernet/IPv4/TCP parse **and build** (forge), plus an opt-in `inject` feature for frame transmission. |
@@ -43,9 +43,10 @@ object you can inspect, fingerprint, and change:
 - Per-request selection: `Target::with_tls_profile` picks the identity at request time; unknown profile names fail loudly.
 - Pool isolation: connection pool keys on `authority#profile`, preventing connection reuse across disparate TLS identities.
 
-**Intervene** — change behaviour at two privilege levels:
+**Intervene & Mock** — change behaviour at two privilege levels or script requests in memory:
 
-- **In-process, zero privileges** (`netune::FaultIo`): script delays, split reads, truncations, and connection resets against any stream to test retry policies and streaming pipelines hermetically.
+- **Request-level mocks, zero sockets** (`netune::mock::Mock`): run the real `Client` pipeline against matchers, one-shot/counting routes, chunked delays, mid-stream I/O faults, and optional fallback to `Wire` ([ADR-0050](docs/adr/0050-request-level-exchange-seam-and-mock-transport.md)).
+- **In-process, zero privileges** (`netune::FaultIo`, `netune::FaultConnector`): script delays, split reads, truncations, and connection resets against any stream or connector to test retry policies and streaming pipelines hermetically.
 - **On the wire, feature-gated** (`netune-probe` with `--features inject`): build arbitrary TCP frames (forged seq/ack, RSTs, window games) with pure, fully tested functions; transmit them only when the feature is compiled in *and* `CAP_NET_RAW` is held. The default build has no transmit path at all.
 
 **Serve** — the other direction of travel (ADR-0011):
@@ -61,12 +62,12 @@ object you can inspect, fingerprint, and change:
   time allowed to produce each. A peer that will not finish its head never reaches
   application code.
 
-**Resilience** — bounded establishment and culled keep-alive absorption:
+**Resilience** — multiplexed pooling, safe replay, and bounded exchanges:
 
-- Every egress connection-establishment phase after DNS/TCP — proxy tunnel, TLS, HTTP/2 preface + SETTINGS, WebSocket upgrade, SOCKS5 UDP associate — has a configurable 10 s default bound. A peer that accepts and then stalls is a retryable `connect` failure naming the phase, never a generation timeout from an outer watchdog (`INV-TRANSPORT-05`, ADR-0040).
-- Shortened idle pool bound (20 s) prevents handing out connections about to be culled by intermediate gateways.
-- Transparent single retry on stale pooled sockets before receiving a response head (`INV-TRANSPORT-01`), eliminating spurious keep-alive failures without request replay hazard.
-- Precise error classification (`HttpError::Incomplete`) distinguishing peer socket closure from protocol smuggling or violations.
+- **One client for HTTP/1.1, HTTP/2, and HTTP/3**: `Target::with_protocol` (`HttpProtocol::{Auto, Http1, Http2, Http3}`) routes through `Client` and `Pool`, with multiplexed `H2ClientSession` and `H3Session` sharing, cold-dial singleflight coalescing, isolated stream cancellation, and streaming request uploads (`RequestBody::Stream`).
+- **Governed pooling**: `PoolConfig` caps idle sockets per authority (`max_idle_per_authority`), across the entire pool (`max_idle_total`), and concurrent in-flight exchanges (`max_in_flight_per_authority`), with a weak-referenced background reaper and synchronous `Pool::reap()`.
+- **Bounded establishment & exchanges**: DNS/TCP, proxy tunnel, TLS, HTTP/2 preface + SETTINGS, WebSocket upgrade and SOCKS5 UDP associate have explicit establishment bounds, and response head (`response_head_timeout`) and body idle silence (`body_idle_timeout`) have explicit configurable bounds. The latter two default to `None`; a production deployment should set them (`INV-TRANSPORT-05`, `INV-TRANSPORT-08`).
+- **Safe replay**: stale pooled sockets are probed before write and re-sent only when the peer refused processing (`RetryableProtocol`) or the request is replay-safe (`Request::is_replay_safe`, `INV-TRANSPORT-06`).
 
 ## The privilege boundary is structural
 

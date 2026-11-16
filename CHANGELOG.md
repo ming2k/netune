@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `netune`: Introduced protocol-neutral `RoundTrip` seam (`Wire` for real connections, `mock::Mock` for request-level scripted tests and `FaultConnector` for connector fault injection), unified `Body` terminal trace recovery (`Body::trace()`), and post-dispatch `NetError::Timeout` bounds (`response_head_timeout`, `body_idle_timeout`, ADR-0050..0052).
+- `netune`: Unified HTTP/1.1, HTTP/2, and HTTP/3 under `HttpProtocol` (`Client`, `Target::with_protocol`, `Wire::with_quic`, `wire::h3`), preserving inherited `EgressConfinement` across QUIC/H3 and streaming request bodies (`RequestBody::Stream`, `RequestBodySource`, `netune_http1::RequestWriter`).
+- `netune-http2`: Added background multiplexed connection driver (`H2ClientSession`, `H2StreamPermit`, `H2RequestSender`, `H2StreamReader`) answering idle `PING`, `SETTINGS`, and `GOAWAY` while isolating early stream drops via `RST_STREAM(CANCEL)`.
+- `netune-http3` & `netune-quic`: Added shareable `H3Session`, typed `H3Error::GoAway`, `H3RequestBody::close_send`, and `QuicConnector::for_profile`.
+- `netune`: Added `PoolConfig::{max_idle_total, max_in_flight_per_authority}`, synchronous `Pool::reap()`, lazy weak-reference background idle reaper, shared multiplexed H2/H3 session pooling, and per-key cold-dial singleflight coalescing (ADR-0053).
+- `netune-tls`: Added dual-tier in-workspace PR + `#[ignore]` soak fuzz targets (`crates/netune-tls/tests/fuzz.rs`) covering record unprotection, ASN.1 SPKI extraction, TLS 1.2/1.3 handshakes, and RFC 8879 `CompressedCertificate` (zlib/brotli).
+
+### Changed
+
+- `netune-trace`: Neutralized trace and transport vocabulary (v3 schema), moved socket-level `TappedSocket` / `Transport::socket_tap` strictly beneath TLS, and refined replay safety (`Request::is_replay_safe`, `NetError::RetryableProtocol`).
+
+### Removed
+
+- **Breaking:** Removed standalone `netune::H2Client` and `Target::with_force_h2` / `Pool::{Http2Idle, put_http2}` in favor of unified `Client` + `HttpProtocol` + multiplexed `H2ClientSession`.
+
+### Fixed
+
+- `netune-http2`: Stream credit received while a writer was waiting for connection credit is no longer discarded, and the server writes response chunks only up to the currently available windows so one blocked stream cannot hold the session's send path. Handler-completion wakes now name their stream, closing a race where `reap` could miss a response.
+- `netune`: Cross-origin redirect sanitization strips credentials from `raw_headers` as well as the normalized map, and a scheme change (`https` -> `http`) is treated as an origin change even when the authority is unchanged.
+- `netune-egress`: `is_public_ip` now rejects IPv4 multicast, 6to4/NAT64/IPv4-compatible forms that embed a non-public address, and additional IPv6 documentation/transition ranges.
+- Tests: removed two timing races in the HTTP/2 large-body and stale-socket replay suites.
+
 ## [0.0.32] - 2026-11-16
 
 ### Fixed

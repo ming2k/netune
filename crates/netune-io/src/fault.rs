@@ -117,7 +117,10 @@ impl FaultScript {
             return Admit::Read(None);
         };
         if offset > self.delivered {
-            return Admit::Read(None);
+            // Stop this read at the fault's offset. An uncapped read could
+            // deliver past it, and the fault would then fire late, or never
+            // if the stream had nothing more to give.
+            return Admit::Read(Some(offset - self.delivered));
         }
         match fault {
             Fault::Delay(duration) => {
@@ -180,6 +183,13 @@ impl<I> FaultIo<I> {
     /// Recover the wrapped stream.
     pub fn into_inner(self) -> I {
         self.inner
+    }
+
+    /// Reach the wrapped stream's non-byte controls (an observation tap, a
+    /// socket option). Reading or writing through this reference bypasses the
+    /// script.
+    pub fn get_mut(&mut self) -> &mut I {
+        &mut self.inner
     }
 
     fn record_delivery(&self, bytes: usize) {

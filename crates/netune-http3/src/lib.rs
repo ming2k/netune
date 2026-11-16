@@ -18,7 +18,8 @@ pub mod qpack;
 pub mod server;
 
 pub use client::{
-    H3Client, H3ClientConfig, H3RequestBody, H3Response, H3ResponseStream, H3TraceContext,
+    H3Client, H3ClientConfig, H3RequestBody, H3Response, H3ResponseStream, H3Session,
+    H3TraceContext,
 };
 pub use connection::H3ExtensionStream;
 pub use error::{H3AttemptError, H3Error};

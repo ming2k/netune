@@ -115,8 +115,8 @@ impl Connection {
     /// Open a request stream and wrap it in the H3 stream state machine.
     pub async fn open_bi(&self) -> Result<H3Stream, H3Error> {
         self.shared.check_error()?;
-        if self.shared.goaway().is_some() {
-            return Err(H3Error::H3("connection received GOAWAY".to_string()));
+        if let Some(id) = self.shared.goaway() {
+            return Err(H3Error::GoAway { id });
         }
         let (send, recv) = self
             .shared

@@ -188,7 +188,7 @@ fn phase_of(kind: EventKind) -> Option<DiagnosticPhase> {
         | EventKind::Write
         | EventKind::Segment
         | EventKind::ProtocolFrame
-        | EventKind::OutputToken
+        | EventKind::Payload
         | EventKind::Validated
         | EventKind::TcpInfo
         | EventKind::Redirect

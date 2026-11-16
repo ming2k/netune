@@ -459,16 +459,38 @@ async fn a_request_body_larger_than_the_stream_window_is_accepted() {
     let address = spawn_server(Arc::new(Echo), ServerSessionConfig::for_tests()).await;
     let mut client = connect(address).await;
     let payload = vec![b'q'; 256 * 1024];
-    let response = tokio::time::timeout(
+    let stream_id = tokio::time::timeout(
         Duration::from_secs(10),
-        client.request("POST", "probe.test", "http", "/upload", &[], Some(&payload)),
+        client.start_request("POST", "probe.test", "http", "/upload", &[], Some(&payload)),
     )
     .await
-    .expect("a request body past the window must not hang")
-    .expect("response");
-    assert_eq!(response.status, 200);
+    .expect("request body must not hang")
+    .expect("request body");
+    let head = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.read_response_head(stream_id),
+    )
+    .await
+    .expect("response head must not hang")
+    .expect("response head");
+    assert_eq!(head.status, 200);
+    let mut body = client.into_response_stream(stream_id, &head);
+    let mut received = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), body.next_event())
+            .await
+            .expect("response body must not hang")
+            .expect("response body event");
+        match event {
+            netune_http2::H2ResponseEvent::Data { payload, .. } => {
+                received.extend_from_slice(&payload);
+            }
+            netune_http2::H2ResponseEvent::Trailers(_) => {}
+            netune_http2::H2ResponseEvent::End => break,
+        }
+    }
     assert_eq!(
-        response.body.len(),
+        received.len(),
         "POST /upload ".len() + payload.len(),
         "the whole body arrived"
     );

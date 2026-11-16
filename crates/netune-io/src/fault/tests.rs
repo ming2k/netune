@@ -64,8 +64,8 @@ fn truncate_reports_eof_at_its_offset() {
     let now = Instant::now();
     assert_eq!(
         script.admit(now),
-        Admit::Read(None),
-        "before the offset, clean"
+        Admit::Read(Some(8)),
+        "before the offset, a read stops at the offset"
     );
     script.delivered(8);
     assert_eq!(script.admit(now), Admit::Eof);
@@ -76,9 +76,22 @@ fn reset_reports_a_connection_error_at_its_offset() {
     let mut script = FaultScript::new(vec![(16, Fault::Reset)]);
     let now = Instant::now();
     script.delivered(15);
-    assert_eq!(script.admit(now), Admit::Read(None));
+    assert_eq!(script.admit(now), Admit::Read(Some(1)));
     script.delivered(1);
     assert!(matches!(script.admit(now), Admit::Reset));
+}
+
+#[test]
+fn a_read_never_runs_past_the_next_fault() {
+    // The whole payload is available at once. Without a cap the first read
+    // would deliver all of it and the reset at byte 16 would never be seen.
+    let mut script = FaultScript::new(vec![(16, Fault::Reset)]);
+    let now = Instant::now();
+    assert_eq!(script.admit(now), Admit::Read(Some(16)));
+    script.delivered(16);
+    assert!(matches!(script.admit(now), Admit::Reset));
+    // With every fault spent, reads are uncapped.
+    assert_eq!(script.admit(now), Admit::Read(None));
 }
 
 #[test]
@@ -94,16 +107,17 @@ fn faults_fire_in_offset_order() {
         (12, Fault::Reset),
     ]);
     let now = Instant::now();
-    // Before the split's offset, reads are uncapped…
-    assert_eq!(script.admit(now), Admit::Read(None));
+    // Before the split's offset, a read stops at that offset…
+    assert_eq!(script.admit(now), Admit::Read(Some(4)));
     script.delivered(4);
     // …then the split caps reads for its 4-byte span…
     assert_eq!(script.admit(now), Admit::Read(Some(2)));
     script.delivered(2);
     assert_eq!(script.admit(now), Admit::Read(Some(2)));
     script.delivered(2);
-    // (delivered = 8, past the span) …and then reads are uncapped again.
-    assert_eq!(script.admit(now), Admit::Read(None));
+    // (delivered = 8, past the span) …and then a read stops at the reset's
+    // offset.
+    assert_eq!(script.admit(now), Admit::Read(Some(4)));
     script.delivered(4);
     // …until the reset at offset 12.
     assert!(matches!(script.admit(now), Admit::Reset));

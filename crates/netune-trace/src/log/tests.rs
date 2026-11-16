@@ -27,7 +27,7 @@ fn deltas_round_trip_including_long_gaps() {
     // 9.5 s of silence: exceeds one u32 nanosecond field (4.29 s).
     log.push_at(9_500_000_000, EventKind::Read, 100, 0);
     // 200 s: needs two high words.
-    log.push_at(209_500_000_000, EventKind::OutputToken, 4, 0);
+    log.push_at(209_500_000_000, EventKind::Payload, 4, 0);
 
     let got = kinds(&log);
     assert_eq!(
@@ -36,7 +36,7 @@ fn deltas_round_trip_including_long_gaps() {
             (0, EventKind::Dispatch),
             (1_500, EventKind::Read),
             (9_500_000_000, EventKind::Read),
-            (209_500_000_000, EventKind::OutputToken),
+            (209_500_000_000, EventKind::Payload),
         ]
     );
     assert_eq!(log.last_ns(), 209_500_000_000);
@@ -165,9 +165,9 @@ fn first_and_last_of_a_kind_are_order_correct() {
     let mut log = EventLog::with_capacity(16);
     log.push_at(0, EventKind::Dispatch, 0, 0);
     log.push_at(100, EventKind::ProtocolFrame, 1, 0);
-    log.push_at(200, EventKind::OutputToken, 2, 0);
+    log.push_at(200, EventKind::Payload, 2, 0);
     log.push_at(300, EventKind::ProtocolFrame, 3, 0);
-    log.push_at(400, EventKind::OutputToken, 5, 0);
+    log.push_at(400, EventKind::Payload, 5, 0);
     assert_eq!(
         log.first_of(EventKind::ProtocolFrame).map(|e| e.at_ns),
         Some(100)
@@ -176,5 +176,5 @@ fn first_and_last_of_a_kind_are_order_correct() {
         log.last_of(EventKind::ProtocolFrame).map(|e| e.at_ns),
         Some(300)
     );
-    assert_eq!(log.last_of(EventKind::OutputToken).map(|e| e.a), Some(5));
+    assert_eq!(log.last_of(EventKind::Payload).map(|e| e.a), Some(5));
 }

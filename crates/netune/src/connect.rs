@@ -7,10 +7,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use netune_io::{FaultIo, TimedIo};
 use netune_trace::{
     ConnectionIdentity, DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EvasionPolicy,
-    EventKind, TraceCollector,
+    EventKind, Ring, SocketTap, TraceCollector,
 };
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::dns::{DnsResolver, SystemResolver};
 use crate::error::{ConnectError, ConnectErrorKind, NetError, ResolveError};
@@ -23,13 +28,199 @@ use crate::socket::SocketConfig;
 /// than any legitimate streaming watchdog above the transport.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A stream the HTTP codec can drive: anything readable, writable and boxable.
-pub trait Transport: AsyncReadWrite + Send + Unpin {}
-impl<T: AsyncReadWrite + Send + Unpin> Transport for T {}
+/// A byte stream a codec can drive, plus the one non-byte control an attempt
+/// needs: the observation tap on the socket underneath it.
+///
+/// A connection outlives the attempt that opened it, and layers (TLS, a proxy
+/// tunnel, wire shaping) are stacked on the socket before any request is
+/// written. The tap therefore cannot be a wrapper the client adds on top:
+/// that position sees decrypted records, not socket reads. Instead every
+/// layer forwards [`Transport::socket_tap`] down to the socket wrapper that owns
+/// the [`SocketTap`] by value, so the events an attempt records are the
+/// socket's, whatever was stacked above it ([`INV-TRACE-10`]).
+pub trait Transport: AsyncRead + AsyncWrite + Send + Unpin {
+    /// The tap on the socket under this stream, for the caller to replace at
+    /// an attempt boundary.
+    ///
+    /// `None` means this stream has no socket position to observe (an
+    /// in-memory pipe, a caller-supplied stream). The caller must then report
+    /// the attempt at the fidelity it actually had instead of claiming a byte
+    /// timeline.
+    fn socket_tap(&mut self) -> Option<&mut SocketTap> {
+        None
+    }
 
-/// Blanket supertrait so `Box<dyn Transport>` satisfies the codec's bounds.
-pub trait AsyncReadWrite: tokio::io::AsyncRead + tokio::io::AsyncWrite {}
-impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite> AsyncReadWrite for T {}
+    /// Install `tap` for the next attempt and return what the previous one
+    /// recorded, or `None` when there is no socket to tap.
+    fn swap_tap(&mut self, tap: SocketTap) -> Option<SocketTap> {
+        self.socket_tap()
+            .map(|installed| std::mem::replace(installed, tap))
+    }
+}
+
+impl<T: Transport + ?Sized> Transport for Box<T> {
+    fn socket_tap(&mut self) -> Option<&mut SocketTap> {
+        (**self).socket_tap()
+    }
+}
+
+/// The socket position: the stream that owns the tap.
+///
+/// The tap a dial installs belongs to the attempt that dialled. If the
+/// connection is lost before that attempt ever holds it — a TLS handshake that
+/// fails, a proxy that refuses — nothing above can hand the tap back, so the
+/// socket returns it itself on drop: the bytes of a failed handshake are
+/// exactly the evidence a failure trace needs. Once a caller has swapped the
+/// tap, the caller owns every later hand-back.
+#[derive(Debug)]
+pub struct TappedSocket<I> {
+    io: TimedIo<I, SocketTap>,
+    /// Where the dial tap's log goes if nobody collects it.
+    home: Option<TraceCollector>,
+}
+
+impl<I> TappedSocket<I> {
+    /// Wrap `socket`, tapped for the attempt `recorder` belongs to.
+    pub fn dial(socket: I, recorder: &TraceCollector) -> Self {
+        let tap = dial_tap(recorder);
+        let home = matches!(tap, SocketTap::Ring(_)).then(|| recorder.clone());
+        Self {
+            io: TimedIo::new(socket, tap),
+            home,
+        }
+    }
+}
+
+impl<I: AsyncRead + AsyncWrite + Send + Unpin> Transport for TappedSocket<I> {
+    fn socket_tap(&mut self) -> Option<&mut SocketTap> {
+        // Whoever reaches for the tap takes over handing it back.
+        self.home = None;
+        Some(self.io.tap_mut())
+    }
+}
+
+impl<I> Drop for TappedSocket<I> {
+    fn drop(&mut self) {
+        if let Some(home) = self.home.take()
+            && let SocketTap::Ring(ring) = std::mem::take(self.io.tap_mut())
+        {
+            home.merge(netune_trace::Tap::finish(ring));
+        }
+    }
+}
+
+impl<I: AsyncRead + Unpin> AsyncRead for TappedSocket<I> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_read(cx, buf)
+    }
+}
+
+impl<I: AsyncWrite + Unpin> AsyncWrite for TappedSocket<I> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
+    }
+}
+
+impl<S: Transport> Transport for netune_tls::OwnedTlsStream<S> {
+    fn socket_tap(&mut self) -> Option<&mut SocketTap> {
+        self.transport_mut().socket_tap()
+    }
+}
+
+impl<I: Transport> Transport for FaultIo<I> {
+    fn socket_tap(&mut self) -> Option<&mut SocketTap> {
+        self.get_mut().socket_tap()
+    }
+}
+
+impl Transport for tokio::io::DuplexStream {}
+
+/// Adapts any byte stream into a [`Transport`] that has no socket tap.
+///
+/// A custom [`Connector`] that produces something other than this crate's own
+/// streams wraps it in `Untapped`. Attempts over it are reported at protocol
+/// fidelity: the trace never claims socket events nothing recorded.
+#[derive(Debug)]
+pub struct Untapped<T>(pub T);
+
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> Transport for Untapped<T> {}
+
+impl<T: AsyncRead + Unpin> AsyncRead for Untapped<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for Untapped<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_shutdown(cx)
+    }
+}
+
+/// The tap a freshly dialled socket starts with.
+///
+/// A traced attempt gets its ring at the socket's first byte, so the
+/// handshakes layered on top (proxy, TLS) are part of the timeline. Any other
+/// attempt starts untapped; the exchange installs counters when it asked for
+/// them.
+pub(crate) fn dial_tap(recorder: &TraceCollector) -> SocketTap {
+    if recorder.is_enabled() {
+        SocketTap::Ring(Ring::new_with_meta(
+            recorder.origin(),
+            recorder.capacity(),
+            recorder.meta(),
+            recorder.sink(),
+        ))
+    } else {
+        SocketTap::Off
+    }
+}
+
+/// Which HTTP protocol family an egress [`Target`] asks to speak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HttpProtocol {
+    /// HTTP/1.1, or HTTP/2 when `ClientConfig::enable_http2` is set and ALPN negotiates `h2`.
+    #[default]
+    Auto,
+    /// HTTP/1.1 only.
+    Http1,
+    /// HTTP/2 by prior knowledge (or over TLS).
+    Http2,
+    /// HTTP/3 over QUIC (`--features http3`).
+    Http3,
+}
 
 /// How to reach a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,12 +231,12 @@ pub struct Target {
     /// sees or which pooled socket may serve this target. The pool keys on the
     /// whole value ([`crate::pool::PoolKey`]).
     pub identity: ConnectionIdentity,
-    /// Mandate HTTP/2 framing (bypasses HTTP/1.1 negotiation).
+    /// Protocol policy for this request.
     ///
-    /// This is a request protocol decision, not a connection identity: a pooled
-    /// HTTP/2 connection is selected by protocol, and a pooled HTTP/1.1 socket
-    /// is never handed to a request that mandates HTTP/2.
-    pub force_h2: bool,
+    /// Never a connection identity by itself when `Auto` vs `Http2` vs `Http1`
+    /// selects from the pool; an HTTP/3 target routes over QUIC and carries its
+    /// resolved QUIC and H3 SETTINGS profiles in `identity`.
+    pub protocol: HttpProtocol,
     /// The HTTP/1 request-header wire profile, when this request speaks H1.
     ///
     /// Per request and deliberately outside `ConnectionIdentity`: header order
@@ -58,6 +249,11 @@ pub struct Target {
     /// one HEADERS block, not the connection. `None` uses the selected H2
     /// fingerprint's request half.
     pub h2_request_profile: Option<ProfileId>,
+    /// The HTTP/3 request-header profile, when this request speaks H3.
+    ///
+    /// Per request and outside `ConnectionIdentity`: QPACK field order changes
+    /// one HEADERS frame, not the QUIC connection or SETTINGS.
+    pub h3_request_profile: Option<ProfileId>,
 }
 
 impl Target {
@@ -66,9 +262,10 @@ impl Target {
         Self {
             authority: authority.into(),
             identity: ConnectionIdentity::default(),
-            force_h2: false,
+            protocol: HttpProtocol::Auto,
             h1_profile: None,
             h2_request_profile: None,
+            h3_request_profile: None,
         }
     }
 
@@ -81,9 +278,10 @@ impl Target {
                 tls_server_name: Some(server_name.into()),
                 ..ConnectionIdentity::default()
             },
-            force_h2: false,
+            protocol: HttpProtocol::Auto,
             h1_profile: None,
             h2_request_profile: None,
+            h3_request_profile: None,
         }
     }
 
@@ -129,9 +327,9 @@ impl Target {
         self
     }
 
-    /// Mandate HTTP/2 protocol wire framing.
-    pub fn with_force_h2(mut self, enabled: bool) -> Self {
-        self.force_h2 = enabled;
+    /// Select the HTTP protocol policy for this request.
+    pub fn with_protocol(mut self, protocol: HttpProtocol) -> Self {
+        self.protocol = protocol;
         self
     }
 
@@ -159,6 +357,24 @@ impl Target {
     /// change connection identity or the pool key.
     pub fn with_h2_request_profile(mut self, profile: impl Into<ProfileId>) -> Self {
         self.h2_request_profile = Some(profile.into());
+        self
+    }
+
+    /// Select a named QUIC profile for HTTP/3 requests (`[INV-CUSTOM-14..17]`).
+    pub fn with_quic_profile(mut self, profile: impl Into<String>) -> Self {
+        self.identity.h3_profile = Some(profile.into());
+        self
+    }
+
+    /// Select a named HTTP/3 SETTINGS profile (part of connection identity).
+    pub fn with_h3_settings_profile(mut self, profile: impl Into<String>) -> Self {
+        self.identity.h3_settings_profile = Some(profile.into());
+        self
+    }
+
+    /// Select a named HTTP/3 request-header profile (per request, outside pool key).
+    pub fn with_h3_request_profile(mut self, profile: impl Into<ProfileId>) -> Self {
+        self.h3_request_profile = Some(profile.into());
         self
     }
 
@@ -298,6 +514,11 @@ pub trait Connector: Send + Sync {
     /// through two proxies is not the same socket identity. Credentials are not
     /// included.
     fn route_shape(&self) -> Option<String> {
+        None
+    }
+
+    /// Egress confinement policy enforced by this connector, if known.
+    fn egress_confinement(&self) -> Option<EgressConfinement> {
         None
     }
 }
@@ -619,6 +840,10 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
         Some(self.socket_config.canonical())
     }
 
+    fn egress_confinement(&self) -> Option<EgressConfinement> {
+        Some(self.confinement)
+    }
+
     async fn connect(
         &self,
         target: &Target,
@@ -736,6 +961,10 @@ impl<R: DnsResolver> Connector for TcpConnector<R> {
         // stream, the sampler owns this one, and neither blocks the other.
         let socket = crate::tcp_info::duplicate(&stream);
 
+        // The tap wraps the socket itself, beneath wire shaping and any TLS or
+        // proxy layer a wrapping connector adds, so what it records is what
+        // crossed the socket.
+        let stream = TappedSocket::dial(stream, recorder);
         let stream_transport: Box<dyn Transport> = match target.evasion() {
             EvasionPolicy::None => Box::new(stream),
             EvasionPolicy::SniSplit {

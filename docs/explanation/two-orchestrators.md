@@ -16,7 +16,7 @@ pure function of a recorded trace** (`INV-TRACE-01`). Not a `tracing` span aroun
 Not an elapsed clock. A recorded event, and a derivation from it.
 
 On the egress side, that contract is already load-bearing. It is why the harness can say
-`server_ttft_us` was 180 ms rather than "the request felt slow", and why it refuses to
+`frame_to_payload_us` was 180 ms rather than "the request felt slow", and why it refuses to
 report the number at all when the head and the first body byte arrived in one flush
 (`Reason::TransportBatched`). Honest absence over flattering numbers.
 

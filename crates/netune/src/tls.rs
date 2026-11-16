@@ -238,6 +238,10 @@ impl<C: Connector> Connector for TlsRouterConnector<C> {
         self.inner.route_shape()
     }
 
+    fn egress_confinement(&self) -> Option<crate::connect::EgressConfinement> {
+        self.inner.egress_confinement()
+    }
+
     async fn connect(
         &self,
         target: &Target,

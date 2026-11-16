@@ -157,7 +157,7 @@ fn derive_one(exchange: H3Exchange) -> DerivedH3 {
 mod tests {
     use super::*;
     use crate::log::EventLog;
-    use crate::trace::{AttemptRef, ConnectionInfo, EndpointRef, Fidelity, TraceId};
+    use crate::trace::{ConnectionInfo, Fidelity, TraceId};
 
     fn trace(log: EventLog) -> RequestTrace {
         RequestTrace {
@@ -165,16 +165,7 @@ mod tests {
                 TraceId::new("test"),
                 crate::trace::Direction::Egress,
             ),
-            attempt: AttemptRef {
-                round: 1,
-                turn: 1,
-                attempt: 1,
-            },
-            endpoint: EndpointRef {
-                provider: "test".into(),
-                model: "test".into(),
-                authority: "example.invalid:443".into(),
-            },
+            authority: "example.invalid:443".into(),
             connection: ConnectionInfo::default(),
             identity: crate::ConnectionIdentity::default(),
             schema_version: crate::TRACE_SCHEMA_VERSION,

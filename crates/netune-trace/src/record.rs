@@ -376,13 +376,14 @@ impl Recorder {
         self.push(self.now_ns(), EventKind::Write, bytes, 0);
     }
 
-    /// Record one origin protocol frame of `class` carrying `tokens` output
-    /// tokens (0 for a preamble, usage or keep-alive frame).
-    pub fn frame(&mut self, class: FrameClass, tokens: u32) {
+    /// Record one application frame of `class` carrying `units` of payload,
+    /// in the caller's own unit (0 for a preamble, metadata or keep-alive
+    /// frame).
+    pub fn frame(&mut self, class: FrameClass, units: u32) {
         let now = self.now_ns();
         self.push(now, EventKind::ProtocolFrame, u32::from(class.code()), 0);
-        if tokens > 0 {
-            self.push(now, EventKind::OutputToken, tokens, 0);
+        if units > 0 {
+            self.push(now, EventKind::Payload, units, 0);
         }
     }
 
@@ -684,11 +685,11 @@ impl TraceCollector {
             .mark_stream(stream, kind, a, b);
     }
 
-    pub fn frame(&self, class: FrameClass, tokens: u32) {
+    pub fn frame(&self, class: FrameClass, units: u32) {
         self.inner
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .frame(class, tokens);
+            .frame(class, units);
     }
 
     pub fn reused_connection(&self) {
@@ -803,14 +804,14 @@ mod tests {
     fn frame_records_output_tokens_only_when_present() {
         let mut recorder = Recorder::start(16);
         recorder.frame(FrameClass::Open, 0);
-        recorder.frame(FrameClass::Usage, 0);
-        recorder.frame(FrameClass::Reasoning, 7);
+        recorder.frame(FrameClass::Metadata, 0);
+        recorder.frame(FrameClass::Binary, 7);
         let log = recorder.into_log();
         let frames = log
             .iter()
             .filter(|e| e.kind == EventKind::ProtocolFrame)
             .count();
-        let tokens: u32 = log.iter().filter_map(|e| e.tokens()).sum();
+        let tokens: u32 = log.iter().filter_map(|e| e.units()).sum();
         assert_eq!(frames, 3);
         assert_eq!(tokens, 7);
     }

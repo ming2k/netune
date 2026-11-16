@@ -40,7 +40,7 @@ fn spawn(
     (address, shutdown, handle)
 }
 
-fn client() -> Client<TcpConnector> {
+fn client() -> Client {
     Client::new(
         TcpConnector::new(),
         Pool::default(),
@@ -242,16 +242,7 @@ async fn an_ingress_trace_from_a_real_exchange_derives_every_phase() {
             netune_trace::TraceId::new("ingress"),
             netune_trace::Direction::Ingress,
         ),
-        attempt: netune_trace::AttemptRef {
-            round: 0,
-            turn: 0,
-            attempt: 0,
-        },
-        endpoint: netune_trace::EndpointRef {
-            provider: String::new(),
-            model: String::new(),
-            authority: address.to_string(),
-        },
+        authority: address.to_string(),
         connection: netune_trace::ConnectionInfo::default(),
         identity: netune_trace::ConnectionIdentity::default(),
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,

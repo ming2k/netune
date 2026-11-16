@@ -4,12 +4,14 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use netune_trace::{
-    AttemptRef, ConnectionIdentity, ConnectionInfo, EndpointRef, EventKind, Fidelity, RequestTrace,
-    TRACE_SCHEMA_VERSION, TraceCollector,
+    ConnectionIdentity, ConnectionInfo, EventKind, Fidelity, RequestTrace, TRACE_SCHEMA_VERSION,
+    TraceCollector,
 };
 
 use crate::connection::{Connection, H3Stream, Role};
@@ -83,6 +85,7 @@ pub struct H3RequestBody {
     context: Option<H3TraceContext>,
     config: H3ClientConfig,
     exchange: u32,
+    permit: Option<H3StreamPermit>,
 }
 
 impl std::fmt::Debug for H3RequestBody {
@@ -137,25 +140,25 @@ impl H3RequestBody {
             self.context,
             self.config,
             self.exchange,
+            self.permit,
+        )
+        .await
+    }
+
+    /// Close only the request send side without yet awaiting response headers.
+    pub async fn close_send(&mut self) -> Result<(), H3Error> {
+        deadline(
+            "request finish",
+            self.config.request_timeout,
+            self.stream.finish_send(),
         )
         .await
     }
 
     /// Finish the request without trailers and wait for the response head.
-    pub async fn finish(self) -> Result<H3ResponseStream, H3Error> {
-        let mut stream = self.stream;
-        deadline("request finish", self.config.request_timeout, async {
-            stream.finish_send().await
-        })
-        .await?;
-        await_response(
-            stream,
-            self.recorder,
-            self.context,
-            self.config,
-            self.exchange,
-        )
-        .await
+    pub async fn finish(mut self) -> Result<H3ResponseStream, H3Error> {
+        self.close_send().await?;
+        self.into_duplex().await
     }
 
     /// Send request trailers, which also finish the request, then wait for the
@@ -178,6 +181,7 @@ impl H3RequestBody {
             self.context,
             self.config,
             self.exchange,
+            self.permit,
         )
         .await
     }
@@ -193,6 +197,7 @@ pub struct H3ResponseStream {
     exchange: u32,
     received: usize,
     finished: bool,
+    permit: Option<H3StreamPermit>,
 }
 
 impl std::fmt::Debug for H3ResponseStream {
@@ -283,6 +288,7 @@ impl H3ResponseStream {
                     rec.mark_stream(self.exchange, EventKind::H3Finished, bytes, 0);
                 }
                 self.finished = true;
+                self.permit.take();
                 Ok(None)
             }
         }
@@ -317,16 +323,7 @@ impl H3ResponseStream {
         let snapshot = recorder.snapshot(Fidelity::l0());
         Some(RequestTrace {
             meta: snapshot.meta,
-            attempt: AttemptRef {
-                round: 0,
-                turn: 0,
-                attempt: 0,
-            },
-            endpoint: EndpointRef {
-                provider: String::new(),
-                model: String::new(),
-                authority: context.authority.clone(),
-            },
+            authority: context.authority.clone(),
             connection: ConnectionInfo::default(),
             identity: context.identity.clone(),
             schema_version: TRACE_SCHEMA_VERSION,
@@ -337,21 +334,247 @@ impl H3ResponseStream {
     }
 }
 
+struct H3StreamPermit {
+    inner: Arc<H3SessionInner>,
+}
+
+impl Drop for H3StreamPermit {
+    fn drop(&mut self) {
+        if self.inner.active_streams.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let ms = u64::try_from(self.inner.created.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.inner.idle_since_ms.store(ms, Ordering::Release);
+        }
+    }
+}
+
+struct H3SessionInner {
+    connection: Connection,
+    /// Keeps the QUIC endpoint + UDP socket alive as long as the session lives.
+    quic: Option<netune_quic::QuicConnection>,
+    settings_profile: H3SettingsProfile,
+    active_streams: AtomicUsize,
+    next_exchange: AtomicU32,
+    created: Instant,
+    idle_since_ms: AtomicU64,
+}
+
+/// Shareable, cloneable handle onto a multiplexed HTTP/3 client session.
+#[derive(Clone)]
+pub struct H3Session {
+    inner: Arc<H3SessionInner>,
+}
+
+impl std::fmt::Debug for H3Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("H3Session")
+            .field("active_streams", &self.active_streams())
+            .field("usable", &self.is_usable())
+            .finish_non_exhaustive()
+    }
+}
+
+impl H3Session {
+    /// Start an HTTP/3 session over an established QUIC connection.
+    pub async fn new_with_settings(
+        connection: &netune_quic::owned::Connection,
+        settings: H3SettingsProfile,
+    ) -> Result<Self, H3Error> {
+        settings
+            .validate()
+            .map_err(|reason| H3Error::Profile(reason.to_string()))?;
+        let connection = Connection::start(connection.clone(), &settings, Role::Client).await?;
+        Ok(Self::from_parts(connection, None, settings))
+    }
+
+    /// Start an HTTP/3 session taking ownership of `quic` and keeping its
+    /// endpoint alive while any session handle or stream exists.
+    pub async fn from_quic(
+        quic: netune_quic::QuicConnection,
+        settings: H3SettingsProfile,
+    ) -> Result<Self, H3Error> {
+        settings
+            .validate()
+            .map_err(|reason| H3Error::Profile(reason.to_string()))?;
+        let connection =
+            Connection::start(quic.connection().clone(), &settings, Role::Client).await?;
+        Ok(Self::from_parts(connection, Some(quic), settings))
+    }
+
+    fn from_parts(
+        connection: Connection,
+        quic: Option<netune_quic::QuicConnection>,
+        settings_profile: H3SettingsProfile,
+    ) -> Self {
+        Self {
+            inner: Arc::new(H3SessionInner {
+                connection,
+                quic,
+                settings_profile,
+                active_streams: AtomicUsize::new(0),
+                next_exchange: AtomicU32::new(1),
+                created: Instant::now(),
+                idle_since_ms: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// Whether the session can open another request stream (alive, open QUIC
+    /// connection, and no peer `GOAWAY`).
+    pub fn is_usable(&self) -> bool {
+        let shared = self.inner.connection.shared();
+        shared.check_error().is_ok() && shared.goaway().is_none() && !shared.connection.is_closed()
+    }
+
+    /// Number of currently open request/response streams on this connection.
+    pub fn active_streams(&self) -> usize {
+        self.inner.active_streams.load(Ordering::Acquire)
+    }
+
+    /// Elapsed duration since this session last had zero active streams (`None`
+    /// while streams remain active).
+    pub fn idle_duration(&self) -> Option<Duration> {
+        if self.active_streams() > 0 {
+            return None;
+        }
+        let since_ms = self.inner.idle_since_ms.load(Ordering::Acquire);
+        let now_ms = u64::try_from(self.inner.created.elapsed().as_millis()).unwrap_or(u64::MAX);
+        Some(Duration::from_millis(now_ms.saturating_sub(since_ms)))
+    }
+
+    /// Local UDP port backing the QUIC endpoint, when this session owns it.
+    pub fn local_port(&self) -> Option<u16> {
+        self.inner
+            .quic
+            .as_ref()
+            .map(|quic| quic.endpoint().local_addr().port())
+    }
+
+    /// The underlying owned QUIC connection, when this session owns one.
+    pub fn quic_connection(&self) -> Option<&netune_quic::owned::Connection> {
+        self.inner
+            .quic
+            .as_ref()
+            .map(netune_quic::QuicConnection::connection)
+    }
+
+    /// The HTTP/3 SETTINGS profile in force for this connection.
+    pub fn settings_profile(&self) -> &H3SettingsProfile {
+        &self.inner.settings_profile
+    }
+
+    /// Wait until the peer SETTINGS frame has been observed.
+    pub async fn wait_settings(&self) {
+        self.inner.connection.shared().wait_settings().await;
+    }
+
+    /// Look up a peer SETTINGS identifier, including extension settings.
+    pub fn peer_setting(&self, id: u64) -> Option<u64> {
+        self.inner.connection.shared().peer_extra_setting(id)
+    }
+
+    /// Install a protocol-neutral stream extension router.
+    pub fn enable_stream_extension(
+        &self,
+        uni_types: Vec<u64>,
+        bidi_signal: u64,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::H3ExtensionStream> {
+        self.inner
+            .connection
+            .shared()
+            .enable_extension(uni_types, bidi_signal)
+    }
+
+    /// Install an extension router with a protocol-supplied identifier
+    /// validator.
+    pub fn enable_stream_extension_with_validator(
+        &self,
+        uni_types: Vec<u64>,
+        bidi_signal: u64,
+        validator: impl Fn(u64) -> bool + Send + Sync + 'static,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::H3ExtensionStream> {
+        self.inner
+            .connection
+            .shared()
+            .enable_extension_with_validator(uni_types, bidi_signal, validator)
+    }
+
+    /// Open a request stream on this shared session using caller-supplied
+    /// per-request headers policy, bounds, and trace recorder.
+    pub async fn open_request(
+        &self,
+        request: http::Request<()>,
+        request_profile: &H3RequestProfile,
+        config: &H3ClientConfig,
+        recorder: Option<TraceCollector>,
+        context: Option<H3TraceContext>,
+    ) -> Result<H3RequestBody, H3Error> {
+        self.inner.active_streams.fetch_add(1, Ordering::AcqRel);
+        let permit = H3StreamPermit {
+            inner: Arc::clone(&self.inner),
+        };
+        let exchange = self.inner.next_exchange.fetch_add(1, Ordering::AcqRel);
+
+        if let Some(rec) = &recorder {
+            rec.mark_stream(exchange, EventKind::H3StreamStart, 0, 0);
+        }
+
+        if request
+            .extensions()
+            .get::<crate::proto::ExtendedConnectProtocol>()
+            .is_some()
+            && !self
+                .inner
+                .connection
+                .shared()
+                .peer_extended_connect_enabled()
+        {
+            self.inner.connection.shared().wait_settings().await;
+            if !self
+                .inner
+                .connection
+                .shared()
+                .peer_extended_connect_enabled()
+            {
+                return Err(H3Error::H3(
+                    "extended CONNECT was not negotiated".to_string(),
+                ));
+            }
+        }
+
+        let fields = encode_request(&request, &request_profile.order)?;
+        let mut stream = deadline(
+            "request head",
+            config.request_timeout,
+            self.inner.connection.open_bi(),
+        )
+        .await?;
+        deadline(
+            "request head",
+            config.request_timeout,
+            stream.send_head(&fields),
+        )
+        .await?;
+
+        Ok(H3RequestBody {
+            stream,
+            recorder,
+            context,
+            config: config.clone(),
+            exchange,
+            permit: Some(permit),
+        })
+    }
+}
+
 /// An active HTTP/3 client session driving a QUIC connection.
 pub struct H3Client {
-    connection: Connection,
+    session: H3Session,
     recorder: Option<TraceCollector>,
-    /// The QUIC connection that owns the endpoint. Present when the client was
-    /// built through [`H3Client::connect`]; dropping it would tear down the
-    /// transport under the H3 session.
-    quic: Option<netune_quic::QuicConnection>,
     /// The resolved QUIC profile that shapes this H3 connection.
     quic_profile: Option<&'static str>,
     trace_context: Option<H3TraceContext>,
-    settings_profile: H3SettingsProfile,
     request_profile: H3RequestProfile,
     config: H3ClientConfig,
-    next_exchange: u32,
 }
 
 impl std::fmt::Debug for H3Client {
@@ -359,7 +582,7 @@ impl std::fmt::Debug for H3Client {
         f.debug_struct("H3Client")
             .field("quic_profile", &self.quic_profile)
             .field("trace_context", &self.trace_context)
-            .field("settings_profile", &self.settings_profile)
+            .field("settings_profile", self.session.settings_profile())
             .field("request_profile", &self.request_profile)
             .field("config", &self.config)
             .finish_non_exhaustive()
@@ -412,21 +635,43 @@ impl H3Client {
         settings: H3SettingsProfile,
         config: H3ClientConfig,
     ) -> Result<Self, H3Error> {
-        settings
-            .validate()
-            .map_err(|reason| H3Error::Profile(reason.to_string()))?;
-        let connection = Connection::start(connection.clone(), &settings, Role::Client).await?;
+        let session = H3Session::new_with_settings(connection, settings).await?;
         Ok(Self {
-            connection,
+            session,
             recorder,
-            quic: None,
             quic_profile: None,
             trace_context: None,
-            settings_profile: settings,
             request_profile: H3RequestProfile::default(),
             config,
-            next_exchange: 1,
         })
+    }
+
+    fn from_quic_session(
+        session: H3Session,
+        recorder: Option<TraceCollector>,
+        quic_profile: &'static str,
+        target: SocketAddr,
+        server_name: &str,
+        settings_name: String,
+        config: H3ClientConfig,
+    ) -> Self {
+        Self {
+            session,
+            recorder,
+            quic_profile: Some(quic_profile),
+            trace_context: Some(H3TraceContext {
+                authority: target.to_string(),
+                server_name: server_name.to_string(),
+                identity: ConnectionIdentity {
+                    tls_server_name: Some(server_name.to_string()),
+                    h3_profile: Some(quic_profile.to_string()),
+                    h3_settings_profile: Some(settings_name),
+                    ..ConnectionIdentity::default()
+                },
+            }),
+            request_profile: H3RequestProfile::default(),
+            config,
+        }
     }
 
     /// Connect a QUIC transport through `connector`, then start HTTP/3 on it.
@@ -507,22 +752,16 @@ impl H3Client {
                 .await
                 .map_err(H3Error::from)?;
             let settings_name = settings.name.clone();
-            let mut client =
-                Self::new_with_settings_and_config(quic.connection(), recorder, settings, config)
-                    .await?;
-            client.quic = Some(quic);
-            client.quic_profile = Some(profile);
-            client.trace_context = Some(H3TraceContext {
-                authority: target.to_string(),
-                server_name: server_name.to_string(),
-                identity: ConnectionIdentity {
-                    tls_server_name: Some(server_name.to_string()),
-                    h3_profile: Some(profile.to_string()),
-                    h3_settings_profile: Some(settings_name),
-                    ..ConnectionIdentity::default()
-                },
-            });
-            Ok(client)
+            let session = H3Session::from_quic(quic, settings).await?;
+            Ok(Self::from_quic_session(
+                session,
+                recorder,
+                profile,
+                target,
+                server_name,
+                settings_name,
+                config,
+            ))
         }
         .await;
         match result {
@@ -603,22 +842,16 @@ impl H3Client {
                     .map_err(H3Error::from)?;
             }
             let settings_name = settings.name.clone();
-            let mut client =
-                Self::new_with_settings_and_config(quic.connection(), recorder, settings, config)
-                    .await?;
-            client.quic = Some(quic);
-            client.quic_profile = Some(profile);
-            client.trace_context = Some(H3TraceContext {
-                authority: target.to_string(),
-                server_name: server_name.to_string(),
-                identity: ConnectionIdentity {
-                    tls_server_name: Some(server_name.to_string()),
-                    h3_profile: Some(profile.to_string()),
-                    h3_settings_profile: Some(settings_name),
-                    ..ConnectionIdentity::default()
-                },
-            });
-            Ok(client)
+            let session = H3Session::from_quic(quic, settings).await?;
+            Ok(Self::from_quic_session(
+                session,
+                recorder,
+                profile,
+                target,
+                server_name,
+                settings_name,
+                config,
+            ))
         }
         .await;
         match result {
@@ -630,26 +863,34 @@ impl H3Client {
         }
     }
 
+    /// Borrow the underlying shareable HTTP/3 session.
+    pub fn session(&self) -> &H3Session {
+        &self.session
+    }
+
+    /// Consume this client wrapper and return the shareable HTTP/3 session.
+    pub fn into_session(self) -> H3Session {
+        self.session
+    }
+
     /// The underlying QUIC connection, when this client owns one.
     pub fn quic_connection(&self) -> Option<&netune_quic::owned::Connection> {
-        self.quic
-            .as_ref()
-            .map(netune_quic::QuicConnection::connection)
+        self.session.quic_connection()
     }
 
     /// Wait for the underlying QUIC handshake to complete.
     pub async fn wait_handshake(&self) -> Result<(), H3Error> {
-        if let Some(quic) = &self.quic {
-            quic.connection().wait_established().await?;
+        if let Some(quic) = self.session.quic_connection() {
+            quic.wait_established().await?;
         }
         Ok(())
     }
 
     /// Whether the server accepted this session's 0-RTT data.
     pub fn early_data_accepted(&self) -> bool {
-        self.quic
-            .as_ref()
-            .is_some_and(|quic| quic.connection().early_data_accepted())
+        self.session
+            .quic_connection()
+            .is_some_and(netune_quic::owned::Connection::early_data_accepted)
     }
 
     /// Open an RFC 9220 extended CONNECT and return a full-duplex session.
@@ -679,9 +920,7 @@ impl H3Client {
         uni_types: Vec<u64>,
         bidi_signal: u64,
     ) -> tokio::sync::mpsc::UnboundedReceiver<crate::H3ExtensionStream> {
-        self.connection
-            .shared()
-            .enable_extension(uni_types, bidi_signal)
+        self.session.enable_stream_extension(uni_types, bidi_signal)
     }
 
     /// Install an extension router with a protocol-supplied identifier
@@ -693,19 +932,18 @@ impl H3Client {
         bidi_signal: u64,
         validator: impl Fn(u64) -> bool + Send + Sync + 'static,
     ) -> tokio::sync::mpsc::UnboundedReceiver<crate::H3ExtensionStream> {
-        self.connection
-            .shared()
-            .enable_extension_with_validator(uni_types, bidi_signal, validator)
+        self.session
+            .enable_stream_extension_with_validator(uni_types, bidi_signal, validator)
     }
 
     /// Wait until the peer SETTINGS frame has been observed.
     pub async fn wait_settings(&self) {
-        self.connection.shared().wait_settings().await;
+        self.session.wait_settings().await;
     }
 
     /// Look up a peer SETTINGS identifier, including extension settings.
     pub fn peer_setting(&self, id: u64) -> Option<u64> {
-        self.connection.shared().peer_extra_setting(id)
+        self.session.peer_setting(id)
     }
 
     /// The resolved QUIC profile that shapes this H3 connection.
@@ -715,7 +953,7 @@ impl H3Client {
 
     /// The HTTP/3 SETTINGS profile used when this connection was opened.
     pub fn settings_profile(&self) -> &H3SettingsProfile {
-        &self.settings_profile
+        self.session.settings_profile()
     }
 
     /// Attach an identity context when the session was built from a raw
@@ -783,47 +1021,15 @@ impl H3Client {
         &mut self,
         request: http::Request<()>,
     ) -> Result<H3RequestBody, H3Error> {
-        let exchange = self.next_exchange;
-        self.next_exchange = self.next_exchange.saturating_add(1);
-
-        if let Some(rec) = &self.recorder {
-            rec.mark_stream(exchange, EventKind::H3StreamStart, 0, 0);
-        }
-
-        if request
-            .extensions()
-            .get::<crate::proto::ExtendedConnectProtocol>()
-            .is_some()
-            && !self.connection.shared().peer_extended_connect_enabled()
-        {
-            self.connection.shared().wait_settings().await;
-            if !self.connection.shared().peer_extended_connect_enabled() {
-                return Err(H3Error::H3(
-                    "extended CONNECT was not negotiated".to_string(),
-                ));
-            }
-        }
-        let fields = encode_request(&request, &self.request_profile.order)?;
-        let mut stream = deadline(
-            "request head",
-            self.config.request_timeout,
-            self.connection.open_bi(),
-        )
-        .await?;
-        deadline(
-            "request head",
-            self.config.request_timeout,
-            stream.send_head(&fields),
-        )
-        .await?;
-
-        Ok(H3RequestBody {
-            stream,
-            recorder: self.recorder.clone(),
-            context: self.trace_context.clone(),
-            config: self.config.clone(),
-            exchange,
-        })
+        self.session
+            .open_request(
+                request,
+                &self.request_profile,
+                &self.config,
+                self.recorder.clone(),
+                self.trace_context.clone(),
+            )
+            .await
     }
 
     /// Execute an HTTP/3 request to completion, buffering the response body.
@@ -866,6 +1072,7 @@ async fn await_response(
     context: Option<H3TraceContext>,
     config: H3ClientConfig,
     exchange: u32,
+    permit: Option<H3StreamPermit>,
 ) -> Result<H3ResponseStream, H3Error> {
     loop {
         let response = deadline(
@@ -897,6 +1104,7 @@ async fn await_response(
             exchange,
             received: 0,
             finished: false,
+            permit,
         });
     }
 }
@@ -904,11 +1112,11 @@ async fn await_response(
 async fn deadline<T, E, F>(phase: &'static str, duration: Duration, future: F) -> Result<T, H3Error>
 where
     F: Future<Output = Result<T, E>>,
-    E: std::fmt::Display,
+    E: Into<H3Error>,
 {
     match tokio::time::timeout(duration, future).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(error)) => Err(H3Error::H3(format!("{phase}: {error}"))),
+        Ok(Err(error)) => Err(error.into()),
         Err(_) => Err(H3Error::Timeout(phase)),
     }
 }

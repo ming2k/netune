@@ -2,21 +2,12 @@ use super::*;
 use crate::event::{FrameClass, TimeSource};
 use crate::log::EventLog;
 use crate::record::Recorder;
-use crate::trace::{AttemptRef, ConnectionInfo, EndpointRef, Fidelity, TraceId};
+use crate::trace::{ConnectionInfo, Fidelity, TraceId};
 
 fn trace(log: EventLog) -> RequestTrace {
     RequestTrace {
         meta: crate::trace::TraceMeta::new(TraceId::new("test"), crate::trace::Direction::Egress),
-        attempt: AttemptRef {
-            round: 1,
-            turn: 1,
-            attempt: 1,
-        },
-        endpoint: EndpointRef {
-            provider: "test".into(),
-            model: "test".into(),
-            authority: "example.invalid:443".into(),
-        },
+        authority: "example.invalid:443".into(),
         connection: ConnectionInfo::default(),
         identity: crate::ConnectionIdentity::default(),
         schema_version: crate::TRACE_SCHEMA_VERSION,
@@ -51,7 +42,7 @@ fn a_cold_streaming_attempt_derives_every_scope() {
         0,
     );
     for i in 0..50u64 {
-        log.push_at(505 * MS + i * 10 * MS, EventKind::OutputToken, 1, 0);
+        log.push_at(505 * MS + i * 10 * MS, EventKind::Payload, 1, 0);
     }
     log.push_at(1_000 * MS, EventKind::BodyEnd, 0, 0);
     log.push_at(1_002 * MS, EventKind::Validated, 0, 0);
@@ -63,18 +54,18 @@ fn a_cold_streaming_attempt_derives_every_scope() {
     assert_eq!(derived.ttfb_us.value(), Some(400_000));
     assert_eq!(derived.first_byte_us.value(), Some(410_000));
     assert_eq!(derived.first_frame_us.value(), Some(410_000));
-    assert_eq!(derived.ttft_us.value(), Some(505_000));
+    assert_eq!(derived.first_payload_us.value(), Some(505_000));
     // first frame → first token: 95 ms
-    assert_eq!(derived.server_ttft_us.value(), Some(95_000));
+    assert_eq!(derived.frame_to_payload_us.value(), Some(95_000));
     // 49 gaps of 10 ms
-    assert_eq!(derived.stream_us.value(), Some(490_000));
+    assert_eq!(derived.payload_span_us.value(), Some(490_000));
     assert_eq!(derived.tail_us.value(), Some(5_000));
     assert_eq!(derived.e2e_us.value(), Some(1_002_000));
     // Request fully written at 200 ms; the new TTFT anchors there.
     assert_eq!(derived.request_sent_us.value(), Some(200_000));
-    assert_eq!(derived.first_token_after_sent_us.value(), Some(305_000));
+    assert_eq!(derived.first_payload_after_sent_us.value(), Some(305_000));
     // The rate is the caller's division now: 50 tokens over a 490 ms span.
-    let span_us = derived.stream_us.value().expect("stream span");
+    let span_us = derived.payload_span_us.value().expect("stream span");
     assert_eq!(span_us, 490_000);
     let tps = 50.0 * 1_000_000.0 / span_us as f64;
     assert!((tps - 102.0).abs() < 1.0, "got {tps}");
@@ -93,7 +84,7 @@ fn a_reused_connection_makes_connect_scopes_not_applicable() {
         FrameClass::Open.code().into(),
         0,
     );
-    log.push_at(50 * MS, EventKind::OutputToken, 10, 0);
+    log.push_at(50 * MS, EventKind::Payload, 10, 0);
     log.push_at(60 * MS, EventKind::BodyEnd, 0, 0);
     log.push_at(61 * MS, EventKind::Validated, 0, 0);
 
@@ -122,18 +113,18 @@ fn a_batched_transport_refuses_the_server_scope() {
         FrameClass::Open.code().into(),
         0,
     );
-    log.push_at(900 * MS, EventKind::OutputToken, 10, 0);
+    log.push_at(900 * MS, EventKind::Payload, 10, 0);
     log.push_at(950 * MS, EventKind::BodyEnd, 0, 0);
     log.push_at(951 * MS, EventKind::Validated, 0, 0);
 
     let derived = derive(&trace(log));
     assert_eq!(
-        derived.server_ttft_us.validity(),
+        derived.frame_to_payload_us.validity(),
         crate::Validity::NotEstimable(Reason::TransportBatched)
     );
-    assert_eq!(derived.server_ttft_us.value(), None);
+    assert_eq!(derived.frame_to_payload_us.value(), None);
     // The perceived scope is still measured: the wait was real.
-    assert_eq!(derived.ttft_us.value(), Some(900_000));
+    assert_eq!(derived.first_payload_us.value(), Some(900_000));
 }
 
 #[test]
@@ -149,16 +140,16 @@ fn a_short_response_has_no_stream_span() {
         FrameClass::Text.code().into(),
         0,
     );
-    log.push_at(5 * MS, EventKind::OutputToken, 3, 0);
+    log.push_at(5 * MS, EventKind::Payload, 3, 0);
     log.push_at(6 * MS, EventKind::BodyEnd, 0, 0);
     log.push_at(7 * MS, EventKind::Validated, 0, 0);
 
     let derived = derive(&trace(log));
     assert_eq!(
-        derived.stream_us.validity(),
-        crate::Validity::NotApplicable(Reason::FewerThanTwoOutputEvents)
+        derived.payload_span_us.validity(),
+        crate::Validity::NotApplicable(Reason::FewerThanTwoPayloadEvents)
     );
-    assert!(derived.stream_us.value().is_none());
+    assert!(derived.payload_span_us.value().is_none());
 }
 
 #[test]
@@ -215,10 +206,10 @@ fn a_recorder_produced_trace_derives_without_panicking() {
     recorder.mark(EventKind::Validated, 0, 0);
     recorder.read(64, TimeSource::Syscall);
     let derived = derive(&trace(recorder.into_log()));
-    assert!(derived.ttft_us.is_measured());
+    assert!(derived.first_payload_us.is_measured());
     // The recorder runs at wall-clock speed, so every frame lands in one
     // flush and the span is tiny. The rate guard lives in the ledger, which
     // refuses to divide by a sub-20 ms span.
-    let span = derived.stream_us.value().expect("span measured");
+    let span = derived.payload_span_us.value().expect("span measured");
     assert!(span < 1_000, "a burst lands in one flush: {span} µs");
 }

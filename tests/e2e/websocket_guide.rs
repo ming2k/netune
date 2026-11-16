@@ -139,9 +139,7 @@ async fn guide_trace_what_happened() {
     );
     let target = Target::plain(format!("127.0.0.1:{port}"));
 
-    use netune_trace::{
-        AttemptRef, ConnectionInfo, EndpointRef, Fidelity, RequestTrace, TraceId, derive,
-    };
+    use netune_trace::{ConnectionInfo, Fidelity, RequestTrace, TraceId, derive};
 
     let recorder = TraceCollector::start(1024);
     let mut ws = client
@@ -161,16 +159,7 @@ async fn guide_trace_what_happened() {
     let log = recorder.log();
     let trace = RequestTrace {
         meta: netune_trace::TraceMeta::new(TraceId::new("guide"), netune_trace::Direction::Egress),
-        attempt: AttemptRef {
-            round: 1,
-            turn: 1,
-            attempt: 1,
-        },
-        endpoint: EndpointRef {
-            provider: "guide".into(),
-            model: "guide-model".into(),
-            authority: format!("127.0.0.1:{port}"),
-        },
+        authority: format!("127.0.0.1:{port}"),
         connection: ConnectionInfo::default(),
         identity: netune_trace::ConnectionIdentity::default(),
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,

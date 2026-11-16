@@ -324,6 +324,20 @@ pub enum NetError {
     /// Distinct from [`Self::Protocol`] because replaying it on a fresh
     /// connection is safe: the peer has told us it did not process this stream.
     RetryableProtocol(String),
+    /// A bound on the exchange itself expired after the request was
+    /// dispatched: the response head or the next body bytes did not arrive in
+    /// time.
+    ///
+    /// Distinct from a connect-phase timeout ([`Self::Connect`]) and from an
+    /// OS-level `ETIMEDOUT` ([`Self::Io`]): the connection was established and
+    /// the request was sent, so this is never the signature of a stale pooled
+    /// socket and is never replayed transparently.
+    Timeout {
+        phase: DiagnosticPhase,
+        /// What was being waited for, e.g. `"response head"`.
+        waiting_for: &'static str,
+        limit: Duration,
+    },
 }
 
 impl NetError {
@@ -350,6 +364,7 @@ impl NetError {
             Self::Connect(error) => error.is_timeout(),
             Self::Io(error) => error.kind() == std::io::ErrorKind::TimedOut,
             Self::Http(HttpError::Io(error)) => error.kind() == std::io::ErrorKind::TimedOut,
+            Self::Timeout { .. } => true,
             _ => false,
         }
     }
@@ -377,6 +392,7 @@ impl NetError {
             Self::TooManyRedirects(_) => "redirect",
             Self::Security(_) => "security",
             Self::Protocol(_) | Self::RetryableProtocol(_) => "protocol",
+            Self::Timeout { .. } => "timeout",
         }
     }
 
@@ -392,7 +408,7 @@ impl NetError {
             Self::Connect(error) => error.is_retryable(),
             Self::Io(_) => true,
             Self::Http(error) => error.is_retryable(),
-            Self::RetryableProtocol(_) => true,
+            Self::RetryableProtocol(_) | Self::Timeout { .. } => true,
             Self::UnsupportedEncoding(_)
             | Self::Decode(_)
             | Self::TooManyRedirects(_)
@@ -471,6 +487,13 @@ impl std::fmt::Display for NetError {
             Self::Security(what) => write!(f, "security policy: {what}"),
             Self::Protocol(what) => write!(f, "protocol error: {what}"),
             Self::RetryableProtocol(what) => write!(f, "retryable protocol error: {what}"),
+            Self::Timeout {
+                waiting_for, limit, ..
+            } => write!(
+                f,
+                "timed out after {} ms waiting for the {waiting_for}",
+                limit.as_millis()
+            ),
         }
     }
 }
@@ -525,6 +548,7 @@ impl Diagnose for NetError {
             Self::RetryableProtocol(_) => {
                 (DiagnosticCode::EGRESS_HTTP2_REFUSED, DiagnosticPhase::Http2)
             }
+            Self::Timeout { phase, .. } => (DiagnosticCode::EGRESS_TIMEOUT, *phase),
         };
         DiagnosticRecord::new(code)
             .with_phase(phase)

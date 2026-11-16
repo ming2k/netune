@@ -32,6 +32,168 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use crate::error::HttpError;
 use crate::head::RequestHead;
 
+/// How a streamed request body is framed on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestFraming {
+    /// Declared `Content-Length`: exact byte total is checked before `finish`.
+    Length(u64),
+    /// `Transfer-Encoding: chunked`: chunks framed as `<hex>\r\n...\r\n`, terminated by `0\r\n\r\n`.
+    Chunked,
+}
+
+/// Writes a request head followed by a streamed request body, enforcing the
+/// framing declared by the head (`Content-Length` or `Transfer-Encoding: chunked`).
+#[derive(Debug)]
+pub struct RequestWriter<W> {
+    io: W,
+    framing: RequestFraming,
+    written: u64,
+    finished: bool,
+}
+
+impl<W: AsyncWrite + Unpin> RequestWriter<W> {
+    /// Write `head` and take a mutable borrow of `io` for streaming body chunks.
+    ///
+    /// If `head` declares a `Content-Length`, that exact length is enforced;
+    /// otherwise `Transfer-Encoding: chunked` must already be declared on `head`
+    /// (and conflicting `Content-Length` + `Transfer-Encoding` is refused).
+    ///
+    /// # Errors
+    ///
+    /// [`HttpError::Protocol`] when the request target is invalid, when both
+    /// `Content-Length` and `Transfer-Encoding` appear, when `Content-Length`
+    /// is malformed, or when `Transfer-Encoding` is not `chunked` without a
+    /// `Content-Length`.
+    pub async fn start(mut io: W, head: &RequestHead) -> Result<Self, HttpError> {
+        let framing = classify_request_framing(head)?;
+        let out = encode_head(head, None, false)?;
+        io.write_all(&out).await?;
+        io.flush().await?;
+        Ok(Self {
+            io,
+            framing,
+            written: 0,
+            finished: false,
+        })
+    }
+
+    /// Write the next body chunk. An empty slice is a no-op.
+    pub async fn write(&mut self, bytes: &[u8]) -> Result<(), HttpError> {
+        if self.finished {
+            return Err(HttpError::Protocol("write after the request ended"));
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        match self.framing {
+            RequestFraming::Length(declared) => {
+                let after = self.written + bytes.len() as u64;
+                if after > declared {
+                    return Err(HttpError::Protocol(
+                        "the request body exceeds the content-length the head declared",
+                    ));
+                }
+                self.io.write_all(bytes).await?;
+                self.io.flush().await?;
+                self.written = after;
+                Ok(())
+            }
+            RequestFraming::Chunked => {
+                let mut framed = BytesMut::with_capacity(bytes.len() + 16);
+                framed.put_slice(format!("{:x}\r\n", bytes.len()).as_bytes());
+                framed.put_slice(bytes);
+                framed.put_slice(b"\r\n");
+                self.io.write_all(&framed).await?;
+                self.io.flush().await?;
+                self.written += bytes.len() as u64;
+                Ok(())
+            }
+        }
+    }
+
+    /// Terminate the request body, checking declared `Content-Length` or
+    /// writing the chunked terminator `0\r\n\r\n`.
+    pub async fn finish(mut self) -> Result<W, HttpError> {
+        if self.finished {
+            return Ok(self.io);
+        }
+        self.finished = true;
+        match self.framing {
+            RequestFraming::Length(declared) if self.written != declared => {
+                return Err(HttpError::Protocol(
+                    "the request ended before the declared content-length was written",
+                ));
+            }
+            RequestFraming::Length(_) => {}
+            RequestFraming::Chunked => self.io.write_all(b"0\r\n\r\n").await?,
+        }
+        self.io.flush().await?;
+        Ok(self.io)
+    }
+
+    /// Total body bytes written so far.
+    pub const fn written(&self) -> u64 {
+        self.written
+    }
+}
+
+fn classify_request_framing(head: &RequestHead) -> Result<RequestFraming, HttpError> {
+    let mut content_length: Option<u64> = None;
+    let mut chunked = false;
+    let check_pair = |name: &str,
+                      value: &str,
+                      cl: &mut Option<u64>,
+                      chunked: &mut bool|
+     -> Result<(), HttpError> {
+        if name.eq_ignore_ascii_case("content-length") {
+            let parsed = value
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| HttpError::Protocol("invalid request content-length header"))?;
+            if let Some(prev) = cl
+                && *prev != parsed
+            {
+                return Err(HttpError::Protocol(
+                    "conflicting content-length headers on request",
+                ));
+            }
+            *cl = Some(parsed);
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            if value.trim().eq_ignore_ascii_case("chunked") {
+                *chunked = true;
+            } else {
+                return Err(HttpError::Protocol(
+                    "streaming request transfer-encoding must be chunked",
+                ));
+            }
+        }
+        Ok(())
+    };
+
+    if let Some(raw) = &head.raw_headers {
+        for (name, value) in raw {
+            check_pair(name, value, &mut content_length, &mut chunked)?;
+        }
+    } else {
+        for (name, value) in &head.headers {
+            let value = value
+                .to_str()
+                .map_err(|_| HttpError::Protocol("non-ASCII request framing header"))?;
+            check_pair(name.as_str(), value, &mut content_length, &mut chunked)?;
+        }
+    }
+    match (content_length, chunked) {
+        (Some(_), true) => Err(HttpError::Protocol(
+            "request declares both content-length and transfer-encoding",
+        )),
+        (Some(len), false) => Ok(RequestFraming::Length(len)),
+        (None, true) => Ok(RequestFraming::Chunked),
+        (None, false) => Err(HttpError::Protocol(
+            "streaming request head must declare content-length or transfer-encoding: chunked",
+        )),
+    }
+}
+
 /// Serialize `head` plus an optional length-delimited body onto `writer`.
 ///
 /// # Errors
@@ -203,5 +365,46 @@ mod tests {
         );
         assert!(!text.to_ascii_lowercase().contains("user-agent"), "{text}");
         assert!(text.ends_with("\r\n\r\n"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn streaming_request_writer_chunks_and_terminates() {
+        let head = RequestHead::new(Method::POST, "/upload")
+            .with_header("host", "example.com")
+            .with_header("transfer-encoding", "chunked");
+        let mut out = Vec::new();
+        let mut writer = RequestWriter::start(&mut out, &head).await.expect("start");
+        writer.write(b"hello ").await.expect("chunk 1");
+        writer.write(b"").await.expect("empty chunk is a no-op");
+        writer.write(b"world").await.expect("chunk 2");
+        writer.finish().await.expect("finish");
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(text.contains("transfer-encoding: chunked\r\n"));
+        assert!(text.ends_with("\r\n\r\n6\r\nhello \r\n5\r\nworld\r\n0\r\n\r\n"));
+    }
+
+    #[tokio::test]
+    async fn streaming_request_writer_enforces_declared_content_length() {
+        let head = RequestHead::new(Method::POST, "/upload")
+            .with_header("host", "example.com")
+            .with_header("content-length", "5");
+        let mut out = Vec::new();
+        let mut writer = RequestWriter::start(&mut out, &head).await.expect("start");
+        writer.write(b"ab").await.expect("write");
+        let over = writer.write(b"cdef").await.expect_err("must reject excess");
+        assert_eq!(over.class(), "protocol");
+        let short = writer.finish().await.expect_err("must reject short body");
+        assert_eq!(short.class(), "protocol");
+    }
+
+    #[tokio::test]
+    async fn streaming_request_writer_rejects_conflicting_framing_headers() {
+        let head = RequestHead::new(Method::POST, "/upload")
+            .with_header("content-length", "5")
+            .with_header("transfer-encoding", "chunked");
+        let error = RequestWriter::start(Vec::new(), &head)
+            .await
+            .expect_err("conflicting framing must fail");
+        assert_eq!(error.class(), "protocol");
     }
 }

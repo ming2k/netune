@@ -217,6 +217,39 @@ fn title_case(name: &str) -> String {
         .join("-")
 }
 
+/// How a request relates to HTTP/2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Http2Mode {
+    /// HTTP/1.1 only.
+    Off,
+    /// HTTP/2 when the connection negotiates it over ALPN, HTTP/1.1 otherwise.
+    Negotiate,
+    /// HTTP/2 by prior knowledge: a mandate or an explicit HTTP/2 profile. A
+    /// keep-alive HTTP/1.1 connection never serves this request.
+    Force,
+}
+
+/// Which transport protocol family and resolved protocol profiles a plan carries.
+#[derive(Debug, Clone)]
+pub enum PlannedTransport {
+    Tcp {
+        /// Whether, and how insistently, this request speaks HTTP/2.
+        http2: Http2Mode,
+        #[cfg(feature = "http2")]
+        h2: Option<netune_http2::H2Fingerprint>,
+        /// The request half, when an H2 connection is planned. Deliberately
+        /// separate from `identity`: it changes a HEADERS block, not a socket.
+        #[cfg(feature = "http2")]
+        h2_request: Option<netune_http2::H2RequestProfile>,
+    },
+    #[cfg(feature = "http3")]
+    Http3 {
+        quic: netune_quic::profile::QuicProfile,
+        settings: netune_http3::H3SettingsProfile,
+        request: netune_http3::H3RequestProfile,
+    },
+}
+
 /// The resolved plan for one request.
 ///
 /// The plan is built before a socket is opened. It contains the connection
@@ -227,17 +260,67 @@ pub struct ConnectionPlan {
     pub target: Target,
     pub identity: ConnectionIdentity,
     pub h1: H1WireProfile,
-    #[cfg(feature = "http2")]
-    pub h2: Option<netune_http2::H2Fingerprint>,
-    /// The request half, when an H2 connection is planned. It is deliberately
-    /// separate from `identity`: it changes a HEADERS block, not a socket.
-    #[cfg(feature = "http2")]
-    pub h2_request: Option<netune_http2::H2RequestProfile>,
+    pub transport: PlannedTransport,
 }
 
 impl ConnectionPlan {
     pub fn pool_key(&self) -> PoolKey {
         PoolKey::new(self.target.authority.clone(), self.identity.clone())
+    }
+
+    pub const fn http2_mode(&self) -> Http2Mode {
+        match &self.transport {
+            PlannedTransport::Tcp { http2, .. } => *http2,
+            #[cfg(feature = "http3")]
+            PlannedTransport::Http3 { .. } => Http2Mode::Off,
+        }
+    }
+
+    #[cfg(feature = "http2")]
+    pub fn h2_fingerprint(&self) -> Option<&netune_http2::H2Fingerprint> {
+        match &self.transport {
+            PlannedTransport::Tcp { h2, .. } => h2.as_ref(),
+            #[cfg(feature = "http3")]
+            PlannedTransport::Http3 { .. } => None,
+        }
+    }
+
+    #[cfg(feature = "http2")]
+    pub fn h2_request(&self) -> Option<netune_http2::H2RequestProfile> {
+        match &self.transport {
+            PlannedTransport::Tcp { h2_request, .. } => *h2_request,
+            #[cfg(feature = "http3")]
+            PlannedTransport::Http3 { .. } => None,
+        }
+    }
+
+    #[cfg(feature = "http3")]
+    pub fn h3_plan(
+        &self,
+    ) -> Option<(
+        &netune_quic::profile::QuicProfile,
+        &netune_http3::H3SettingsProfile,
+        &netune_http3::H3RequestProfile,
+    )> {
+        match &self.transport {
+            PlannedTransport::Http3 {
+                quic,
+                settings,
+                request,
+            } => Some((quic, settings, request)),
+            PlannedTransport::Tcp { .. } => None,
+        }
+    }
+
+    pub const fn is_http3(&self) -> bool {
+        #[cfg(feature = "http3")]
+        {
+            matches!(self.transport, PlannedTransport::Http3 { .. })
+        }
+        #[cfg(not(feature = "http3"))]
+        {
+            false
+        }
     }
 }
 

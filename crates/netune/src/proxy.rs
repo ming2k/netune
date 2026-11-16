@@ -143,6 +143,10 @@ impl<C: Connector> Connector for ProxyConnector<C> {
         Some(self.proxy.route_identity())
     }
 
+    fn egress_confinement(&self) -> Option<crate::connect::EgressConfinement> {
+        self.inner.egress_confinement()
+    }
+
     async fn connect(
         &self,
         target: &Target,

@@ -675,6 +675,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> H2Connection<T> {
         Ok(())
     }
 
+    /// Remaining connection-level send credit.
+    pub(crate) const fn connection_send_credit(&self) -> i64 {
+        self.connection_send_window
+    }
+
     /// Write body bytes, respecting both the connection and the stream window.
     ///
     /// `stream_window` is the caller's remaining credit for this stream; the returned value is
@@ -695,29 +700,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> H2Connection<T> {
         let max = self.peer.max_frame_size as usize;
         let mut remaining = body;
         while !remaining.is_empty() {
-            if self.connection_send_window <= 0 {
+            if self.connection_send_window <= 0 || stream_window <= 0 {
                 self.flush().await?;
-                self.wait_for_connection_credit().await?;
-            }
-            if stream_window <= 0 {
-                self.flush().await?;
-                stream_window += self.wait_for_stream_credit(stream_id).await?;
-                continue;
+                // Both windows must be replenished by the same reader. Reading
+                // only until the connection window opens would discard the
+                // stream-level WINDOW_UPDATE that arrived in the same batch,
+                // and the next wait would then block on credit the peer has
+                // already sent.
+                self.wait_for_send_credit(stream_id, &mut stream_window)
+                    .await?;
             }
             let allowed = usize::try_from(self.connection_send_window)
                 .unwrap_or(usize::MAX)
                 .min(usize::try_from(stream_window).unwrap_or(usize::MAX))
                 .min(max);
-            if allowed == 0 {
-                self.flush().await?;
-                if self.connection_send_window <= 0 {
-                    self.wait_for_connection_credit().await?;
-                }
-                if stream_window <= 0 {
-                    stream_window += self.wait_for_stream_credit(stream_id).await?;
-                }
-                continue;
-            }
             let take = remaining.len().min(allowed);
             let (chunk, rest) = remaining.split_at(take);
             let last = rest.is_empty();
@@ -745,24 +741,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin> H2Connection<T> {
         Ok(stream_window)
     }
 
-    async fn wait_for_connection_credit(&mut self) -> Result<(), H2Error> {
-        while self.connection_send_window <= 0 {
+    /// Read until both the connection and this stream can send again.
+    ///
+    /// Stream and connection credit arrive as separate `WINDOW_UPDATE`
+    /// frames, often back-to-back. Waiting for one at a time loses the other:
+    /// a stream update read while the connection window was closed used to be
+    /// discarded, leaving `write_data` waiting for credit the peer had already
+    /// sent.
+    async fn wait_for_send_credit(
+        &mut self,
+        stream_id: u32,
+        stream_window: &mut i64,
+    ) -> Result<(), H2Error> {
+        while self.connection_send_window <= 0 || *stream_window <= 0 {
             let frame = self.read_frame().await?;
             match frame {
                 Frame::WindowUpdate {
                     stream_id: 0,
                     increment,
                 } => self.apply_connection_window_update(increment)?,
-                other => self.handle_housekeeping(other).await?,
-            }
-        }
-        Ok(())
-    }
-
-    async fn wait_for_stream_credit(&mut self, stream_id: u32) -> Result<i64, H2Error> {
-        loop {
-            let frame = self.read_frame().await?;
-            match frame {
                 Frame::WindowUpdate {
                     stream_id: id,
                     increment,
@@ -772,7 +769,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> H2Connection<T> {
                             "a zero WINDOW_UPDATE increment is a connection error".into(),
                         ));
                     }
-                    return Ok(i64::from(increment));
+                    *stream_window += i64::from(increment);
+                    if *stream_window > 0x7FFF_FFFF {
+                        return Err(H2Error::Protocol(
+                            "stream flow-control window overflowed".into(),
+                        ));
+                    }
                 }
                 Frame::RstStream {
                     stream_id: id,
@@ -786,6 +788,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> H2Connection<T> {
                 other => self.handle_housekeeping(other).await?,
             }
         }
+        Ok(())
     }
 
     /// Apply a connection-level `WINDOW_UPDATE`, refusing an overflow.

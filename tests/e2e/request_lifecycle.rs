@@ -10,10 +10,12 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::Method;
-use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TraceConfig};
+use netune::{
+    AttemptError, Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TraceConfig,
+};
 use netune_trace::{
-    AttemptRef, ConnectionInfo, EndpointRef, EventKind, Fidelity, FrameClass, Reason, RequestTrace,
-    TRACE_SCHEMA_VERSION, TraceCollector, TraceId, Validity, derive,
+    ConnectionInfo, EventKind, Fidelity, FrameClass, Reason, RequestTrace, TRACE_SCHEMA_VERSION,
+    TraceCollector, TraceId, Validity, derive,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -23,7 +25,7 @@ const CHUNK_GAP: Duration = Duration::from_millis(5);
 
 /// The gap between the response head and the first body byte.
 ///
-/// Deliberately much larger than [`CHUNK_GAP`]. `server_ttft_us` is refused as
+/// Deliberately much larger than [`CHUNK_GAP`]. `frame_to_payload_us` is refused as
 /// `TransportBatched` when the head and the first body byte are recorded less than
 /// `BATCH_GAP_NS` (2 ms) apart, which is the correct behaviour — but it also means the
 /// assertion that the scope *is* estimable depends on the client's very first read not
@@ -57,7 +59,7 @@ async fn serve(listener: TcpListener, responses: usize) {
             .expect("head");
         socket.flush().await.expect("flush head");
         // Headers first, then a prefill gap before the first token — the shape
-        // a real streaming API has, and the shape that makes `server_ttft_us`
+        // a real streaming API has, and the shape that makes `frame_to_payload_us`
         // estimable rather than batched.
         tokio::time::sleep(FIRST_CHUNK_GAP).await;
         for i in 0..CHUNKS {
@@ -75,16 +77,7 @@ async fn serve(listener: TcpListener, responses: usize) {
 fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
     RequestTrace {
         meta: netune_trace::TraceMeta::new(TraceId::new("e2e"), netune_trace::Direction::Egress),
-        attempt: AttemptRef {
-            round: 1,
-            turn: 1,
-            attempt: 1,
-        },
-        endpoint: EndpointRef {
-            provider: "e2e".into(),
-            model: "e2e-model".into(),
-            authority: authority.to_string(),
-        },
+        authority: authority.to_string(),
         connection: ConnectionInfo::default(),
         identity: netune_trace::ConnectionIdentity::default(),
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
@@ -96,11 +89,7 @@ fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
 
 /// Run one request, marking one output token per streamed frame the way a
 /// provider adapter would.
-async fn request_once(
-    client: &Client<TcpConnector>,
-    target: &Target,
-    recorder: TraceCollector,
-) -> usize {
+async fn request_once(client: &Client, target: &Target, recorder: TraceCollector) -> usize {
     let head = RequestHead::new(Method::POST, "/v1/chat/completions")
         .with_header("content-type", "application/json");
     let mut response = client
@@ -125,12 +114,12 @@ async fn request_once(
     frames
 }
 
-fn client() -> Client<TcpConnector> {
-    Client::new(
-        TcpConnector::new(),
-        Pool::default(),
-        ClientConfig::default(),
-    )
+fn client() -> Client {
+    client_on(Pool::default())
+}
+
+fn client_on(pool: Pool) -> Client {
+    Client::new(TcpConnector::new(), pool, ClientConfig::default())
 }
 
 /// A peer that answers the first request on a connection, then closes the
@@ -181,7 +170,8 @@ async fn a_pooled_socket_the_peer_dropped_is_replaced_transparently() {
     // by a fresh listener on the same port serving the replacement connection.
     let server = tokio::spawn(serve_then_drop_idle(listener));
 
-    let client = client();
+    let pool = Pool::default();
+    let client = client_on(pool.clone());
     let target = Target::plain(address.to_string());
 
     // First request populates the pool with a connection the peer then kills.
@@ -189,9 +179,7 @@ async fn a_pooled_socket_the_peer_dropped_is_replaced_transparently() {
     assert_eq!(first, 1, "the first response is served in full");
     server.await.expect("join");
     assert_eq!(
-        client
-            .pool()
-            .idle_count(&client.pool_key(&target).expect("plan")),
+        pool.idle_count(&client.pool_key(&target).expect("plan")),
         1,
         "the answered connection is pooled"
     );
@@ -210,12 +198,15 @@ async fn a_pooled_socket_the_peer_dropped_is_replaced_transparently() {
     server.await.expect("join");
 
     let log = recorder.log();
+    // The dead socket is caught by the checkout probe, before a request byte
+    // is written to it: it was never used, so the attempt never claims reuse
+    // and nothing is replayed — which is why a bare POST survives this.
     assert_eq!(
         log.iter()
             .filter(|event| event.kind == EventKind::ConnectReused)
             .count(),
-        1,
-        "exactly one reuse event, carrying the idle age"
+        0,
+        "a socket discarded at checkout is not a reuse"
     );
     assert!(
         log.iter()
@@ -243,6 +234,124 @@ async fn a_pooled_socket_the_peer_dropped_is_replaced_transparently() {
         "the reconnected attempt measures TCP, not ConnectionReused: {:?}",
         derived.tcp_us.validity()
     );
+}
+
+/// A peer that answers one request, keeps the connection open, then reads the
+/// next request in full and closes without answering it. The pooled socket is
+/// alive when it is checked out, so the probe passes; it dies only after the
+/// request has been delivered — the window in which the origin may already
+/// have acted on it.
+///
+/// The listening socket is dropped as soon as the connection is accepted and
+/// `listener_closed` reports that, so a test can rebind the same address for
+/// the replay *before* it issues the request that triggers it. Deferring the
+/// rebind until this task returns races the client's reconnect: under parallel
+/// test load the client can reach a still-unbound port and see
+/// `ConnectionRefused`.
+async fn serve_then_swallow_the_next(
+    listener: TcpListener,
+    listener_closed: tokio::sync::oneshot::Sender<()>,
+) {
+    let (mut socket, _) = listener.accept().await.expect("accept");
+    drop(listener);
+    let _ = listener_closed.send(());
+    for answered in [true, false] {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = socket.read(&mut buffer).await.expect("read request");
+            if read == 0 {
+                return;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        if answered {
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                .await
+                .expect("response");
+            socket.flush().await.expect("flush");
+        }
+    }
+    drop(socket);
+}
+
+async fn send(client: &Client, target: &Target, method: Method) -> Result<Bytes, AttemptError> {
+    let mut response = client
+        .request(target, RequestHead::new(method, "/"), None)
+        .await?;
+    response.body.read_to_end().await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inv_transport_06_a_post_swallowed_by_a_reused_socket_is_not_replayed() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let (_listener_closed_tx, _listener_closed_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_then_swallow_the_next(listener, _listener_closed_tx));
+    let client = client();
+    let target = Target::plain(address.to_string());
+
+    assert_eq!(
+        send(&client, &target, Method::GET)
+            .await
+            .expect("first")
+            .as_ref(),
+        b"ok"
+    );
+    // The peer read this POST and then closed. Whether it acted on it is
+    // unknowable from here, so the transport must not send a second copy.
+    // Nothing listens for a second connection: a replay would fail to connect
+    // and surface as a connect error instead of the stale-socket failure.
+    let error = send(&client, &target, Method::POST)
+        .await
+        .expect_err("the swallowed POST must surface, not be replayed");
+    assert!(
+        error.is_stale_connection() && error.is_retryable(),
+        "the failure still tells the caller a retry is plausible: {error}"
+    );
+    server.await.expect("join");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inv_transport_06_a_get_swallowed_by_a_reused_socket_is_replayed() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let (listener_closed_tx, listener_closed_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_then_swallow_the_next(listener, listener_closed_tx));
+    let client = client();
+    let target = Target::plain(address.to_string());
+
+    assert_eq!(
+        send(&client, &target, Method::GET)
+            .await
+            .expect("first")
+            .as_ref(),
+        b"ok"
+    );
+    // The same swallow, but a GET is idempotent: the transport reconnects and
+    // the caller never sees the dead socket. Bind the replacement listener
+    // before issuing the request so the reconnect has somewhere to land.
+    listener_closed_rx.await.expect("listener closed");
+    let listener = TcpListener::bind(address).await.expect("rebind");
+    let replacement = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buffer = [0u8; 1024];
+        let _ = socket.read(&mut buffer).await.expect("read");
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nagain")
+            .await
+            .expect("response");
+    });
+    assert_eq!(
+        send(&client, &target, Method::GET)
+            .await
+            .expect("replayed")
+            .as_ref(),
+        b"again"
+    );
+    server.await.expect("join");
+    replacement.await.expect("join");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -279,11 +388,11 @@ async fn a_streaming_attempt_produces_a_derivable_trace() {
     // Derived scopes.
     assert!(derived.ttfb_us.is_measured());
     assert!(derived.first_byte_us.is_measured());
-    assert!(derived.ttft_us.is_measured());
-    assert!(derived.server_ttft_us.is_measured());
+    assert!(derived.first_payload_us.is_measured());
+    assert!(derived.frame_to_payload_us.is_measured());
     assert!(derived.e2e_us.is_measured());
     assert!(derived.tail_us.is_measured());
-    assert!(derived.stream_us.value().expect("span") > 0);
+    assert!(derived.payload_span_us.value().expect("span") > 0);
 
     // The estimator must agree with the cadence the trace itself recorded. The
     // scripted server's true interval is 5 ms of sleep plus the write cost, so
@@ -292,7 +401,7 @@ async fn a_streaming_attempt_produces_a_derivable_trace() {
     let token_times: Vec<u64> = trace
         .log
         .iter()
-        .filter(|event| event.kind == EventKind::OutputToken)
+        .filter(|event| event.kind == EventKind::Payload)
         .map(|event| event.at_ns)
         .collect();
     assert_eq!(token_times.len(), CHUNKS);
@@ -300,7 +409,7 @@ async fn a_streaming_attempt_produces_a_derivable_trace() {
     let expected = (CHUNKS - 1) as f64 * 1_000_000_000.0 / span as f64;
     // One rate: tokens over the recorded span. The ledger divides; the trace
     // supplies the span, and this asserts the span tracks the scripted cadence.
-    let span_us = derived.stream_us.value().expect("stream span");
+    let span_us = derived.payload_span_us.value().expect("stream span");
     let tps = CHUNKS as f64 * 1_000_000.0 / span_us as f64;
     assert!(
         (tps - expected).abs() / expected < 0.05,
@@ -420,7 +529,7 @@ async fn a_pooled_reuse_is_attributed_rather_than_charged_to_the_peer() {
     }
     // The request itself was still fully measured.
     assert!(second_derived.ttfb_us.is_measured());
-    assert!(second_derived.ttft_us.is_measured());
+    assert!(second_derived.first_payload_us.is_measured());
 
     let _ = server.await;
 }

@@ -28,6 +28,10 @@ pub enum H3Error {
     #[error("http3 connection closed with {code:#x}: {message}")]
     Connection { code: u64, message: String },
 
+    /// The peer sent `GOAWAY` indicating streams at or above `id` were not processed.
+    #[error("http3 connection received GOAWAY (id {id})")]
+    GoAway { id: u64 },
+
     /// HTTP request construction or validation failed.
     #[error("http error: {0}")]
     Http(#[from] http::Error),
@@ -72,6 +76,11 @@ impl Diagnose for H3Error {
                 } else {
                     RetryVerdict::Terminal
                 },
+            ),
+            Self::GoAway { .. } => (
+                DiagnosticCode::EGRESS_H3_FAILED,
+                DiagnosticPhase::Http3,
+                RetryVerdict::Retryable,
             ),
             Self::Timeout(_) => (
                 DiagnosticCode::EGRESS_H3_FAILED,

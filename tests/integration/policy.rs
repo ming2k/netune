@@ -118,18 +118,27 @@ fn recorder() -> TraceCollector {
 }
 
 async fn send(
-    client: &Client<TcpConnector>,
+    client: &Client,
     address: &str,
     path: &str,
     method: Method,
     headers: &[(&str, &str)],
     body: Option<&[u8]>,
 ) -> (netune::Response, TraceCollector) {
-    let recorder = recorder();
     let mut head = RequestHead::new(method, path);
     for (name, value) in headers {
         head = head.with_header(name, *value);
     }
+    send_head(client, address, head, body).await
+}
+
+async fn send_head(
+    client: &Client,
+    address: &str,
+    head: RequestHead,
+    body: Option<&[u8]>,
+) -> (netune::Response, TraceCollector) {
+    let recorder = recorder();
     let response = client
         .send_traced(
             &Target::plain(address),
@@ -142,7 +151,7 @@ async fn send(
     (response, recorder)
 }
 
-fn client() -> Client<TcpConnector> {
+fn client() -> Client {
     Client::new(
         TcpConnector::new(),
         Pool::default(),
@@ -223,8 +232,7 @@ async fn an_unknown_encoding_is_refused() {
             None,
         )
         .await
-        .err()
-        .expect("unsupported encoding");
+        .expect_err("unsupported encoding");
     assert_eq!(error.class(), "encoding");
     let _ = server.await;
 }
@@ -374,6 +382,47 @@ async fn credentials_do_not_follow_a_cross_origin_redirect() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn raw_wire_credentials_do_not_follow_a_cross_origin_redirect() {
+    let (listener_a, address_a) = listener().await;
+    let (listener_b, address_b) = listener().await;
+    let seen_a = Arc::new(Mutex::new(Vec::new()));
+    let seen_b = Arc::new(Mutex::new(Vec::new()));
+    let location = format!("http://{address_b}/other");
+    let server_a = tokio::spawn(serve(
+        listener_a,
+        vec![Reply::status(302, &[("location", &location)])],
+        Arc::clone(&seen_a),
+    ));
+    let server_b = tokio::spawn(serve(
+        listener_b,
+        vec![Reply::body(b"other", &[])],
+        Arc::clone(&seen_b),
+    ));
+
+    // `raw_headers` is the exact wire form; it must be sanitized too, or the
+    // normalized map would look clean while the credential still goes out.
+    let head = RequestHead::new(Method::GET, "/start")
+        .with_raw_header("Authorization", "Bearer secret")
+        .with_raw_header("Cookie", "a=1");
+    let (mut response, _) = send_head(&client(), &address_a, head, None).await;
+    assert_eq!(
+        &response.body.read_to_end().await.expect("body")[..],
+        b"other"
+    );
+
+    let seen_a = seen_a.lock().expect("seen_a").clone();
+    let seen_b = seen_b.lock().expect("seen_b").clone();
+    assert!(
+        seen_a[0].to_ascii_lowercase().contains("authorization"),
+        "the original request carried the credential"
+    );
+    let forwarded = seen_b[0].to_ascii_lowercase();
+    assert!(!forwarded.contains("authorization"), "{:?}", seen_b[0]);
+    assert!(!forwarded.contains("cookie"), "{:?}", seen_b[0]);
+    let _ = (server_a.await, server_b.await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_redirect_loop_is_refused() {
     let (listener, address) = listener().await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -392,8 +441,7 @@ async fn a_redirect_loop_is_refused() {
             None,
         )
         .await
-        .err()
-        .expect("must give up");
+        .expect_err("must give up");
     assert_eq!(error.class(), "redirect");
     assert!(!error.is_retryable());
     let _ = server.await;

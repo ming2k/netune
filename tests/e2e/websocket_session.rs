@@ -74,7 +74,7 @@ fn test_target(port: u16) -> Target {
     Target::plain(format!("127.0.0.1:{port}"))
 }
 
-fn test_client() -> Client<TcpConnector> {
+fn test_client() -> Client {
     Client::new(
         TcpConnector::new(),
         Pool::default(),

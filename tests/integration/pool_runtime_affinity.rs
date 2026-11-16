@@ -53,7 +53,7 @@ async fn serve(listener: TcpListener) {
     }
 }
 
-async fn one_request(client: &Client<TcpConnector>, target: &Target) -> u16 {
+async fn one_request(client: &Client, target: &Target) -> u16 {
     let recorder = TraceCollector::start(64);
     let head = RequestHead::new(http::Method::GET, "/");
     let mut response = client

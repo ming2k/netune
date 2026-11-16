@@ -27,12 +27,12 @@ pub enum Reason {
     TransportBatched = 2,
     /// The response was never validated (failed or interrupted attempt).
     ResponseNotValidated = 3,
-    /// Fewer than two output events: there is no span to divide by.
-    FewerThanTwoOutputEvents = 4,
-    /// Too few tokens or batches for a rate to mean anything.
+    /// Fewer than two payload events: there is no span to divide by.
+    FewerThanTwoPayloadEvents = 4,
+    /// Too few samples for a rate to mean anything.
     InsufficientSamples = 5,
     /// The estimate exceeds the physically plausible ceiling, which indicates
-    /// burst arrival rather than decode.
+    /// burst arrival rather than steady production.
     ImplausibleRate = 6,
     /// `TCP_INFO` is unavailable (non-Linux, or the trace is L0).
     TcpInfoUnavailable = 7,
@@ -63,7 +63,7 @@ impl Reason {
             Self::ConnectionReused => "connection reused",
             Self::TransportBatched => "transport batched",
             Self::ResponseNotValidated => "not validated",
-            Self::FewerThanTwoOutputEvents => "fewer than two output events",
+            Self::FewerThanTwoPayloadEvents => "fewer than two payload events",
             Self::InsufficientSamples => "insufficient samples",
             Self::ImplausibleRate => "implausible rate",
             Self::TcpInfoUnavailable => "TCP_INFO unavailable",
@@ -249,7 +249,7 @@ mod tests {
             Reason::ConnectionReused,
             Reason::TransportBatched,
             Reason::ResponseNotValidated,
-            Reason::FewerThanTwoOutputEvents,
+            Reason::FewerThanTwoPayloadEvents,
             Reason::InsufficientSamples,
             Reason::ImplausibleRate,
             Reason::TcpInfoUnavailable,

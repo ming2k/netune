@@ -1,6 +1,6 @@
 use super::*;
 use crate::log::EventLog;
-use crate::trace::{AttemptRef, ConnectionInfo, EndpointRef, Fidelity, TraceId};
+use crate::trace::{ConnectionInfo, Fidelity, TraceId};
 
 const MS: u64 = 1_000_000;
 
@@ -10,16 +10,7 @@ fn trace(log: EventLog) -> RequestTrace {
             TraceId::new("ingress"),
             crate::trace::Direction::Ingress,
         ),
-        attempt: AttemptRef {
-            round: 0,
-            turn: 0,
-            attempt: 0,
-        },
-        endpoint: EndpointRef {
-            provider: String::new(),
-            model: String::new(),
-            authority: "0.0.0.0:8080".into(),
-        },
+        authority: "0.0.0.0:8080".into(),
         connection: ConnectionInfo::default(),
         identity: crate::ConnectionIdentity::default(),
         schema_version: crate::TRACE_SCHEMA_VERSION,

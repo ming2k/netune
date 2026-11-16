@@ -1,9 +1,10 @@
 //! The event vocabulary.
 //!
-//! Kinds are protocol-neutral: they describe what the *transport* did (a read,
-//! a head, a chunk boundary) and what the *origin* said (a protocol frame, an
-//! output token), never how a particular provider spells it. Adding HTTP/2 or a
-//! new provider therefore adds frame classes, not a new event model.
+//! Kinds are protocol- and consumer-neutral: they describe what the
+//! *transport* did (a read, a head, a chunk boundary) and what the caller
+//! reported about the *application stream* riding on it (a frame, a counted
+//! unit of payload). Nothing here names a consumer's domain; a consumer keeps
+//! its own labels beside the trace, not inside it.
 
 /// What an [`crate::Event`] records.
 ///
@@ -14,7 +15,7 @@
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum EventKind {
-    /// Origin of the trace: the request left the harness. Always at offset 0.
+    /// Origin of the trace: the caller dispatched the request. Always at offset 0.
     Dispatch = 0,
     /// Name resolution begins / ends. Absent on a reused connection.
     DnsStart = 1,
@@ -47,12 +48,12 @@ pub enum EventKind {
     Trailers = 16,
     /// Response body fully consumed.
     BodyEnd = 17,
-    /// One origin-emitted protocol frame. `a` = [`FrameClass`] code.
+    /// One application-level frame the peer emitted. `a` = [`FrameClass`] code.
     ProtocolFrame = 18,
-    /// One output-bearing event: `a` = tokens carried (text, reasoning or
-    /// tool-call payload, counted by the caller).
-    OutputToken = 19,
-    /// The response was validated by the harness; the attempt is complete.
+    /// Application payload arrived: `a` = units carried, in whatever unit the
+    /// caller counts (messages, records, bytes of decoded content).
+    Payload = 19,
+    /// The caller accepted the response; the attempt is complete.
     Validated = 20,
     /// A terminal failure observed at the transport or protocol layer.
     /// `a` = [`crate::DiagnosticCode`] raw value, `b` = diagnostic sequence in
@@ -81,9 +82,9 @@ pub enum EventKind {
     /// the socket that was discarded.
     ConnectStaleDiscarded = 28,
     /// One WebSocket wire frame crossed the socket boundary (in either
-    /// direction). `a` = [`FrameClass`]-style payload class code (client roles
-    /// reuse the same vocabulary; ping/pong/close map to `KeepAlive`,
-    /// text/binary to their data classes). `b` = payload bytes carried.
+    /// direction). `a` = [`FrameClass`] code (ping/pong map to `KeepAlive`, close
+    /// to `Close`, text/binary to their data classes). `b` = payload bytes
+    /// carried.
     ///
     /// Recorded per *frame*, not per message: a fragmented message's parts
     /// stay individually visible, so a trace can distinguish one flush of two
@@ -105,7 +106,7 @@ pub enum EventKind {
     /// 0 of an ingress attempt, and never present in an egress one.
     ///
     /// The two directions have separate origins on purpose. An egress trace is
-    /// anchored on `Dispatch` — the harness deciding to send — while an ingress
+    /// anchored on `Dispatch` — the caller deciding to send — while an ingress
     /// trace is anchored on the kernel handing over a socket, so no ingress
     /// timing can be silently measured against a client's clock.
     IngressDispatch = 32,
@@ -180,7 +181,7 @@ impl EventKind {
             16 => Self::Trailers,
             17 => Self::BodyEnd,
             18 => Self::ProtocolFrame,
-            19 => Self::OutputToken,
+            19 => Self::Payload,
             20 => Self::Validated,
             21 => Self::Error,
             22 => Self::Retry,
@@ -290,11 +291,12 @@ impl TimeSource {
     }
 }
 
-/// What an origin protocol frame is, at the granularity a trace needs.
+/// What one application-level frame is, at the granularity a trace needs.
 ///
-/// Only the distinction that changes a metric's meaning is kept: whether the
-/// origin had *started responding* (a frame of any class) and whether it was
-/// still preamble. Provider-specific shapes map onto these classes.
+/// The classes are transport-neutral: they say whether a frame opened an
+/// exchange, carried data, carried bookkeeping, proved liveness or closed. A
+/// consumer with a richer vocabulary (an event-stream schema, an RPC framing)
+/// maps its shapes onto these and keeps its own labels outside the trace.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -302,18 +304,17 @@ impl TimeSource {
 pub enum FrameClass {
     #[default]
     Unknown = 0,
-    /// Preamble: `message_start`, a role-only chunk, a stream-open marker.
-    /// Emitted before the origin begins generating content.
+    /// Preamble: a frame that opens the exchange and carries no payload yet.
     Open = 1,
-    /// Usage / accounting frame.
-    Usage = 2,
-    /// Assistant text.
+    /// Bookkeeping about the exchange (accounting, status), not payload.
+    Metadata = 2,
+    /// Textual payload.
     Text = 3,
-    /// Reasoning / thinking text.
-    Reasoning = 4,
-    /// Tool-call payload.
-    Tool = 5,
-    /// A keep-alive or empty frame: proves liveness, carries no output.
+    /// Binary payload.
+    Binary = 4,
+    /// The frame that ends the exchange.
+    Close = 5,
+    /// A keep-alive or empty frame: proves liveness, carries no payload.
     KeepAlive = 6,
 }
 
@@ -326,10 +327,10 @@ impl FrameClass {
         Some(match code {
             0 => Self::Unknown,
             1 => Self::Open,
-            2 => Self::Usage,
+            2 => Self::Metadata,
             3 => Self::Text,
-            4 => Self::Reasoning,
-            5 => Self::Tool,
+            4 => Self::Binary,
+            5 => Self::Close,
             6 => Self::KeepAlive,
             _ => return None,
         })
@@ -442,10 +443,10 @@ impl Event {
         }
     }
 
-    /// The tokens carried, for [`EventKind::OutputToken`].
-    pub const fn tokens(self) -> Option<u32> {
+    /// The caller-counted payload units, for [`EventKind::Payload`].
+    pub const fn units(self) -> Option<u32> {
         match self.kind {
-            EventKind::OutputToken => Some(self.a),
+            EventKind::Payload => Some(self.a),
             _ => None,
         }
     }
@@ -495,7 +496,7 @@ mod tests {
             (0u8, EventKind::Dispatch),
             (10, EventKind::Read),
             (18, EventKind::ProtocolFrame),
-            (19, EventKind::OutputToken),
+            (19, EventKind::Payload),
             (20, EventKind::Validated),
             (23, EventKind::TimeJump),
             (29, EventKind::WsFrame),
@@ -535,16 +536,16 @@ mod tests {
         };
         assert_eq!(read.bytes(), Some(1448));
         assert_eq!(read.time_source(), Some(TimeSource::KernelSoftware));
-        assert_eq!(read.tokens(), None);
+        assert_eq!(read.units(), None);
 
         let token = Event {
             at_ns: 9,
             stream: 0,
-            kind: EventKind::OutputToken,
+            kind: EventKind::Payload,
             a: 3,
             b: 0,
         };
-        assert_eq!(token.tokens(), Some(3));
+        assert_eq!(token.units(), Some(3));
         assert_eq!(token.frame_class(), None);
 
         let frame = Event {

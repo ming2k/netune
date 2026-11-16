@@ -1,166 +1,44 @@
-//! The client: one request, fully traced, policy applied.
+//! The client: one request, planned, carried, observed.
 //!
-//! `Client::send` owns the request lifecycle — take a pooled connection or
-//! establish one, write the request, parse the head, follow redirects, then
-//! stream a decoded body — marking each milestone in the attempt's
-//! [`TraceCollector`]. It owns no provider knowledge and no retry policy: those live
-//! above (the harness).
+//! [`Client`] owns what is true of every request regardless of how it
+//! travels: resolving the plan before anything is opened, the trace-id
+//! header, the redirect chain, the response's decoding and bounds, and the
+//! attempt's evidence. It does not own a connection, a pool or a protocol.
+//! Those sit behind [`RoundTrip`], so the same client drives real connections
+//! ([`Wire`]) and scripted ones ([`crate::mock::Mock`]) through identical
+//! code, and a mocked attempt leaves the same kind of trace a real one does.
 //!
-//! Redirects are followed here rather than by a wrapper because a redirect is a
-//! property of the *attempt*: the trace must show the hops, and only the final
-//! response may mark `HeadComplete`, or TTFT would be measured against a 302.
+//! It owns no retry policy either: the transport absorbs a dead pooled socket
+//! where that is provably safe, and every other retry is the caller's call.
+//!
+//! Redirects are followed here rather than by a wrapper because a redirect is
+//! a property of the *attempt*: the trace must show the hops, and only the
+//! final response may mark `HeadComplete`, or time-to-first-byte would be
+//! measured against a 302.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
-#[cfg(feature = "http2")]
-use http::HeaderMap;
-use http::{Method, StatusCode};
-use netune_http1::{BodyKind, Http1Reader, IncomingResponse, Limits, RequestHead, write_request};
-#[cfg(feature = "http2")]
-use netune_http2::{H2ClientConnection, H2Fingerprint, H2ResponseEvent, H2ResponseStream};
+use http::Method;
+use netune_http1::{IncomingResponse, Limits, RequestHead};
 use netune_trace::{
-    Alpn, ConnectionIdentity, Counters, DiagnosticCode, DiagnosticPhase, DiagnosticRecord,
-    EventKind, Fidelity, NoTap, Ring, TRACE_SCHEMA_VERSION, Tap, TraceCollector, TraceMeta,
-    TracePropagation, TraceSink,
+    DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EventKind, Fidelity, TraceCollector,
+    TracePropagation, TraceSink, TraceSnapshot,
 };
 
-use crate::connect::{Connector, Target};
+use crate::body::{Body, BodyContext};
+use crate::connect::{Connector, HttpProtocol, Target};
 use crate::decompress::Decoder;
 use crate::error::{AttemptError, NetError};
-use crate::pool::{IdleConnection, Pool, PoolKey, Protocol};
-use crate::profile::{ConnectionPlan, H1Registry, H1WireProfile};
+use crate::exchange::{Attempt, ObservationLevel, Request, RequestBody, RoundTrip};
+use crate::pool::{Pool, PoolKey};
+use crate::profile::{ConnectionPlan, H1Registry, H1WireProfile, Http2Mode, PlannedTransport};
 #[cfg(feature = "http2")]
 use crate::profile::{H2Registry, H2RequestRegistry, ProfileId};
-use crate::tcp_info::{SAMPLE_INTERVAL, Sampler, start as start_sampler};
-#[cfg(feature = "ws")]
-use netune_io::RingIo;
-use netune_io::TimedIo;
-
-/// Split a request head into the HTTP/2 authority and its regular headers.
-///
-/// HTTP/2 carries the target authority in `:authority`; a client that generates
-/// HTTP/2 requests directly SHOULD use that instead of `Host` (RFC 9113
-/// §8.3.1). Some origins enforce the reading strictly: Google's frontend
-/// answers a request carrying both with `RST_STREAM(PROTOCOL_ERROR)` (error
-/// code 1), which surfaces as a request failure before a response exists. A
-/// caller that set `Host` chose an authority, so it is promoted into
-/// `:authority` rather than forwarded.
-///
-/// Regular header names are lowercased because HTTP/2 requires lowercase
-/// names, even when `raw_headers` preserved caller casing for an HTTP/1.1
-/// fingerprint.
+use crate::redirect::{redirect_location, redirect_to_get, resolve_location};
+use crate::wire::Wire;
 #[cfg(feature = "http2")]
-fn h2_request_parts(
-    head: &RequestHead,
-    fallback_authority: &str,
-) -> (String, Vec<(String, String)>) {
-    let mut authority: Option<String> = None;
-    let mut headers = Vec::new();
-    match &head.raw_headers {
-        Some(raw) => {
-            for (name, value) in raw {
-                if name.eq_ignore_ascii_case("host") {
-                    authority.get_or_insert_with(|| value.clone());
-                } else {
-                    headers.push((name.to_ascii_lowercase(), value.clone()));
-                }
-            }
-        }
-        None => {
-            for (name, value) in head.headers.iter() {
-                if name == http::header::HOST {
-                    if let Ok(value) = value.to_str() {
-                        authority.get_or_insert_with(|| value.to_string());
-                    }
-                } else {
-                    headers.push((
-                        name.as_str().to_string(),
-                        value.to_str().unwrap_or_default().to_string(),
-                    ));
-                }
-            }
-        }
-    }
-    (
-        authority.unwrap_or_else(|| fallback_authority.to_string()),
-        headers,
-    )
-}
-
-/// Map an HTTP/2 codec failure onto the transport's error taxonomy.
-///
-/// The distinction matters: a socket that died while no response head existed
-/// yet is a *stale pooled connection*, and [`NetError::is_stale_connection`]
-/// decides whether the attempt may be safely replayed. Reporting every codec
-/// failure as [`NetError::Protocol`] would turn a recycled-but-dead HTTP/2
-/// connection into a user-visible provider failure.
-#[cfg(feature = "http2")]
-fn h2_error(context: &str, error: netune_http2::H2Error) -> NetError {
-    use netune_http2::error_code;
-    match error {
-        netune_http2::H2Error::Io(error) => NetError::Io(error),
-        netune_http2::H2Error::UnexpectedEof => {
-            NetError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
-        }
-        // Before the response head, both of these say the peer did not process
-        // this stream: a fresh connection may replay it safely. They are not
-        // `Protocol`: a pooled HTTP/2 connection that starts draining must not
-        // turn into a user-visible generation failure.
-        netune_http2::H2Error::GoAway { error_code, .. } if context == "request" => {
-            NetError::RetryableProtocol(format!(
-                "HTTP/2 {context}: peer closed with GOAWAY (error code {error_code})"
-            ))
-        }
-        netune_http2::H2Error::StreamReset {
-            stream_id,
-            error_code,
-        } if context == "request" && error_code == error_code::REFUSED_STREAM => {
-            NetError::RetryableProtocol(format!("HTTP/2 {context}: stream {stream_id} was refused"))
-        }
-        other => NetError::Protocol(format!("HTTP/2 {context}: {other}")),
-    }
-}
-
-/// Record the H2 failure content that the narrow error string drops.
-///
-/// GOAWAY debug data and a stream reset code are the first facts an operator
-/// needs; they are cold-path fields, not event payload.
-#[cfg(feature = "http2")]
-fn h2_error_traced(
-    context: &str,
-    error: netune_http2::H2Error,
-    recorder: &TraceCollector,
-) -> NetError {
-    let mut record = DiagnosticRecord::new(DiagnosticCode::EGRESS_HTTP2_PROTOCOL)
-        .with_phase(DiagnosticPhase::Http2)
-        .with_message(format!("HTTP/2 {context}: {error}"));
-    match &error {
-        netune_http2::H2Error::GoAway {
-            error_code,
-            debug_data,
-        } => {
-            record = record
-                .with_field("goaway_code", error_code.to_string())
-                .with_field(
-                    "debug_data",
-                    String::from_utf8_lossy(debug_data).into_owned(),
-                );
-        }
-        netune_http2::H2Error::StreamReset {
-            stream_id,
-            error_code,
-        } => {
-            record = record
-                .with_field("stream_id", stream_id.to_string())
-                .with_field("reset_code", error_code.to_string());
-        }
-        _ => {}
-    }
-    recorder.record_error(record);
-    h2_error(context, error)
-}
+use netune_http2::H2Fingerprint;
 
 /// How the next attempt observes its byte path.
 ///
@@ -230,12 +108,12 @@ impl Observation {
         Self::Traced(TraceConfig::new(capacity))
     }
 
-    /// What fidelity the selected tap can truthfully claim.
-    pub const fn fidelity(&self) -> Fidelity {
+    /// The level a transport is asked to observe at.
+    pub const fn level(&self) -> ObservationLevel {
         match self {
-            Self::Off => Fidelity::none(),
-            Self::Counters => Fidelity::l0(),
-            Self::Traced(_) => Fidelity::l1(),
+            Self::Off => ObservationLevel::Off,
+            Self::Counters => ObservationLevel::Counters,
+            Self::Traced(_) => ObservationLevel::Traced,
         }
     }
 }
@@ -263,6 +141,23 @@ pub struct ClientConfig {
     /// reports the stall as a connection failure. Ignored on a pooled
     /// connection, which already completed the exchange.
     pub h2_handshake_timeout: Option<Duration>,
+    /// Bound on the wait between the request being written and the response
+    /// head arriving.
+    ///
+    /// This is the one phase of an exchange nothing else bounds: the
+    /// connection is up, the request is sent, and the peer simply does not
+    /// answer. Expiry is a [`NetError::Timeout`] returned with the attempt's
+    /// trace, which an outer `tokio::time::timeout` cannot give: cancelling
+    /// the future discards the evidence along with it.
+    ///
+    /// Default `None`, because how long an origin may think before its first
+    /// byte is a property of the origin, not of the transport.
+    pub response_head_timeout: Option<Duration>,
+    /// Bound on the silence between two reads of a response body.
+    ///
+    /// An idle bound rather than a total one: a long stream is never cut for
+    /// being long, only for going quiet. Default `None`.
+    pub body_idle_timeout: Option<Duration>,
     /// The default observation policy for [`Client::request`].
     pub observation: Observation,
 }
@@ -275,160 +170,99 @@ impl Default for ClientConfig {
             max_redirects: 5,
             enable_http2: false,
             h2_handshake_timeout: Some(crate::handshake::DEFAULT_HANDSHAKE_TIMEOUT),
+            response_head_timeout: None,
+            body_idle_timeout: None,
             observation: Observation::Counters,
         }
     }
 }
 
-/// HTTP/1.1 body reader variants, one per monomorphized tap type.
-///
-/// The enum exists only at the body boundary; `TimedIo` and the codec inside
-/// each variant are monomorphized and carry no trait object.
-enum Http1Body {
-    Off(Http1Reader<TimedIo<Box<dyn crate::connect::Transport>, NoTap>>),
-    Counters(Http1Reader<TimedIo<Box<dyn crate::connect::Transport>, Counters>>),
-    Traced(Http1Reader<TimedIo<Box<dyn crate::connect::Transport>, Ring>>),
+/// A parsed response: head plus a decoded, observed body stream.
+#[derive(Debug)]
+pub struct Response {
+    pub head: IncomingResponse,
+    pub body: Body,
 }
 
-/// The observation artifact attached to a response body.
-#[derive(Debug, Clone, Copy)]
-enum BodyObservation {
-    Off,
-    Counters(Option<Counters>),
-    /// A traced body, with the fidelity its actual tap produced. HTTP/1 owns a
-    /// `Ring` syscall tap; HTTP/2 currently records control/frame events only,
-    /// so it reports L0 rather than claiming a byte timeline it does not have.
-    Traced(Fidelity),
-}
-
-/// The internal bridge between the runtime policy and a concrete tap type.
-///
-/// This is deliberately private: a caller selects [`Observation`], and the
-/// compiler monomorphizes one of three implementations. There is no public
-/// `Box<dyn Tap>` seam.
-trait ClientTap: Tap + Sized {
-    fn create(observation: &Observation, origin: Instant, meta: TraceMeta) -> Self;
-    fn wrap(reader: Http1Reader<TimedIo<Box<dyn crate::connect::Transport>, Self>>) -> Http1Body;
-    fn initial() -> BodyObservation;
-}
-
-impl ClientTap for NoTap {
-    fn create(_observation: &Observation, _origin: Instant, _meta: TraceMeta) -> Self {
-        NoTap
-    }
-
-    fn wrap(reader: Http1Reader<TimedIo<Box<dyn crate::connect::Transport>, Self>>) -> Http1Body {
-        Http1Body::Off(reader)
-    }
-
-    fn initial() -> BodyObservation {
-        BodyObservation::Off
-    }
-}
-
-impl ClientTap for Counters {
-    fn create(_observation: &Observation, _origin: Instant, _meta: TraceMeta) -> Self {
-        Counters::default()
-    }
-
-    fn wrap(reader: Http1Reader<TimedIo<Box<dyn crate::connect::Transport>, Self>>) -> Http1Body {
-        Http1Body::Counters(reader)
-    }
-
-    fn initial() -> BodyObservation {
-        BodyObservation::Counters(None)
-    }
-}
-
-impl ClientTap for Ring {
-    fn create(observation: &Observation, origin: Instant, meta: TraceMeta) -> Self {
-        match observation {
-            Observation::Traced(config) => {
-                Ring::new_with_meta(origin, config.capacity, meta, config.sink.clone())
-            }
-            _ => Ring::new_with_meta(origin, crate::DEFAULT_TRACE_CAPACITY, meta, None),
-        }
-    }
-
-    fn wrap(reader: Http1Reader<TimedIo<Box<dyn crate::connect::Transport>, Self>>) -> Http1Body {
-        Http1Body::Traced(reader)
-    }
-
-    fn initial() -> BodyObservation {
-        BodyObservation::Traced(Fidelity::l1())
-    }
-}
-
-/// An HTTP/1.1 client over a connector and a pool.
-pub struct Client<C: Connector> {
-    connector: C,
-    pool: Pool,
+/// An HTTP client over any [`RoundTrip`].
+#[derive(Clone)]
+pub struct Client {
+    transport: Arc<dyn RoundTrip>,
     config: ClientConfig,
     h1_profiles: H1Registry,
     #[cfg(feature = "http2")]
     h2_profiles: H2Registry,
     #[cfg(feature = "http2")]
     h2_request_profiles: H2RequestRegistry,
+    #[cfg(feature = "http3")]
+    quic_profiles: netune_quic::profile::QuicProfileRegistry,
+    #[cfg(feature = "http3")]
+    h3_settings_profiles: netune_http3::H3SettingsRegistry,
+    #[cfg(feature = "http3")]
+    h3_request_profiles: netune_http3::H3RequestRegistry,
 }
 
-impl<C: Connector> Client<C> {
-    pub fn new(connector: C, pool: Pool, config: ClientConfig) -> Self {
+impl Client {
+    /// A client over real connections: `connector` opens them, `pool` keeps
+    /// them.
+    pub fn new<C: Connector + 'static>(connector: C, pool: Pool, config: ClientConfig) -> Self {
+        Self::with_transport(Wire::new(connector, pool), config)
+    }
+
+    /// A client over any transport: [`Wire`], a [`crate::mock::Mock`], or a
+    /// caller's own [`RoundTrip`].
+    pub fn with_transport(transport: impl RoundTrip, config: ClientConfig) -> Self {
         Self {
-            connector,
-            pool,
+            transport: Arc::new(transport),
             config,
             h1_profiles: H1Registry::default(),
             #[cfg(feature = "http2")]
             h2_profiles: H2Registry::default(),
             #[cfg(feature = "http2")]
             h2_request_profiles: H2RequestRegistry::default(),
+            #[cfg(feature = "http3")]
+            quic_profiles: netune_quic::profile::QuicProfileRegistry::default(),
+            #[cfg(feature = "http3")]
+            h3_settings_profiles: netune_http3::H3SettingsRegistry::default(),
+            #[cfg(feature = "http3")]
+            h3_request_profiles: netune_http3::H3RequestRegistry::default(),
         }
     }
 
-    pub fn pool(&self) -> &Pool {
-        &self.pool
+    /// The client's policy.
+    pub fn config(&self) -> &ClientConfig {
+        &self.config
     }
 
-    /// Whether this target selects HTTP/2, explicitly or by naming an H2
-    /// profile. A named H2 profile is an assertion that the request speaks H2.
-    fn wants_http2(&self, target: &Target) -> bool {
-        self.config.enable_http2 || self.forces_h2(target)
+    /// Whether this target selects HTTP/3 (explicitly or via H3/QUIC profiles).
+    fn wants_http3(target: &Target) -> bool {
+        target.protocol == HttpProtocol::Http3
+            || (target.protocol == HttpProtocol::Auto
+                && (target.identity.h3_profile.is_some()
+                    || target.identity.h3_settings_profile.is_some()
+                    || target.h3_request_profile.is_some()))
     }
 
-    /// Prior-knowledge H2: a mandate or an explicit H2 profile, independent of
-    /// ALPN. `enable_http2` alone only upgrades when ALPN actually negotiates h2.
-    fn forces_h2(&self, target: &Target) -> bool {
-        target.force_h2
-            || target.identity.h2_profile.is_some()
-            || target.h2_request_profile.is_some()
-    }
-
-    /// Complete the HTTP/2 preface and SETTINGS exchange under the configured
-    /// bound.
+    /// How this target relates to HTTP/2 when using TCP.
     ///
-    /// This is the phase between a verified TLS peer and a usable connection:
-    /// the peer has accepted the socket but has not yet shown it speaks HTTP/2.
-    /// It is bounded here, at the orchestrator, because the codec owns framing
-    /// and must not own clocks. The timeout covers the whole exchange, including
-    /// the peer's SETTINGS and ACK, and a stalled peer is never pooled.
-    #[cfg(feature = "http2")]
-    async fn http2_handshake(
-        &self,
-        stream: Box<dyn crate::connect::Transport>,
-        fingerprint: H2Fingerprint,
-        authority: &str,
-        recorder: &TraceCollector,
-    ) -> Result<H2ClientConnection<Box<dyn crate::connect::Transport>>, NetError> {
-        crate::handshake::bound(
-            self.config.h2_handshake_timeout,
-            DiagnosticPhase::Http2,
-            "HTTP/2 handshake",
-            authority,
-            recorder,
-            H2ClientConnection::handshake(stream, fingerprint),
-        )
-        .await?
-        .map_err(|error| h2_error_traced("handshake", error, recorder))
+    /// A mandate or a named HTTP/2 profile is prior knowledge, independent of
+    /// ALPN: a named profile is an assertion that the request speaks HTTP/2.
+    /// `enable_http2` alone only upgrades when ALPN actually negotiates `h2`.
+    fn http2_mode(&self, target: &Target) -> Http2Mode {
+        match target.protocol {
+            HttpProtocol::Http1 => Http2Mode::Off,
+            HttpProtocol::Http2 => Http2Mode::Force,
+            HttpProtocol::Http3 => Http2Mode::Off,
+            HttpProtocol::Auto => {
+                if target.identity.h2_profile.is_some() || target.h2_request_profile.is_some() {
+                    Http2Mode::Force
+                } else if self.config.enable_http2 {
+                    Http2Mode::Negotiate
+                } else {
+                    Http2Mode::Off
+                }
+            }
+        }
     }
 
     /// Register or replace an HTTP/1 request-header wire profile.
@@ -458,17 +292,41 @@ impl<C: Connector> Client<C> {
         self
     }
 
-    /// Resolve every choice for one request before a socket is opened.
+    /// Register or replace a QUIC transport profile for HTTP/3 requests.
+    #[cfg(feature = "http3")]
+    #[must_use]
+    pub fn with_quic_profile(mut self, profile: netune_quic::profile::QuicProfile) -> Self {
+        self.quic_profiles = self.quic_profiles.with_profile(profile);
+        self
+    }
+
+    /// Register or replace an HTTP/3 connection SETTINGS profile.
+    #[cfg(feature = "http3")]
+    #[must_use]
+    pub fn with_h3_settings_profile(mut self, profile: netune_http3::H3SettingsProfile) -> Self {
+        self.h3_settings_profiles = self.h3_settings_profiles.with_profile(profile);
+        self
+    }
+
+    /// Register or replace an HTTP/3 request-header profile.
+    #[cfg(feature = "http3")]
+    #[must_use]
+    pub fn with_h3_request_profile(mut self, profile: netune_http3::H3RequestProfile) -> Self {
+        self.h3_request_profiles = self.h3_request_profiles.with_profile(profile);
+        self
+    }
+
+    /// Resolve every choice for one request before anything is opened.
     ///
     /// The returned plan separates connection identity (pool key) from the
-    /// per-request wire profiles (H1 header order, H2 pseudo-header order).
-    /// Unknown profile names fail here, not after a handshake.
+    /// per-request wire profiles (H1 header order, H2 pseudo-header order, H3
+    /// header order). Unknown profile names fail here, not after a handshake.
     pub fn plan(&self, target: &Target) -> Result<ConnectionPlan, NetError> {
         // The authority is written into a `Host` header (HTTP/1.1) and a
-        // `:authority` field (HTTP/2), and a proxy CONNECT writes it into a
-        // request line. Validate it here, at the one choke point every request
-        // and every redirect hop passes through, so no target-construction path
-        // can smuggle a control byte onto the wire.
+        // `:authority` field (HTTP/2 and HTTP/3), and a proxy CONNECT writes it
+        // into a request line. Validate it here, at the one choke point every
+        // request and every redirect hop passes through, so no
+        // target-construction path can smuggle a control byte onto the wire.
         netune_http1::validate_host_field(target.authority.as_bytes()).map_err(|error| {
             NetError::Connect(crate::error::ConnectError::config(
                 DiagnosticPhase::Request,
@@ -484,14 +342,125 @@ impl<C: Connector> Client<C> {
 
         let mut identity = target.identity.clone();
         if identity.socket_shape.is_none() {
-            identity.socket_shape = self.connector.socket_shape();
+            identity.socket_shape = self.transport.socket_shape();
         }
         if identity.route.is_none() {
-            identity.route = self.connector.route_shape();
+            identity.route = self.transport.route_shape();
         }
 
+        if Self::wants_http3(target) {
+            if target.identity.h2_profile.is_some() || target.h2_request_profile.is_some() {
+                return Err(NetError::Connect(crate::error::ConnectError::config(
+                    DiagnosticPhase::Dispatch,
+                    "cannot combine HTTP/3 with HTTP/2 profiles on one Target",
+                )));
+            }
+            if target.tls_server_name().is_none() {
+                return Err(NetError::Connect(crate::error::ConnectError::config(
+                    DiagnosticPhase::Dispatch,
+                    "HTTP/3 requires a TLS server name on Target",
+                )));
+            }
+            #[cfg(not(feature = "http3"))]
+            {
+                return Err(NetError::Protocol(
+                    "HTTP/3 was requested but the `http3` feature is not compiled in".into(),
+                ));
+            }
+            #[cfg(feature = "http3")]
+            {
+                let quic_name = identity
+                    .h3_profile
+                    .as_deref()
+                    .unwrap_or("quic-default")
+                    .to_string();
+                let quic = self
+                    .quic_profiles
+                    .resolve(&quic_name)
+                    .map_err(|err| {
+                        NetError::Connect(crate::error::ConnectError::config(
+                            DiagnosticPhase::Dispatch,
+                            err.to_string(),
+                        ))
+                    })?
+                    .clone();
+                identity.h3_profile = Some(quic.name.to_string());
+
+                let settings_name = identity
+                    .h3_settings_profile
+                    .as_deref()
+                    .unwrap_or("default")
+                    .to_string();
+                let settings = self
+                    .h3_settings_profiles
+                    .resolve(&settings_name)
+                    .map_err(|err| {
+                        NetError::Connect(crate::error::ConnectError::config(
+                            DiagnosticPhase::Dispatch,
+                            err.to_string(),
+                        ))
+                    })?
+                    .clone();
+                settings.validate().map_err(|reason| {
+                    NetError::Connect(crate::error::ConnectError::config(
+                        DiagnosticPhase::Dispatch,
+                        reason,
+                    ))
+                })?;
+                identity.h3_settings_profile = Some(settings.name.clone());
+
+                let request_name = target
+                    .h3_request_profile
+                    .as_ref()
+                    .map_or("default", ProfileId::as_str);
+                let request = self
+                    .h3_request_profiles
+                    .resolve(request_name)
+                    .map_err(|err| {
+                        NetError::Connect(crate::error::ConnectError::config(
+                            DiagnosticPhase::Dispatch,
+                            err.to_string(),
+                        ))
+                    })?
+                    .clone();
+
+                return Ok(ConnectionPlan {
+                    target: target.clone(),
+                    identity,
+                    h1,
+                    transport: PlannedTransport::Http3 {
+                        quic,
+                        settings,
+                        request,
+                    },
+                });
+            }
+        }
+
+        if target.identity.h3_profile.is_some()
+            || target.identity.h3_settings_profile.is_some()
+            || target.h3_request_profile.is_some()
+        {
+            return Err(NetError::Connect(crate::error::ConnectError::config(
+                DiagnosticPhase::Dispatch,
+                "HTTP/3/QUIC profiles cannot be set on a non-HTTP/3 Target",
+            )));
+        }
+        if target.protocol == HttpProtocol::Http1
+            && (target.identity.h2_profile.is_some() || target.h2_request_profile.is_some())
+        {
+            return Err(NetError::Connect(crate::error::ConnectError::config(
+                DiagnosticPhase::Dispatch,
+                "HTTP/2 profiles cannot be set when Target requires HTTP/1.1",
+            )));
+        }
+
+        let http2 = self.http2_mode(target);
+
         #[cfg(feature = "http2")]
-        let h2 = if self.wants_http2(target) {
+        let h2 = if http2 == Http2Mode::Off {
+            None
+        } else {
             match &identity.h2_profile {
                 Some(id) => Some(
                     self.h2_profiles
@@ -509,18 +478,16 @@ impl<C: Connector> Client<C> {
                                  Client::with_h2_profile",
                             ))
                         })?;
-                    if self.forces_h2(target) {
+                    if http2 == Http2Mode::Force {
                         identity.h2_profile = Some(id.to_string());
                     }
                     Some(fingerprint.clone())
                 }
             }
-        } else {
-            None
         };
 
         #[cfg(not(feature = "http2"))]
-        if self.wants_http2(target) {
+        if http2 != Http2Mode::Off {
             return Err(NetError::Protocol(
                 "HTTP/2 was requested but the `http2` feature is not compiled in".into(),
             ));
@@ -539,55 +506,34 @@ impl<C: Connector> Client<C> {
             target: target.clone(),
             identity,
             h1,
-            #[cfg(feature = "http2")]
-            h2,
-            #[cfg(feature = "http2")]
-            h2_request,
+            transport: PlannedTransport::Tcp {
+                http2,
+                #[cfg(feature = "http2")]
+                h2,
+                #[cfg(feature = "http2")]
+                h2_request,
+            },
         })
     }
 
-    /// Pre-warm a connection for `target` into the idle pool if none exists.
+    /// Establish a connection for `target` ahead of need, if the transport
+    /// keeps connections and has none idle for it.
     ///
-    /// Runs DNS + TCP + TLS in advance so the next user request can start with
-    /// zero connection overhead (instant warm-pool hit). Returns `true` if a fresh
-    /// connection was opened, or `false` if an idle connection was already available.
+    /// Returns `true` if a connection was opened. A transport with nothing to
+    /// warm (a mock) answers `false`.
     pub async fn prewarm(&self, target: &Target) -> Result<bool, NetError> {
         let plan = self.plan(target)?;
-        let key = plan.pool_key();
-        if self.pool.idle_count(&key) > 0 {
-            return Ok(false);
-        }
         // Pre-warming is a pool operation, not an attempt: there is no consumer
         // for a trace of it, so it must not allocate one.
         let recorder = TraceCollector::disabled();
-        let established = self.connector.connect(target, &recorder).await?;
-
-        // Warm the connection in the protocol the next request will actually
-        // use; pooling an already-negotiated HTTP/2 socket as if it were
-        // HTTP/1.1 would hand it to the wrong writer.
-        #[cfg(feature = "http2")]
-        if self.forces_h2(target)
-            || (self.config.enable_http2 && established.alpn == Some(Alpn::H2))
-        {
-            let fp = plan.h2.ok_or_else(|| {
-                NetError::Protocol("HTTP/2 prewarm has no resolved H2 profile".into())
-            })?;
-            let h2 = self
-                .http2_handshake(established.stream, fp, &target.authority, &recorder)
-                .await?;
-            self.pool
-                .put_http2(&key, h2, established.local_port, established.socket);
-            return Ok(true);
-        }
-
-        self.pool.put_http1(
-            &key,
-            established.stream,
-            BytesMut::new(),
-            established.local_port,
-            established.socket,
-        );
-        Ok(true)
+        self.transport
+            .prewarm(Attempt {
+                plan: &plan,
+                recorder: &recorder,
+                observation: ObservationLevel::Off,
+                config: &self.config,
+            })
+            .await
     }
 
     /// The pool key for a target: authority plus the whole connection identity.
@@ -610,7 +556,7 @@ impl<C: Connector> Client<C> {
         &self,
         target: &Target,
         head: RequestHead,
-        body: Option<Bytes>,
+        body: impl Into<RequestBody>,
     ) -> Result<Response, AttemptError> {
         self.send(target, head, body, self.config.observation.clone())
             .await
@@ -621,284 +567,520 @@ impl<C: Connector> Client<C> {
         &self,
         target: &Target,
         head: RequestHead,
-        body: Option<Bytes>,
+        body: impl Into<RequestBody>,
     ) -> Result<Response, AttemptError> {
         self.send(target, head, body, Observation::Off).await
     }
 
-    /// Send one request with an event-ring byte timeline.
+    /// Send one request with an event timeline.
     pub async fn request_traced(
         &self,
         target: &Target,
         head: RequestHead,
-        body: Option<Bytes>,
+        body: impl Into<RequestBody>,
         config: TraceConfig,
     ) -> Result<Response, AttemptError> {
         self.send(target, head, body, Observation::Traced(config))
             .await
     }
 
-    /// Establish an upgraded, untraced client WebSocket stream to `target`.
-    ///
-    /// Pass an explicit recorder through [`Client::connect_ws_traced`] when the
-    /// caller wants control and frame events.
-    #[cfg(feature = "ws")]
-    pub async fn connect_ws(
+    /// Send one request, following redirects, and return the final response.
+    pub async fn send(
         &self,
         target: &Target,
-        path: &str,
-    ) -> Result<crate::ws::WsStream<TimedIo<Box<dyn crate::connect::Transport>, NoTap>>, AttemptError>
-    {
-        let recorder = TraceCollector::disabled();
-        let evidence = recorder.clone();
-        match self
-            .connect_ws_with(
-                target,
-                path,
-                recorder,
-                |stream| TimedIo::new(stream, NoTap),
-                None,
-                crate::ws::WsHandshake::default(),
-            )
-            .await
-        {
-            Ok(stream) => Ok(stream),
-            Err(error) => Err(AttemptError::new(
-                error,
-                evidence.snapshot(Fidelity::none()),
-            )),
+        head: RequestHead,
+        body: impl Into<RequestBody>,
+        observation: Observation,
+    ) -> Result<Response, AttemptError> {
+        let (recorder, propagation) = match &observation {
+            Observation::Traced(config) => {
+                let mut recorder = TraceCollector::start(config.capacity);
+                if let Some(sink) = &config.sink {
+                    recorder = recorder.with_sink(Arc::clone(sink));
+                }
+                // Propagation changes the wire, so it is opt-in.
+                (recorder, config.propagation.header())
+            }
+            Observation::Off | Observation::Counters => (TraceCollector::disabled(), None),
+        };
+        self.attempt(
+            target,
+            recorder,
+            Request::new(head, body),
+            observation.level(),
+            propagation,
+        )
+        .await
+    }
+
+    /// Send one request with an explicitly supplied attempt recorder.
+    ///
+    /// This is for a consumer that already owns the control recorder (tests, a
+    /// relay, a caller that streams trace events). Socket events are merged
+    /// into the supplied recorder when the body reaches a terminal state.
+    pub async fn send_traced(
+        &self,
+        target: &Target,
+        recorder: TraceCollector,
+        head: RequestHead,
+        body: impl Into<RequestBody>,
+    ) -> Result<Response, AttemptError> {
+        self.attempt(
+            target,
+            recorder,
+            Request::new(head, body),
+            ObservationLevel::Traced,
+            None,
+        )
+        .await
+    }
+
+    /// Run one attempt and attach its evidence to a failure.
+    async fn attempt(
+        &self,
+        target: &Target,
+        recorder: TraceCollector,
+        mut request: Request,
+        level: ObservationLevel,
+        propagation: Option<&'static str>,
+    ) -> Result<Response, AttemptError> {
+        let outcome = match propagate(&mut request, propagation, &recorder) {
+            Ok(()) => self.follow(target, &recorder, request, level).await,
+            Err(error) => Err(error),
+        };
+        outcome.map_err(|error| AttemptError::new(error, evidence(&recorder, level)))
+    }
+
+    /// Carry the request, following redirects to the final response.
+    async fn follow(
+        &self,
+        target: &Target,
+        recorder: &TraceCollector,
+        mut request: Request,
+        level: ObservationLevel,
+    ) -> Result<Response, NetError> {
+        if !request.head.headers.contains_key(http::header::USER_AGENT) {
+            request.head.headers.insert(
+                http::header::USER_AGENT,
+                http::HeaderValue::from_str(&self.config.user_agent)
+                    .unwrap_or_else(|_| http::HeaderValue::from_static("netune")),
+            );
+        }
+        let origin = (target.tls_server_name().is_some(), target.authority.clone());
+        let mut target = target.clone();
+        let mut hops: u8 = 0;
+
+        loop {
+            let plan = self.plan(&target)?;
+            let response = self.hop(&plan, recorder, &request, level).await?;
+            let Some(location) = redirect_location(&response.head) else {
+                // Only the final head marks completion: a redirect's head must
+                // not become the anchor time-to-first-byte is measured against.
+                recorder.mark(EventKind::HeadComplete, 0, 0);
+                return Ok(response);
+            };
+            if hops >= self.config.max_redirects {
+                return Err(NetError::TooManyRedirects(self.config.max_redirects));
+            }
+            let status = response.head.status;
+            // The hop's connection is not reused: its body was never drained,
+            // so reusing it could desynchronise the stream.
+            drop(response);
+            recorder.mark(EventKind::Redirect, u32::from(status.as_u16()), 0);
+
+            let (next_target, next_path) =
+                resolve_location(&target, &request.head.target, &location)?;
+            let next_origin = (
+                next_target.tls_server_name().is_some(),
+                next_target.authority.clone(),
+            );
+            if next_origin != origin {
+                // Credentials never follow a redirect off the original origin.
+                // A scheme change is an origin change even when the authority
+                // is byte-identical: an `https -> http` redirect would
+                // otherwise put the same bearer token on the wire in clear.
+                for header in ["authorization", "cookie", "proxy-authorization"] {
+                    remove_header(&mut request.head, header);
+                }
+            }
+            if redirect_to_get(status) && request.head.method != Method::HEAD {
+                request.head.method = Method::GET;
+                remove_header(&mut request.head, "content-type");
+                remove_header(&mut request.head, "content-length");
+                request.body = RequestBody::Empty;
+            } else if !request.body.can_replay() {
+                return Err(NetError::Protocol(
+                    "cannot replay a streaming request body across a redirect".into(),
+                ));
+            }
+            request.head.target = next_path;
+            target = next_target;
+            hops += 1;
         }
     }
 
+    /// One round trip, wrapped into a decoded, bounded, observed response.
+    async fn hop(
+        &self,
+        plan: &ConnectionPlan,
+        recorder: &TraceCollector,
+        request: &Request,
+        level: ObservationLevel,
+    ) -> Result<Response, NetError> {
+        let exchange = self
+            .transport
+            .round_trip(
+                Attempt {
+                    plan,
+                    recorder,
+                    observation: level,
+                    config: &self.config,
+                },
+                request,
+            )
+            .await?;
+        let mut head = exchange.head;
+        let decoder = Decoder::from_encoding(
+            head.headers
+                .get(http::header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+        )?;
+        // A `Content-Encoding` this client decodes must not be decoded again
+        // by anyone downstream.
+        if !matches!(decoder, Decoder::Identity) {
+            head.headers.remove(http::header::CONTENT_ENCODING);
+        }
+        Ok(Response {
+            head,
+            body: Body::new(
+                exchange.body,
+                BodyContext {
+                    recorder: recorder.clone(),
+                    observation: level,
+                    identity: plan.identity.clone(),
+                    authority: plan.target.authority.clone(),
+                    connection: exchange.connection,
+                    decoder,
+                    max_decoded: self.config.limits.max_body_bytes,
+                    idle_timeout: self.config.body_idle_timeout,
+                },
+            ),
+        })
+    }
+}
+
+/// Remove a header from both the normalized map and the raw wire form.
+///
+/// A request that set `raw_headers` is serialized from that vector, so
+/// removing only from `headers` would leave the credential on the wire.
+fn remove_header(head: &mut RequestHead, name: &str) {
+    head.headers.remove(name);
+    if let Some(raw) = head.raw_headers.as_mut() {
+        raw.retain(|(candidate, _)| !candidate.eq_ignore_ascii_case(name));
+    }
+}
+
+/// Add the trace-id header when propagation was asked for.
+///
+/// The header is inserted before any request bytes are written and after the
+/// trace id exists. A caller-supplied header of the same name wins.
+fn propagate(
+    request: &mut Request,
+    propagation: Option<&'static str>,
+    recorder: &TraceCollector,
+) -> Result<(), NetError> {
+    let Some(name) = propagation else {
+        return Ok(());
+    };
+    let refuse = |message: String| {
+        recorder.record_error(
+            DiagnosticRecord::new(DiagnosticCode::EGRESS_CONFIG)
+                .with_phase(DiagnosticPhase::Request)
+                .with_message(message.clone()),
+        );
+        NetError::Protocol(message)
+    };
+    let header = http::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+        refuse(format!(
+            "invalid trace propagation header {name:?}: {error}"
+        ))
+    })?;
+    let present = match request.head.raw_headers.as_ref() {
+        Some(raw) => raw
+            .iter()
+            .any(|(candidate, _)| candidate.eq_ignore_ascii_case(header.as_str())),
+        None => request.head.headers.contains_key(&header),
+    };
+    if !present {
+        let id = recorder.meta().id.as_str().to_owned();
+        let value = http::HeaderValue::from_str(&id)
+            .map_err(|error| refuse(format!("invalid trace id header value: {error}")))?;
+        // A raw head is serialized from `raw_headers`, and HTTP/2/3 take
+        // their fields from it too; insert into both forms so propagation
+        // survives every wire writer.
+        if let Some(raw) = request.head.raw_headers.as_mut() {
+            raw.push((header.as_str().to_owned(), id));
+        }
+        request.head.headers.insert(header, value);
+    }
+    Ok(())
+}
+
+/// The evidence a failed attempt carries, at the fidelity it can prove.
+///
+/// A traced attempt is L1 only if socket events were actually recorded: a
+/// failure before any byte crossed a socket, or over a transport that has no
+/// socket, is protocol evidence and says so.
+pub(crate) fn evidence(recorder: &TraceCollector, level: ObservationLevel) -> TraceSnapshot {
+    match level {
+        ObservationLevel::Off => recorder.snapshot(Fidelity::none()),
+        ObservationLevel::Counters => recorder.snapshot(Fidelity::l0()),
+        ObservationLevel::Traced => {
+            let mut snapshot = recorder.snapshot(Fidelity::l0());
+            if snapshot.log.iter().any(|event| event.kind.is_byte_path()) {
+                snapshot.fidelity = Fidelity::l1();
+            }
+            snapshot
+        }
+    }
+}
+
+#[cfg(feature = "ws")]
+mod upgrade {
+    use bytes::BytesMut;
+    use http::{Method, StatusCode};
+    use netune_http1::{Http1Reader, RequestHead, write_request};
+    use netune_trace::{
+        DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EventKind, TraceCollector,
+    };
+
+    use super::{Client, evidence};
+    use crate::connect::Target;
+    use crate::error::{AttemptError, NetError};
+    use crate::exchange::{Attempt, ObservationLevel};
+    use crate::ws::{WsHandshake, WsIo, WsStream};
+
+    impl Client {
+        /// Establish an upgraded, untraced client WebSocket stream to `target`.
+        ///
+        /// Call [`Client::connect_ws_traced`] with a recorder when the caller
+        /// wants control, frame and socket events.
+        pub async fn connect_ws(
+            &self,
+            target: &Target,
+            path: &str,
+        ) -> Result<WsStream<WsIo>, AttemptError> {
+            let recorder = TraceCollector::disabled();
+            self.upgrade(target, path, &recorder, None, WsHandshake::default())
+                .await
+                .map_err(|error| {
+                    AttemptError::new(error, evidence(&recorder, ObservationLevel::Off))
+                })
+        }
+
+        /// Establish an upgraded client WebSocket stream with an explicit
+        /// trace recorder and negotiation knobs (`Sec-WebSocket-Protocol`
+        /// selection, extra request headers, size limits).
+        pub async fn connect_ws_traced(
+            &self,
+            target: &Target,
+            path: &str,
+            recorder: TraceCollector,
+            handshake: WsHandshake,
+        ) -> Result<WsStream<WsIo>, AttemptError> {
+            self.upgrade(target, path, &recorder, Some(recorder.clone()), handshake)
+                .await
+                .map_err(|error| {
+                    AttemptError::new(error, evidence(&recorder, ObservationLevel::Traced))
+                })
+        }
+
+        async fn upgrade(
+            &self,
+            target: &Target,
+            path: &str,
+            recorder: &TraceCollector,
+            stream_recorder: Option<TraceCollector>,
+            handshake: WsHandshake,
+        ) -> Result<WsStream<WsIo>, NetError> {
+            // Every terminal failure inside this function must close out the
+            // attempt's trace with an `Error` event: the trace must never end
+            // without an explanation.
+            let fail = |message: String| -> NetError {
+                recorder.record_error(
+                    DiagnosticRecord::new(DiagnosticCode::EGRESS_WS_FAILED)
+                        .with_phase(DiagnosticPhase::WebSocket)
+                        .with_message(message.clone()),
+                );
+                NetError::Protocol(message)
+            };
+
+            let plan = self.plan(target)?;
+            let observation = if stream_recorder.is_some() {
+                ObservationLevel::Traced
+            } else {
+                ObservationLevel::Off
+            };
+            let established = match self
+                .transport
+                .open_stream(Attempt {
+                    plan: &plan,
+                    recorder,
+                    observation,
+                    config: &self.config,
+                })
+                .await
+            {
+                Ok(established) => established,
+                Err(error) => {
+                    recorder.record_error(error.diagnostic());
+                    return Err(error);
+                }
+            };
+            // From here the stream returns its socket events to the recorder
+            // however it ends: a failed upgrade and a closed session alike.
+            let mut io = WsIo::new(established.stream, stream_recorder.clone());
+
+            let sec_key = netune_ws::generate_key();
+            let mut head = RequestHead::new(Method::GET, path)
+                .with_header(http::header::HOST, &target.authority)
+                .with_header(http::header::UPGRADE, "websocket")
+                .with_header(http::header::CONNECTION, "Upgrade")
+                .with_header("sec-websocket-key", &sec_key)
+                .with_header("sec-websocket-version", "13");
+
+            if !handshake.subprotocols.is_empty() {
+                // RFC 6455 §4.1: the client offers its preferences in order;
+                // the server picks one and echoes it, or none.
+                let offered = handshake.subprotocols.join(", ");
+                head.headers.insert(
+                    http::HeaderName::from_static("sec-websocket-protocol"),
+                    http::HeaderValue::from_str(&offered)
+                        .map_err(|e| fail(format!("Invalid subprotocol list: {e}")))?,
+                );
+            }
+            for (name, value) in &handshake.extra_headers {
+                let name = http::HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|e| fail(format!("Invalid extra header name {name:?}: {e}")))?;
+                let value = http::HeaderValue::from_str(value)
+                    .map_err(|e| fail(format!("Invalid extra header value {value:?}: {e}")))?;
+                head.headers.insert(name, value);
+            }
+
+            if !head.headers.contains_key(http::header::USER_AGENT) {
+                head.headers.insert(
+                    http::header::USER_AGENT,
+                    http::HeaderValue::from_str(&self.config.user_agent)
+                        .unwrap_or_else(|_| http::HeaderValue::from_static("netune")),
+                );
+            }
+            if !head.headers.contains_key(http::header::CONTENT_LENGTH)
+                && let Ok(value) = http::HeaderValue::from_str("0")
+            {
+                head.headers.insert(http::header::CONTENT_LENGTH, value);
+            }
+            plan.h1.apply(&mut head);
+
+            recorder.mark(EventKind::RequestWriteStart, 0, 0);
+            if let Err(error) = write_request(&mut io, &head, None).await {
+                return Err(fail(format!("WebSocket request write: {error}")));
+            }
+            recorder.mark(EventKind::RequestWriteEnd, 0, 0);
+
+            let mut reader =
+                Http1Reader::with_limits_and_buffer(io, self.config.limits, BytesMut::new());
+            let response_head = match crate::handshake::bound(
+                handshake.handshake_timeout,
+                DiagnosticPhase::WebSocket,
+                "WebSocket handshake",
+                &target.authority,
+                recorder,
+                reader.read_response_head(&Method::GET),
+            )
+            .await
+            {
+                Ok(Ok(head)) => head,
+                Ok(Err(error)) => {
+                    return Err(fail(format!("WebSocket upgrade response read: {error}")));
+                }
+                Err(error) => return Err(error),
+            };
+
+            if response_head.status != StatusCode::SWITCHING_PROTOCOLS {
+                return Err(fail(format!(
+                    "WebSocket upgrade rejected with status {}",
+                    response_head.status
+                )));
+            }
+
+            let is_upgrade = response_head
+                .headers
+                .get(http::header::UPGRADE)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.eq_ignore_ascii_case("websocket"))
+                .unwrap_or(false);
+            if !is_upgrade {
+                return Err(fail(
+                    "Missing or invalid Upgrade header in WebSocket handshake response".to_string(),
+                ));
+            }
+
+            let accept_header = response_head
+                .headers
+                .get("sec-websocket-accept")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            if let Err(error) = netune_ws::verify_handshake(&sec_key, accept_header) {
+                return Err(fail(error.to_string()));
+            }
+
+            // If we offered subprotocols, the server must echo exactly one of
+            // them back — or none, declining the negotiation.
+            if !handshake.subprotocols.is_empty() {
+                let echoed = response_head
+                    .headers
+                    .get("sec-websocket-protocol")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                if !echoed.is_empty()
+                    && !handshake
+                        .subprotocols
+                        .iter()
+                        .any(|offered| offered == echoed)
+                {
+                    return Err(fail(format!(
+                        "Server selected subprotocol {echoed:?}, which was not offered"
+                    )));
+                }
+            }
+
+            recorder.mark(EventKind::HeadComplete, 0, 0);
+
+            let (io, residual_buf) = reader.into_inner();
+            Ok(WsStream::new(
+                io,
+                residual_buf,
+                stream_recorder,
+                handshake.limits,
+            ))
+        }
+    }
+}
+
+#[cfg(not(feature = "ws"))]
+impl Client {
     /// WebSocket support was compiled out.
     ///
     /// Returns an error rather than a silent fallback: a caller that asked for
     /// an upgraded stream must be told the capability is absent, not handed a
     /// plain HTTP response it will misread.
-    #[cfg(not(feature = "ws"))]
     pub async fn connect_ws(&self, _target: &Target, _path: &str) -> Result<(), AttemptError> {
         Err(AttemptError::without_evidence(NetError::Protocol(
             "WebSocket support was not compiled in: enable the `ws` feature".into(),
         )))
     }
 
-    /// Establish an upgraded client WebSocket stream with explicit trace recorder and limits.
-    ///
-    /// `handshake` carries the optional negotiation knobs (`Sec-WebSocket-Protocol`
-    /// selection, extra request headers, size limits).
-    #[cfg(feature = "ws")]
-    pub async fn connect_ws_traced(
-        &self,
-        target: &Target,
-        path: &str,
-        recorder: TraceCollector,
-        handshake: crate::ws::WsHandshake,
-    ) -> Result<crate::ws::WsStream<RingIo<Box<dyn crate::connect::Transport>>>, AttemptError> {
-        let (origin, capacity, sink, meta) = (
-            recorder.origin(),
-            recorder.capacity(),
-            recorder.sink(),
-            recorder.meta(),
-        );
-        let ring = Ring::new_with_meta(origin, capacity, meta, sink);
-        let recorder_for_io = recorder.clone();
-        let evidence = recorder.clone();
-        match self
-            .connect_ws_with(
-                target,
-                path,
-                recorder.clone(),
-                move |stream| RingIo::new(stream, ring, recorder_for_io),
-                Some(recorder),
-                handshake,
-            )
-            .await
-        {
-            Ok(stream) => Ok(stream),
-            Err(error) => Err(AttemptError::new(error, evidence.snapshot(Fidelity::l1()))),
-        }
-    }
-
-    #[cfg(feature = "ws")]
-    #[allow(clippy::too_many_arguments)]
-    async fn connect_ws_with<S, F>(
-        &self,
-        target: &Target,
-        path: &str,
-        recorder: TraceCollector,
-        make_stream: F,
-        stream_recorder: Option<TraceCollector>,
-        handshake: crate::ws::WsHandshake,
-    ) -> Result<crate::ws::WsStream<S>, NetError>
-    where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-        F: FnOnce(Box<dyn crate::connect::Transport>) -> S,
-    {
-        // Every terminal failure inside this function must close out the
-        // attempt's trace with an `Error` event: the trace must never end as
-        // an unexplained headless corpse.
-        let fail = |recorder: &TraceCollector, message: String| -> NetError {
-            recorder.record_error(
-                DiagnosticRecord::new(DiagnosticCode::EGRESS_WS_FAILED)
-                    .with_phase(DiagnosticPhase::WebSocket)
-                    .with_message(message.clone()),
-            );
-            NetError::Protocol(message)
-        };
-
-        let established = match self.connector.connect(target, &recorder).await {
-            Ok(established) => established,
-            Err(error) => {
-                recorder.record_error(error.diagnostic());
-                return Err(error);
-            }
-        };
-        let mut io = make_stream(established.stream);
-
-        let sec_key = netune_ws::generate_key();
-        let mut head = RequestHead::new(Method::GET, path)
-            .with_header(http::header::HOST, &target.authority)
-            .with_header(http::header::UPGRADE, "websocket")
-            .with_header(http::header::CONNECTION, "Upgrade")
-            .with_header("sec-websocket-key", &sec_key)
-            .with_header("sec-websocket-version", "13");
-
-        if !handshake.subprotocols.is_empty() {
-            // RFC 6455 §4.1: the client offers its preferences in order; the
-            // server picks one and echoes it, or none.
-            let offered = handshake.subprotocols.join(", ");
-            head.headers.insert(
-                http::HeaderName::from_static("sec-websocket-protocol"),
-                http::HeaderValue::from_str(&offered)
-                    .map_err(|e| fail(&recorder, format!("Invalid subprotocol list: {e}")))?,
-            );
-        }
-        for (name, value) in &handshake.extra_headers {
-            let name = http::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
-                fail(
-                    &recorder,
-                    format!("Invalid extra header name {name:?}: {e}"),
-                )
-            })?;
-            let value = http::HeaderValue::from_str(value).map_err(|e| {
-                fail(
-                    &recorder,
-                    format!("Invalid extra header value {value:?}: {e}"),
-                )
-            })?;
-            head.headers.insert(name, value);
-        }
-
-        if !head.headers.contains_key(http::header::USER_AGENT) {
-            head.headers.insert(
-                http::header::USER_AGENT,
-                http::HeaderValue::from_str(&self.config.user_agent)
-                    .unwrap_or_else(|_| http::HeaderValue::from_static("netune")),
-            );
-        }
-        if !head.headers.contains_key(http::header::CONTENT_LENGTH)
-            && let Ok(value) = http::HeaderValue::from_str("0")
-        {
-            head.headers.insert(http::header::CONTENT_LENGTH, value);
-        }
-        self.plan(target)?.h1.apply(&mut head);
-
-        recorder.mark(EventKind::RequestWriteStart, 0, 0);
-        if let Err(error) = write_request(&mut io, &head, None).await {
-            return Err(fail(&recorder, format!("WebSocket request write: {error}")));
-        }
-        recorder.mark(EventKind::RequestWriteEnd, 0, 0);
-
-        let mut reader =
-            Http1Reader::with_limits_and_buffer(io, self.config.limits, BytesMut::new());
-        let response_head = match crate::handshake::bound(
-            handshake.handshake_timeout,
-            DiagnosticPhase::WebSocket,
-            "WebSocket handshake",
-            &target.authority,
-            &recorder,
-            reader.read_response_head(&Method::GET),
-        )
-        .await
-        {
-            Ok(Ok(head)) => head,
-            Ok(Err(error)) => {
-                return Err(fail(
-                    &recorder,
-                    format!("WebSocket upgrade response read: {error}"),
-                ));
-            }
-            Err(error) => return Err(error),
-        };
-
-        if response_head.status != StatusCode::SWITCHING_PROTOCOLS {
-            return Err(fail(
-                &recorder,
-                format!(
-                    "WebSocket upgrade rejected with status {}",
-                    response_head.status
-                ),
-            ));
-        }
-
-        let is_upgrade = response_head
-            .headers
-            .get(http::header::UPGRADE)
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.eq_ignore_ascii_case("websocket"))
-            .unwrap_or(false);
-
-        if !is_upgrade {
-            return Err(fail(
-                &recorder,
-                "Missing or invalid Upgrade header in WebSocket handshake response".to_string(),
-            ));
-        }
-
-        let accept_header = response_head
-            .headers
-            .get("sec-websocket-accept")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-
-        if let Err(error) = netune_ws::verify_handshake(&sec_key, accept_header) {
-            return Err(fail(&recorder, error.to_string()));
-        }
-
-        // If we offered subprotocols, the server must echo exactly one of
-        // them back — or none, declining the negotiation.
-        if !handshake.subprotocols.is_empty() {
-            let echoed = response_head
-                .headers
-                .get("sec-websocket-protocol")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-            if !echoed.is_empty()
-                && !handshake
-                    .subprotocols
-                    .iter()
-                    .any(|offered| offered == echoed)
-            {
-                return Err(fail(
-                    &recorder,
-                    format!("Server selected subprotocol {echoed:?}, which was not offered"),
-                ));
-            }
-        }
-
-        recorder.mark(EventKind::HeadComplete, 0, 0);
-
-        let (io, residual_buf) = reader.into_inner();
-        Ok(crate::ws::WsStream::new(
-            io,
-            residual_buf,
-            stream_recorder,
-            handshake.limits,
-        ))
-    }
-
     /// WebSocket support was compiled out.
-    #[cfg(not(feature = "ws"))]
     pub async fn connect_ws_traced(
         &self,
         _target: &Target,
@@ -910,1027 +1092,6 @@ impl<C: Connector> Client<C> {
             "WebSocket support was not compiled in: enable the `ws` feature".into(),
         )))
     }
-
-    /// Send one request, following redirects, and return the final response.
-    ///
-    /// The observation policy is selected once at this boundary; the byte path
-    /// is monomorphized for the corresponding tap type.
-    pub async fn send(
-        &self,
-        target: &Target,
-        head: RequestHead,
-        body: Option<Bytes>,
-        observation: Observation,
-    ) -> Result<Response, AttemptError> {
-        let recorder = match &observation {
-            Observation::Traced(config) => {
-                let mut recorder = TraceCollector::start(config.capacity);
-                if let Some(sink) = &config.sink {
-                    recorder = recorder.with_sink(Arc::clone(sink));
-                }
-                recorder
-            }
-            Observation::Off | Observation::Counters => TraceCollector::disabled(),
-        };
-        let evidence = recorder.clone();
-        let fidelity = observation.fidelity();
-        let mut head = head;
-
-        // Propagation changes the wire, so it is opt-in. The header is inserted
-        // before any request bytes are written and after the trace id exists.
-        let propagation = match &observation {
-            Observation::Traced(config) => config.propagation.header(),
-            _ => None,
-        };
-        if let Some(name) = propagation {
-            let header = match http::HeaderName::from_bytes(name.as_bytes()) {
-                Ok(header) => header,
-                Err(error) => {
-                    let message = format!("invalid trace propagation header {name:?}: {error}");
-                    evidence.record_error(
-                        DiagnosticRecord::new(DiagnosticCode::EGRESS_CONFIG)
-                            .with_phase(DiagnosticPhase::Request)
-                            .with_message(message.clone()),
-                    );
-                    return Err(AttemptError::new(
-                        NetError::Protocol(message),
-                        evidence.snapshot(fidelity),
-                    ));
-                }
-            };
-            if !head.headers.contains_key(&header) {
-                let value = match http::HeaderValue::from_str(evidence.meta().id.as_str()) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        let message = format!("invalid trace id header value: {error}");
-                        evidence.record_error(
-                            DiagnosticRecord::new(DiagnosticCode::EGRESS_CONFIG)
-                                .with_phase(DiagnosticPhase::Request)
-                                .with_message(message.clone()),
-                        );
-                        return Err(AttemptError::new(
-                            NetError::Protocol(message),
-                            evidence.snapshot(fidelity),
-                        ));
-                    }
-                };
-                head.headers.insert(header, value);
-            }
-        }
-
-        let result = match &observation {
-            Observation::Off => {
-                self.send_with::<NoTap>(target, recorder, head, body, &observation)
-                    .await
-            }
-            Observation::Counters => {
-                self.send_with::<Counters>(target, recorder, head, body, &observation)
-                    .await
-            }
-            Observation::Traced(_) => {
-                self.send_with::<Ring>(target, recorder, head, body, &observation)
-                    .await
-            }
-        };
-        match result {
-            Ok(response) => Ok(response),
-            Err(error) => Err(AttemptError::new(error, evidence.snapshot(fidelity))),
-        }
-    }
-
-    /// Send one request with an explicitly supplied attempt recorder.
-    ///
-    /// This is the escape hatch for a consumer that already owns the control
-    /// recorder (tests, a relay, a harness that wants to stream trace events).
-    /// The byte-path tap is still owned by `TimedIo`; its log is merged into the
-    /// supplied recorder when the body is released.
-    pub async fn send_traced(
-        &self,
-        target: &Target,
-        recorder: TraceCollector,
-        head: RequestHead,
-        body: Option<Bytes>,
-    ) -> Result<Response, AttemptError> {
-        let observation = Observation::Traced(TraceConfig {
-            capacity: recorder.capacity(),
-            sink: recorder.sink(),
-            propagation: TracePropagation::Off,
-        });
-        let evidence = recorder.clone();
-        match self
-            .send_with::<Ring>(target, recorder, head, body, &observation)
-            .await
-        {
-            Ok(response) => Ok(response),
-            Err(error) => Err(AttemptError::new(error, evidence.snapshot(Fidelity::l1()))),
-        }
-    }
-
-    async fn send_with<T: ClientTap>(
-        &self,
-        target: &Target,
-        recorder: TraceCollector,
-        head: RequestHead,
-        body: Option<Bytes>,
-        observation: &Observation,
-    ) -> Result<Response, NetError> {
-        let origin = target.authority.clone();
-        let mut target = target.clone();
-        let mut head = head;
-        let mut body = body;
-        let mut hops: u8 = 0;
-
-        loop {
-            let plan = self.plan(&target)?;
-            let response = self
-                .send_once::<T>(
-                    &plan,
-                    recorder.clone(),
-                    head.clone(),
-                    body.clone(),
-                    observation,
-                )
-                .await?;
-            let Some(location) = redirect_location(&response.head) else {
-                // Only the final head marks completion: a redirect's head must
-                // not become the anchor TTFT is measured against.
-                recorder.mark(EventKind::HeadComplete, 0, 0);
-                return Ok(response);
-            };
-            if hops >= self.config.max_redirects {
-                return Err(NetError::TooManyRedirects(self.config.max_redirects));
-            }
-            let status = response.head.status;
-            // The hop's connection is not pooled: its body was never drained, so
-            // reusing it could desynchronise the stream.
-            drop(response);
-            recorder.mark(EventKind::Redirect, u32::from(status.as_u16()), 0);
-
-            let (next_target, next_path) = resolve_location(&target, &head.target, &location)?;
-            if next_target.authority != origin {
-                // Credentials never follow a redirect off the original origin.
-                for header in [
-                    http::header::AUTHORIZATION,
-                    http::header::COOKIE,
-                    http::header::PROXY_AUTHORIZATION,
-                ] {
-                    head.headers.remove(header);
-                }
-            }
-            if redirect_to_get(status) && head.method != Method::HEAD {
-                head.method = Method::GET;
-                head.headers.remove(http::header::CONTENT_TYPE);
-                head.headers.remove(http::header::CONTENT_LENGTH);
-                body = None;
-            }
-            head.target = next_path;
-            target = next_target;
-            hops += 1;
-        }
-    }
-
-    async fn send_once<T: ClientTap>(
-        &self,
-        plan: &ConnectionPlan,
-        recorder: TraceCollector,
-        head: RequestHead,
-        body: Option<Bytes>,
-        observation: &Observation,
-    ) -> Result<Response, NetError> {
-        let target = &plan.target;
-        // A pooled socket may have been discarded by the peer while it sat idle,
-        // and virtually every HTTP peer does this without a `close_notify`. That
-        // is a normal way for a connection to end, not a failure of the request,
-        // so the transport absorbs it instead of asking the user to re-select a
-        // model to get a fresh pool. The retry is only ever taken *before* a
-        // response head was parsed, on a connection this attempt took from the
-        // pool: the request provably had not reached the origin, so re-sending
-        // it cannot duplicate a side effect.
-        // Prefer a pooled connection already speaking the protocol this client
-        // wants, and never hand an HTTP/2 connection to the HTTP/1.1 writer (or
-        // a keep-alive socket to a request that mandates HTTP/2).
-        let key = plan.pool_key();
-        #[cfg(feature = "http2")]
-        let prefer_http2 = self.wants_http2(target);
-
-        #[cfg(feature = "http2")]
-        let mut recycled = if prefer_http2 {
-            self.pool
-                .take_matching(&key, |protocol| protocol == Protocol::Http2)
-        } else {
-            None
-        };
-        #[cfg(not(feature = "http2"))]
-        let mut recycled = None;
-
-        if recycled.is_none() && !self.forces_h2(target) {
-            recycled = self
-                .pool
-                .take_matching(&key, |protocol| protocol == Protocol::Http1);
-        }
-        loop {
-            let reused = recycled.is_some();
-            let attempt = self
-                .send_on_connection::<T>(
-                    plan,
-                    recorder.clone(),
-                    &head,
-                    &body,
-                    recycled.take(),
-                    observation,
-                )
-                .await;
-            match attempt {
-                Err(error) if reused && error.is_stale_connection() => {
-                    // The socket died before the peer answered. Record the
-                    // revocation so the trace explains both the decision and the
-                    // cost: the reuse claim is withdrawn and the handshake this
-                    // attempt is about to pay is measured rather than reported
-                    // as `ConnectionReused`.
-                    recorder.record_note(
-                        DiagnosticRecord::new(DiagnosticCode::EGRESS_POOL_STALE)
-                            .with_phase(DiagnosticPhase::Pool)
-                            .with_message(
-                                "pooled socket died before a response head; the attempt reconnected",
-                            )
-                            .with_field("error_class", error.class()),
-                    );
-                    recorder.mark(EventKind::ConnectStaleDiscarded, 0, 0);
-                    continue;
-                }
-                other => return other,
-            }
-        }
-    }
-
-    /// Write `head`/`body` on `recycled` (or a fresh connection) and return the
-    /// response, with no recovery of its own.
-    async fn send_on_connection<T: ClientTap>(
-        &self,
-        plan: &ConnectionPlan,
-        recorder: TraceCollector,
-        head: &RequestHead,
-        body: &Option<Bytes>,
-        recycled: Option<IdleConnection>,
-        observation: &Observation,
-    ) -> Result<Response, NetError> {
-        let target = &plan.target;
-        let mut head = head.clone();
-        if !head.headers.contains_key(http::header::USER_AGENT) {
-            head.headers.insert(
-                http::header::USER_AGENT,
-                http::HeaderValue::from_str(&self.config.user_agent)
-                    .unwrap_or_else(|_| http::HeaderValue::from_static("netune")),
-            );
-        }
-
-        // A pooled connection already speaks a protocol. Drive it with the role
-        // that protocol requires; a connection the request cannot use is dropped
-        // and a fresh one is dialled.
-        if let Some(recycled) = recycled {
-            match recycled {
-                IdleConnection::Http1(idle) if !self.forces_h2(target) => {
-                    // One event, carrying the idle age: `derive` and every
-                    // surface read reuse through `first_of(ConnectReused)`.
-                    recorder.mark(EventKind::ConnectReused, idle.age.as_millis() as u32, 0);
-                    return self
-                        .send_http1::<T>(
-                            idle.stream,
-                            idle.buffered,
-                            idle.local_port,
-                            idle.socket,
-                            recorder,
-                            head,
-                            body,
-                            plan,
-                            observation,
-                        )
-                        .await;
-                }
-                #[cfg(feature = "http2")]
-                IdleConnection::Http2(idle) if self.wants_http2(target) => {
-                    recorder.mark(EventKind::ConnectReused, idle.age.as_millis() as u32, 0);
-                    return self
-                        .send_http2(
-                            *idle.connection,
-                            idle.local_port,
-                            idle.socket,
-                            recorder,
-                            head,
-                            body,
-                            plan,
-                            T::initial(),
-                        )
-                        .await;
-                }
-                // A protocol this request cannot drive: discard it and dial.
-                IdleConnection::Http1(_) => {}
-                #[cfg(feature = "http2")]
-                IdleConnection::Http2(_) => {}
-            }
-        }
-
-        let established = self.connector.connect(target, &recorder).await?;
-
-        // Without the `http2` feature this fails closed instead of falling back
-        // to HTTP/1.1: a caller that mandated H2, or an upstream that only
-        // negotiated `h2` over ALPN, must not be handed a downgraded request.
-        #[cfg(not(feature = "http2"))]
-        if target.force_h2 || established.alpn == Some(Alpn::H2) {
-            return Err(NetError::Protocol(
-                "HTTP/2 was requested but the `http2` feature is not compiled in".into(),
-            ));
-        }
-
-        #[cfg(feature = "http2")]
-        if self.forces_h2(target)
-            || (self.config.enable_http2 && established.alpn == Some(Alpn::H2))
-        {
-            let fp = plan.h2.clone().ok_or_else(|| {
-                NetError::Protocol("HTTP/2 was selected but no H2 profile was resolved".into())
-            })?;
-            let h2 = self
-                .http2_handshake(established.stream, fp, &target.authority, &recorder)
-                .await?;
-            return self
-                .send_http2(
-                    h2,
-                    established.local_port,
-                    established.socket,
-                    recorder,
-                    head,
-                    body,
-                    plan,
-                    T::initial(),
-                )
-                .await;
-        }
-
-        self.send_http1::<T>(
-            established.stream,
-            BytesMut::new(),
-            established.local_port,
-            established.socket,
-            recorder,
-            head,
-            body,
-            plan,
-            observation,
-        )
-        .await
-    }
-
-    /// Write the request over HTTP/1.1 and return its streaming response.
-    #[allow(clippy::too_many_arguments)]
-    async fn send_http1<T: ClientTap>(
-        &self,
-        stream: Box<dyn crate::connect::Transport>,
-        buffered: BytesMut,
-        local_port: Option<u16>,
-        socket: Option<std::net::TcpStream>,
-        recorder: TraceCollector,
-        mut head: RequestHead,
-        body: &Option<Bytes>,
-        plan: &ConnectionPlan,
-        observation: &Observation,
-    ) -> Result<Response, NetError> {
-        let target = &plan.target;
-        let pool_key = plan.pool_key();
-        if !head.headers.contains_key(http::header::HOST)
-            && let Ok(value) = http::HeaderValue::from_str(&target.authority)
-        {
-            head.headers.insert(http::header::HOST, value);
-        }
-        // Materialize Content-Length before the profile so the profile controls
-        // its casing and position too; `write_request` only auto-adds one when
-        // the head is not raw.
-        if !head.headers.contains_key(http::header::CONTENT_LENGTH) {
-            let length = body.as_ref().map_or(0, |body| body.len());
-            if let Ok(value) = http::HeaderValue::from_str(&length.to_string()) {
-                head.headers.insert(http::header::CONTENT_LENGTH, value);
-            }
-        }
-        plan.h1.apply(&mut head);
-
-        // Sample the socket for as long as this request is in flight. The
-        // sampler gets its own duplicate handle; `socket` travels with the body
-        // stream so the pool can be handed a live handle when it is released.
-        let sampler = socket.as_ref().and_then(|socket| {
-            crate::tcp_info::duplicate(socket)
-                .map(|clone| start_sampler(clone, recorder.clone(), SAMPLE_INTERVAL))
-        });
-
-        let tap = T::create(observation, recorder.origin(), recorder.meta());
-        let mut io = TimedIo::new(stream, tap);
-        recorder.mark(EventKind::RequestWriteStart, 0, 0);
-        write_request(&mut io, &head, body.as_deref()).await?;
-        let written = body.as_ref().map_or(0, |body| body.len()) as u32;
-        recorder.mark(EventKind::RequestWriteEnd, written, 0);
-
-        let mut reader = Http1Reader::with_limits_and_buffer(io, self.config.limits, buffered);
-        let response_head = reader.read_response_head(&head.method).await?;
-        let reusable = is_reusable(&response_head);
-        let decoder = Decoder::from_encoding(
-            response_head
-                .headers
-                .get(http::header::CONTENT_ENCODING)
-                .and_then(|value| value.to_str().ok()),
-        )?;
-        // A `Content-Encoding` we just decoded must not be re-decoded by anyone
-        // downstream.
-        let mut response_head = response_head;
-        if !matches!(decoder, Decoder::Identity) {
-            response_head.headers.remove(http::header::CONTENT_ENCODING);
-        }
-        Ok(Response {
-            head: response_head,
-            body: BodyStream {
-                reader: Some(T::wrap(reader)),
-                #[cfg(feature = "http2")]
-                h2: None,
-                recorder,
-                observation: T::initial(),
-                identity: pool_key.identity.clone(),
-                pool: self.pool.clone(),
-                pool_key,
-                authority: target.authority.clone(),
-                local_port,
-                reusable,
-                started: false,
-                finished: false,
-                sampler,
-                socket,
-                decoder,
-                decoded: 0,
-                max_decoded: self.config.limits.max_body_bytes,
-            },
-        })
-    }
-
-    /// Write the request over HTTP/2 and return its streaming response.
-    #[cfg(feature = "http2")]
-    #[allow(clippy::too_many_arguments)]
-    async fn send_http2(
-        &self,
-        mut h2: H2ClientConnection<Box<dyn crate::connect::Transport>>,
-        local_port: Option<u16>,
-        socket: Option<std::net::TcpStream>,
-        recorder: TraceCollector,
-        head: RequestHead,
-        body: &Option<Bytes>,
-        plan: &ConnectionPlan,
-        observation: BodyObservation,
-    ) -> Result<Response, NetError> {
-        let target = &plan.target;
-        let pool_key = plan.pool_key();
-        let mut identity = plan.identity.clone();
-        if identity.h2_profile.is_none()
-            && let Some(fingerprint) = &plan.h2
-        {
-            identity.h2_profile = Some(fingerprint.connection.name.to_string());
-        }
-        let observation = match observation {
-            BodyObservation::Traced(_) => BodyObservation::Traced(Fidelity::l0()),
-            other => other,
-        };
-        let scheme = if target.tls_server_name().is_some() {
-            "https"
-        } else {
-            "http"
-        };
-        let (authority, extra_headers) = h2_request_parts(&head, &target.authority);
-
-        recorder.mark(EventKind::RequestWriteStart, 0, 0);
-        let request_profile = plan.h2_request.unwrap_or(*h2.request_profile());
-        let stream_id = h2
-            .start_request_with_profile(
-                head.method.as_str(),
-                &authority,
-                scheme,
-                &head.target,
-                &extra_headers,
-                body.as_deref(),
-                &request_profile,
-            )
-            .await
-            .map_err(|error| h2_error_traced("request", error, &recorder))?;
-        let written = body.as_ref().map_or(0, |body| body.len()) as u32;
-        recorder.mark(EventKind::RequestWriteEnd, written, 0);
-
-        let response = h2
-            .read_response_head(stream_id)
-            .await
-            .map_err(|error| h2_error_traced("request", error, &recorder))?;
-        let stream = h2.into_response_stream(stream_id, &response);
-
-        let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK);
-        let mut headers = HeaderMap::new();
-        for (name, value) in response.headers {
-            if let (Ok(name), Ok(value)) = (
-                http::header::HeaderName::try_from(name.as_str()),
-                http::header::HeaderValue::try_from(value.as_str()),
-            ) {
-                headers.append(name, value);
-            }
-        }
-
-        let decoder = Decoder::from_encoding(
-            headers
-                .get(http::header::CONTENT_ENCODING)
-                .and_then(|value| value.to_str().ok()),
-        )?;
-        if !matches!(decoder, Decoder::Identity) {
-            headers.remove(http::header::CONTENT_ENCODING);
-        }
-        let body_kind = headers
-            .get(http::header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .map_or(BodyKind::Chunked, BodyKind::Length);
-
-        let sampler = socket.as_ref().and_then(|socket| {
-            crate::tcp_info::duplicate(socket)
-                .map(|clone| start_sampler(clone, recorder.clone(), SAMPLE_INTERVAL))
-        });
-
-        Ok(Response {
-            head: IncomingResponse {
-                version: http::Version::HTTP_2,
-                status,
-                headers,
-                body: body_kind,
-            },
-            body: BodyStream {
-                reader: None,
-                h2: Some(stream),
-                recorder,
-                observation,
-                identity,
-                pool: self.pool.clone(),
-                pool_key,
-                authority: target.authority.clone(),
-                local_port,
-                reusable: true,
-                started: false,
-                finished: false,
-                sampler,
-                socket,
-                decoder,
-                decoded: 0,
-                max_decoded: self.config.limits.max_body_bytes,
-            },
-        })
-    }
-}
-
-/// The `Location` of a redirecting response, if any.
-fn redirect_location(head: &IncomingResponse) -> Option<String> {
-    match head.status.as_u16() {
-        301 | 302 | 303 | 307 | 308 => head
-            .headers
-            .get(http::header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        _ => None,
-    }
-}
-
-/// Whether this status turns a non-`HEAD` request into a `GET` with no body.
-fn redirect_to_get(status: StatusCode) -> bool {
-    matches!(status.as_u16(), 301..=303)
-}
-
-/// Whether the peer's framing allows the connection to be pooled.
-///
-/// A close-delimited body cannot be reused (its end is the connection's end),
-/// and an explicit `connection: close` or an HTTP/1.0 response without
-/// `keep-alive` ends the connection by contract.
-fn is_reusable(head: &IncomingResponse) -> bool {
-    let mut close = false;
-    let mut keep_alive = false;
-    for value in head.headers.get_all(http::header::CONNECTION) {
-        if let Ok(value) = value.to_str() {
-            for token in value.split(',') {
-                let token = token.trim();
-                close |= token.eq_ignore_ascii_case("close");
-                keep_alive |= token.eq_ignore_ascii_case("keep-alive");
-            }
-        }
-    }
-    if close {
-        return false;
-    }
-    if head.version == http::Version::HTTP_10 && !keep_alive {
-        return false;
-    }
-    !matches!(head.body, BodyKind::UntilClose)
-}
-
-/// Resolve a `Location` against the request that produced it.
-fn resolve_location(
-    current: &Target,
-    current_path: &str,
-    location: &str,
-) -> Result<(Target, String), NetError> {
-    if let Some(rest) = location.strip_prefix("https://") {
-        let (authority, path) = split_authority(rest, 443);
-        let name = crate::connect::authority_host(&authority).to_string();
-        let mut target = Target::tls(authority, name);
-        // A redirect changes the destination, not the identity the caller
-        // selected. Only the authority and the verified server name follow the
-        // new location.
-        target.identity.tls_profile = current.identity.tls_profile.clone();
-        target.identity.evasion = current.identity.evasion;
-        target.identity.h2_profile = current.identity.h2_profile.clone();
-        target.force_h2 = current.force_h2;
-        target.h1_profile = current.h1_profile.clone();
-        target.h2_request_profile = current.h2_request_profile.clone();
-        return Ok((target, path));
-    }
-    if let Some(rest) = location.strip_prefix("http://") {
-        let (authority, path) = split_authority(rest, 80);
-        let mut target = Target::plain(authority);
-        target.identity.evasion = current.identity.evasion;
-        target.h1_profile = current.h1_profile.clone();
-        target.h2_request_profile = current.h2_request_profile.clone();
-        return Ok((target, path));
-    }
-    if let Some(rest) = location.strip_prefix("//") {
-        let (authority, path) = split_authority(rest, default_port(current));
-        let mut target = current.clone();
-        target.authority = authority;
-        if target.identity.tls_server_name.is_some() {
-            target.identity.tls_server_name =
-                Some(crate::connect::authority_host(&target.authority).to_string());
-        }
-        return Ok((target, path));
-    }
-    if location.starts_with('/') {
-        return Ok((current.clone(), location.to_string()));
-    }
-    // Relative reference: replace the last path segment.
-    let base = current_path
-        .rsplit_once('/')
-        .map_or("", |(directory, _)| directory);
-    Ok((current.clone(), format!("{base}/{location}")))
-}
-
-fn default_port(target: &Target) -> u16 {
-    if target.tls_server_name().is_some() {
-        443
-    } else {
-        80
-    }
-}
-
-/// Split `host[:port][/path]` into `(host:port, path)`.
-fn split_authority(rest: &str, default_port: u16) -> (String, String) {
-    let (authority, path) = match rest.find('/') {
-        Some(index) => (&rest[..index], &rest[index..]),
-        None => (rest, "/"),
-    };
-    let authority = crate::connect::normalize_authority(authority, default_port);
-    (authority, path.to_string())
-}
-
-/// A parsed response: head plus a decoded, traced body stream.
-pub struct Response {
-    pub head: IncomingResponse,
-    pub body: BodyStream,
-}
-
-/// Streams the response body, decoding `Content-Encoding` and marking chunk
-/// boundaries and completion.
-pub struct BodyStream {
-    reader: Option<Http1Body>,
-    #[cfg(feature = "http2")]
-    h2: Option<H2ResponseStream<Box<dyn crate::connect::Transport>>>,
-    recorder: TraceCollector,
-    observation: BodyObservation,
-    identity: ConnectionIdentity,
-    pool: Pool,
-    pool_key: PoolKey,
-    authority: String,
-    local_port: Option<u16>,
-    reusable: bool,
-    started: bool,
-    finished: bool,
-    sampler: Option<Sampler>,
-    /// Duplicate socket descriptor, handed back to the pool on release so the
-    /// next request can sample the same socket.
-    socket: Option<std::net::TcpStream>,
-    decoder: Decoder,
-    /// Decoded bytes emitted so far, bounded so a compression bomb cannot
-    /// exhaust memory.
-    decoded: u64,
-    max_decoded: u64,
-}
-
-impl Drop for BodyStream {
-    fn drop(&mut self) {
-        // A redirect hop or an abandoned response never reaches `release`, but
-        // its byte tap still belongs to the attempt trace. Merge it here; the
-        // connection itself is deliberately not pooled because its body was not
-        // drained.
-        if let Some(Http1Body::Traced(reader)) = self.reader.take() {
-            let (io, _buffered) = reader.into_inner();
-            let (_stream, tap) = io.into_parts();
-            self.recorder.merge(tap.finish());
-        }
-    }
-}
-
-impl BodyStream {
-    /// Read the next decoded body bytes, or `None` at the end of the body.
-    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, NetError> {
-        loop {
-            let Some(raw) = self.read_raw_chunk().await? else {
-                let mut tail = Vec::new();
-                self.decoder.finish(&mut tail)?;
-                self.recorder.mark(EventKind::BodyEnd, 0, 0);
-                self.finished = true;
-                self.release();
-                return Ok(if tail.is_empty() {
-                    None
-                } else {
-                    Some(Bytes::from(tail))
-                });
-            };
-
-            let mut decoded = Vec::new();
-            self.decoder.push(&raw, &mut decoded)?;
-            self.decoded = self.decoded.saturating_add(decoded.len() as u64);
-            if self.decoded > self.max_decoded {
-                return Err(NetError::Decode(
-                    "decoded body exceeded the configured limit".into(),
-                ));
-            }
-            if !self.started {
-                self.recorder.mark(EventKind::BodyStart, 0, 0);
-                self.started = true;
-            }
-            if !decoded.is_empty() {
-                self.recorder
-                    .mark(EventKind::ChunkBoundary, decoded.len() as u32, 0);
-            }
-            if !decoded.is_empty() {
-                return Ok(Some(Bytes::from(decoded)));
-            }
-            // The decoder consumed the raw bytes without producing output (a
-            // header, or a partial frame): keep reading.
-        }
-    }
-
-    /// Read the next raw (still `Content-Encoding`-encoded) body chunk.
-    async fn read_raw_chunk(&mut self) -> Result<Option<Bytes>, NetError> {
-        match self.reader.as_mut() {
-            Some(Http1Body::Off(reader)) => {
-                return reader.read_body_chunk().await.map_err(NetError::from);
-            }
-            Some(Http1Body::Counters(reader)) => {
-                return reader.read_body_chunk().await.map_err(NetError::from);
-            }
-            Some(Http1Body::Traced(reader)) => {
-                return reader.read_body_chunk().await.map_err(NetError::from);
-            }
-            None => {}
-        }
-        #[cfg(feature = "http2")]
-        if let Some(h2) = self.h2.as_mut() {
-            loop {
-                match h2
-                    .next_event()
-                    .await
-                    .map_err(|error| h2_error_traced("body", error, &self.recorder))?
-                {
-                    H2ResponseEvent::Data { payload, .. } => {
-                        if payload.is_empty() {
-                            continue;
-                        }
-                        return Ok(Some(payload));
-                    }
-                    // The trailer block ends the stream; the next call returns
-                    // `End`, which is where the body is released.
-                    H2ResponseEvent::Trailers(_) => continue,
-                    H2ResponseEvent::End => return Ok(None),
-                }
-            }
-        }
-        Ok(None)
-    }
-
-    /// Drain the body.
-    pub async fn read_to_end(&mut self) -> Result<Bytes, NetError> {
-        let mut out = BytesMut::new();
-        while let Some(chunk) = self.next_chunk().await? {
-            out.extend_from_slice(&chunk);
-        }
-        Ok(out.freeze())
-    }
-
-    /// Whether the body has been fully consumed.
-    pub fn is_finished(&self) -> bool {
-        self.finished
-    }
-
-    /// The L0 counters, when this attempt was observed with `Counters`.
-    ///
-    /// The counters are available once the body has been released. `None` for
-    /// `Off` and `Traced`: an untraced attempt has nothing to count, and a traced
-    /// attempt reports its evidence as an event log instead.
-    pub fn counters(&self) -> Option<Counters> {
-        match self.observation {
-            BodyObservation::Counters(counters) => counters,
-            BodyObservation::Off | BodyObservation::Traced(_) => None,
-        }
-    }
-
-    /// The attempt's trace, once the body has been fully consumed.
-    ///
-    /// `None` while the body is still open, and `None` when the attempt was not
-    /// traced. A trace cannot claim syscall fidelity that no tap produced.
-    pub fn trace(&self) -> Option<netune_trace::RequestTrace> {
-        let BodyObservation::Traced(fidelity) = self.observation else {
-            return None;
-        };
-        if !self.finished {
-            return None;
-        }
-        if !self.recorder.is_enabled() {
-            return None;
-        }
-        let snapshot = self.recorder.snapshot(fidelity);
-        Some(netune_trace::RequestTrace {
-            meta: snapshot.meta,
-            attempt: netune_trace::AttemptRef {
-                round: 0,
-                turn: 0,
-                attempt: 0,
-            },
-            endpoint: netune_trace::EndpointRef {
-                provider: String::new(),
-                model: String::new(),
-                authority: self.authority.clone(),
-            },
-            connection: netune_trace::ConnectionInfo::default(),
-            identity: self.identity.clone(),
-            schema_version: TRACE_SCHEMA_VERSION,
-            fidelity,
-            log: snapshot.log,
-            diagnostics: snapshot.diagnostics,
-        })
-    }
-
-    /// Return the connection to the pool when the body is done and the peer
-    /// allows reuse. Idempotent.
-    pub fn release(&mut self) {
-        if let Some(reader) = self.reader.take() {
-            let (stream, buffered) = match reader {
-                Http1Body::Off(reader) => {
-                    let (io, buffered) = reader.into_inner();
-                    let (stream, tap) = io.into_parts();
-                    tap.finish();
-                    (stream, buffered)
-                }
-                Http1Body::Counters(reader) => {
-                    let (io, buffered) = reader.into_inner();
-                    let (stream, tap) = io.into_parts();
-                    self.observation = BodyObservation::Counters(Some(tap.finish()));
-                    (stream, buffered)
-                }
-                Http1Body::Traced(reader) => {
-                    let (io, buffered) = reader.into_inner();
-                    let (stream, tap) = io.into_parts();
-                    self.recorder.merge(tap.finish());
-                    (stream, buffered)
-                }
-            };
-            // Stop sampling before the connection goes idle.
-            drop(self.sampler.take());
-            if self.finished && self.reusable {
-                self.pool.put_http1(
-                    &self.pool_key,
-                    stream,
-                    buffered,
-                    self.local_port,
-                    self.socket.take(),
-                );
-            }
-        }
-        #[cfg(feature = "http2")]
-        if let Some(h2) = self.h2.take() {
-            drop(self.sampler.take());
-            // `into_connection` reports whether the stream ended cleanly and the
-            // peer did not send GOAWAY: only then may the connection be reused.
-            if let Some((connection, reusable)) = h2.into_connection()
-                && self.finished
-                && reusable
-            {
-                self.pool.put_http2(
-                    &self.pool_key,
-                    connection,
-                    self.local_port,
-                    self.socket.take(),
-                );
-            }
-        }
-    }
-}
-
-#[cfg(all(test, feature = "http2"))]
-mod h2_tests {
-    use super::*;
-
-    #[test]
-    fn a_host_header_becomes_the_authority_instead_of_a_regular_field() {
-        let head = RequestHead::new(Method::GET, "/v1").with_header("host", "override.example");
-        let (authority, headers) = h2_request_parts(&head, "target.example");
-        assert_eq!(authority, "override.example");
-        assert!(headers.iter().all(|(name, _)| name != "host"));
-    }
-
-    #[test]
-    fn without_a_host_header_the_target_authority_is_used() {
-        let head = RequestHead::new(Method::GET, "/v1");
-        let (authority, headers) = h2_request_parts(&head, "target.example");
-        assert_eq!(authority, "target.example");
-        assert!(headers.iter().all(|(name, _)| name != "host"));
-    }
-
-    #[test]
-    fn goaway_debug_data_is_recorded_in_the_diagnostic() {
-        let recorder = TraceCollector::start(8);
-        let mapped = h2_error_traced(
-            "request",
-            netune_http2::H2Error::GoAway {
-                error_code: 7,
-                debug_data: b"busy".to_vec(),
-            },
-            &recorder,
-        );
-        assert!(mapped.is_stale_connection());
-        let record = recorder
-            .diagnostics()
-            .last_error()
-            .cloned()
-            .expect("GOAWAY diagnostic");
-        assert_eq!(record.code, DiagnosticCode::EGRESS_HTTP2_PROTOCOL);
-        assert!(
-            record
-                .fields
-                .iter()
-                .any(|field| { field.key == "goaway_code" && field.value == "7" })
-        );
-        assert!(
-            record
-                .fields
-                .iter()
-                .any(|field| { field.key == "debug_data" && field.value == "busy" })
-        );
-    }
-
-    #[test]
-    fn raw_header_casing_is_lowered_for_http2() {
-        let head = RequestHead::new(Method::GET, "/v1").with_raw_header("X-Trace-Id", "abc");
-        let (_, headers) = h2_request_parts(&head, "target.example");
-        assert_eq!(headers, vec![("x-trace-id".to_string(), "abc".to_string())]);
-    }
-
-    #[test]
-    fn a_refusal_before_the_head_is_replayable_on_a_fresh_connection() {
-        let goaway = h2_error(
-            "request",
-            netune_http2::H2Error::GoAway {
-                error_code: 0,
-                debug_data: Vec::new(),
-            },
-        );
-        assert!(goaway.is_stale_connection());
-        assert!(goaway.is_retryable());
-
-        let refused = h2_error(
-            "request",
-            netune_http2::H2Error::StreamReset {
-                stream_id: 1,
-                error_code: netune_http2::error_code::REFUSED_STREAM,
-            },
-        );
-        assert!(refused.is_stale_connection());
-        assert!(refused.is_retryable());
-
-        // A reset or GOAWAY after the response head belongs to a stream the peer
-        // may already have processed; it must not be replayed transparently.
-        let after_head = h2_error(
-            "body",
-            netune_http2::H2Error::StreamReset {
-                stream_id: 1,
-                error_code: netune_http2::error_code::REFUSED_STREAM,
-            },
-        );
-        assert!(!after_head.is_stale_connection());
-        assert!(!after_head.is_retryable());
-    }
 }
 
 #[cfg(test)]
@@ -1940,7 +1101,7 @@ mod identity_tests {
     use crate::socket::SocketConfig;
     use netune_trace::EvasionPolicy;
 
-    fn keyed_client() -> Client<TcpConnector> {
+    fn keyed_client() -> Client {
         Client::new(
             TcpConnector::new(),
             Pool::default(),
@@ -1983,7 +1144,7 @@ mod identity_tests {
                 ..ClientConfig::default()
             },
         );
-        let target = Target::plain("203.0.113.10:80").with_force_h2(true);
+        let target = Target::plain("203.0.113.10:80").with_protocol(HttpProtocol::Http2);
         assert_eq!(
             client
                 .pool_key(&target)
@@ -2033,11 +1194,11 @@ mod identity_tests {
     fn a_custom_h2_profile_is_resolved_and_recorded() {
         let client = keyed_client().with_h2_profile("my-chrome", H2Fingerprint::chrome());
         let target = Target::plain("203.0.113.10:80")
-            .with_force_h2(true)
+            .with_protocol(HttpProtocol::Http2)
             .with_h2_profile("my-chrome");
         let plan = client.plan(&target).expect("custom H2 plan");
         assert_eq!(plan.identity.h2_profile.as_deref(), Some("my-chrome"));
-        assert!(plan.h2.is_some());
+        assert!(plan.h2_fingerprint().is_some());
     }
 
     #[cfg(feature = "http2")]
@@ -2052,12 +1213,12 @@ mod identity_tests {
             },
         );
         let target = Target::plain("203.0.113.10:80")
-            .with_force_h2(true)
+            .with_protocol(HttpProtocol::Http2)
             .with_h2_request_profile("my-order");
         let plan = client.plan(&target).expect("plan");
-        assert_eq!(plan.h2_request.expect("request profile").name, "my-order");
+        assert_eq!(plan.h2_request().expect("request profile").name, "my-order");
         let baseline = client
-            .plan(&Target::plain("203.0.113.10:80").with_force_h2(true))
+            .plan(&Target::plain("203.0.113.10:80").with_protocol(HttpProtocol::Http2))
             .expect("baseline plan");
         assert_eq!(plan.pool_key(), baseline.pool_key());
     }
@@ -2067,7 +1228,7 @@ mod identity_tests {
     fn an_unknown_h2_request_profile_fails_while_planning() {
         let client = keyed_client();
         let target = Target::plain("203.0.113.10:80")
-            .with_force_h2(true)
+            .with_protocol(HttpProtocol::Http2)
             .with_h2_request_profile("does-not-exist");
         let error = client
             .plan(&target)
@@ -2080,12 +1241,46 @@ mod identity_tests {
     fn an_unknown_h2_profile_fails_while_planning() {
         let client = keyed_client();
         let target = Target::plain("203.0.113.10:80")
-            .with_force_h2(true)
+            .with_protocol(HttpProtocol::Http2)
             .with_h2_profile("does-not-exist");
         let error = client
             .plan(&target)
             .expect_err("unknown H2 profile must fail");
         assert!(error.to_string().contains("unknown HTTP/2 profile"));
+    }
+
+    #[test]
+    fn trace_propagation_reaches_a_raw_head() {
+        let recorder = TraceCollector::start(8);
+        let mut request = Request::new(
+            RequestHead::new(Method::GET, "/").with_raw_header("X-Keep", "yes"),
+            RequestBody::Empty,
+        );
+        propagate(&mut request, Some("traceparent"), &recorder).expect("propagate");
+        assert!(request.head.headers.contains_key("traceparent"));
+        let raw = request.head.raw_headers.as_ref().expect("raw head");
+        assert!(
+            raw.iter()
+                .any(|(name, value)| name == "traceparent" && value == recorder.meta().id.as_str())
+        );
+    }
+
+    #[test]
+    fn removing_a_header_strips_its_raw_wire_form_too() {
+        let mut head = RequestHead::new(Method::GET, "/")
+            .with_raw_header("Authorization", "Bearer secret")
+            .with_raw_header("X-Keep", "yes");
+        remove_header(&mut head, "authorization");
+        assert!(!head.headers.contains_key("authorization"));
+        let raw = head.raw_headers.as_ref().expect("raw head");
+        assert!(
+            raw.iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+        );
+        assert!(
+            raw.iter()
+                .any(|(name, value)| name == "X-Keep" && value == "yes")
+        );
     }
 
     #[test]
@@ -2106,52 +1301,5 @@ mod identity_tests {
             second.pool_key(&target).expect("plan"),
             "a shared pool must not cross socket shapes"
         );
-    }
-
-    #[test]
-    fn inv_custom_05_absolute_redirect_preserves_the_identity() {
-        let original = Target::tls("a.example:443", "a.example")
-            .with_tls_profile("chrome-current")
-            .with_evasion(EvasionPolicy::sni_split())
-            .with_force_h2(true);
-
-        let (next, path) = resolve_location(&original, "/start", "https://b.example/next")
-            .expect("resolve absolute redirect");
-
-        assert_eq!(path, "/next");
-        assert_eq!(next.authority, "b.example:443");
-        assert_eq!(next.identity.tls_profile.as_deref(), Some("chrome-current"));
-        assert_eq!(next.identity.tls_server_name.as_deref(), Some("b.example"));
-        assert_eq!(next.identity.evasion, EvasionPolicy::sni_split());
-        assert!(next.force_h2);
-    }
-
-    #[test]
-    fn an_absolute_downgrade_drops_tls_but_keeps_evasion() {
-        let original =
-            Target::tls("a.example:443", "a.example").with_evasion(EvasionPolicy::sni_split());
-
-        let (next, path) = resolve_location(&original, "/start", "http://b.example/next")
-            .expect("resolve absolute downgrade");
-
-        assert_eq!(path, "/next");
-        assert!(next.tls_server_name().is_none());
-        assert_eq!(next.identity.evasion, EvasionPolicy::sni_split());
-    }
-
-    #[test]
-    fn redirect_location_unbrackets_ipv6_tls_server_name() {
-        let original = Target::tls("a.example:443", "a.example");
-        let (next, path) = resolve_location(&original, "/start", "https://[::1]:8443/next")
-            .expect("resolve ipv6 absolute redirect");
-        assert_eq!(path, "/next");
-        assert_eq!(next.authority, "[::1]:8443");
-        assert_eq!(next.tls_server_name(), Some("::1"));
-
-        let (rel, path) = resolve_location(&next, "/next", "//[2001:db8::9]/v2")
-            .expect("resolve ipv6 protocol-relative redirect");
-        assert_eq!(path, "/v2");
-        assert_eq!(rel.authority, "[2001:db8::9]:443");
-        assert_eq!(rel.tls_server_name(), Some("2001:db8::9"));
     }
 }

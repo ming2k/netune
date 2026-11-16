@@ -211,7 +211,7 @@ browser run fails before the first WebTransport session.
 Every wire parser crate owns an in-workspace `tests/fuzz.rs` target backed by
 `test_support::fuzz` (`crates/netune-http1/tests/fuzz.rs`,
 `crates/netune-http2/tests/fuzz.rs`, `crates/netune-http3/tests/fuzz.rs`,
-`crates/netune-quic/tests/fuzz.rs`,
+`crates/netune-quic/tests/fuzz.rs`, `crates/netune-tls/tests/fuzz.rs`,
 `crates/netune-webtransport/tests/fuzz.rs`)
 (`[INV-TEST-05..06]`, [ADR-0049](../adr/0049-in-workspace-fuzzing-and-differential-webtransport-gate.md)).
 Each target runs a fast deterministic corpus, truncation and mutation pass on

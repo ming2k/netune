@@ -155,29 +155,6 @@ impl std::fmt::Display for TraceId {
     }
 }
 
-/// Which model attempt this trace belongs to.
-///
-/// Deliberately a plain struct rather than an application-level contracts type: the trace
-/// crate must not depend on the ledger, and the integration layer maps its
-/// `RequestUsageKey` onto this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct AttemptRef {
-    pub round: u64,
-    pub turn: u32,
-    pub attempt: u32,
-}
-
-/// Who was called.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct EndpointRef {
-    pub provider: String,
-    pub model: String,
-    /// `host:port` of the connection, never a URL with credentials.
-    pub authority: String,
-}
-
 /// Provenance of the connection the attempt used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -325,7 +302,7 @@ pub struct ConnectionIdentity {
 
 /// Current schema of the trace envelope. Bumped when a consumer must change
 /// how it interprets the envelope; event-kind discriminants remain stable.
-pub const TRACE_SCHEMA_VERSION: u32 = 2;
+pub const TRACE_SCHEMA_VERSION: u32 = 3;
 
 /// One request attempt's complete recorded trace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,8 +310,12 @@ pub const TRACE_SCHEMA_VERSION: u32 = 2;
 pub struct RequestTrace {
     /// Identity, direction, start time and build provenance.
     pub meta: TraceMeta,
-    pub attempt: AttemptRef,
-    pub endpoint: EndpointRef,
+    /// `host:port` the attempt was addressed to, never a URL with credentials.
+    ///
+    /// This is the only "who was called" the trace carries. What the call
+    /// *meant* to its consumer (a tenant, a job, a retry ordinal) is the
+    /// consumer's to keep, keyed by [`TraceMeta::id`].
+    pub authority: String,
     pub connection: ConnectionInfo,
     /// The wire identity requested for the connection this attempt used.
     pub identity: ConnectionIdentity,

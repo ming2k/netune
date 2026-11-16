@@ -8,25 +8,35 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
 use http::Method;
-use netune::{Client, ClientConfig, Pool, RequestHead, Target, TcpConnector, TraceConfig};
+use netune::{
+    Client, ClientConfig, HttpProtocol, Pool, RequestBody, RequestHead, Target, TcpConnector,
+    TraceConfig,
+};
 use netune_http2::frame::{
-    FLAG_ACK, FRAME_HEADER_LEN, FRAME_HEADERS, FRAME_PING, FRAME_SETTINGS, FRAME_WINDOW_UPDATE,
-    Frame, FrameHeader, SETTING_MAX_CONCURRENT_STREAMS,
+    FLAG_ACK, FLAG_END_STREAM, FRAME_DATA, FRAME_HEADER_LEN, FRAME_HEADERS, FRAME_PING,
+    FRAME_RST_STREAM, FRAME_SETTINGS, FRAME_WINDOW_UPDATE, Frame, FrameHeader,
+    SETTING_MAX_CONCURRENT_STREAMS,
 };
 use netune_http2::hpack::{HpackDecoder, HpackEncoder};
-use netune_trace::Fidelity;
+use netune_trace::{EventKind, Fidelity};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
-fn client() -> Client<TcpConnector> {
+fn client() -> Client {
+    client_on(Pool::default())
+}
+
+fn client_on(pool: Pool) -> Client {
     Client::new(
         TcpConnector::new(),
-        Pool::default(),
+        pool,
         ClientConfig {
             enable_http2: true,
             ..ClientConfig::default()
@@ -35,7 +45,7 @@ fn client() -> Client<TcpConnector> {
 }
 
 fn target(port: u16) -> Target {
-    Target::plain(format!("127.0.0.1:{port}")).with_force_h2(true)
+    Target::plain(format!("127.0.0.1:{port}")).with_protocol(HttpProtocol::Http2)
 }
 
 async fn write_frame(socket: &mut TcpStream, frame: Frame) {
@@ -310,7 +320,8 @@ async fn a_finished_http2_body_returns_the_connection_to_the_pool() {
         }
     });
 
-    let client = client();
+    let pool = Pool::default();
+    let client = client_on(pool.clone());
     let key = client.pool_key(&target(port)).expect("plan");
 
     let mut first = client
@@ -322,7 +333,7 @@ async fn a_finished_http2_body_returns_the_connection_to_the_pool() {
         b"body"
     );
     assert_eq!(
-        client.pool().idle_count(&key),
+        pool.idle_count(&key),
         1,
         "a completed HTTP/2 exchange must return its connection to the pool"
     );
@@ -402,4 +413,215 @@ async fn a_peer_that_never_answers_settings_is_bounded() {
 
     let _ = release.send(());
     let _ = server.await;
+}
+
+#[tokio::test]
+async fn concurrent_cold_http2_requests_coalesce_and_multiplex_on_one_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let accepts_srv = Arc::clone(&accepts);
+    let (done_tx, done_rx) = oneshot::channel::<()>();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        accepts_srv.fetch_add(1, Ordering::SeqCst);
+        handshake(&mut socket).await;
+
+        let mut decoder = HpackDecoder::new();
+        let (s1, h1) = read_request(&mut socket, &mut decoder).await;
+        let (s2, h2) = read_request(&mut socket, &mut decoder).await;
+        assert_ne!(s1, s2);
+        let p1 = h1
+            .into_iter()
+            .find(|(k, _)| k == ":path")
+            .map(|(_, v)| v)
+            .expect("path 1");
+        let p2 = h2
+            .into_iter()
+            .find(|(k, _)| k == ":path")
+            .map(|(_, v)| v)
+            .expect("path 2");
+
+        // Reply out-of-order so true stream multiplexing is exercised.
+        let mut encoder = HpackEncoder::new();
+        write_response_head(&mut socket, &mut encoder, s2, "200", false).await;
+        write_response_head(&mut socket, &mut encoder, s1, "200", false).await;
+        write_frame(
+            &mut socket,
+            Frame::Data {
+                stream_id: s2,
+                end_stream: true,
+                payload: Bytes::from(p2.into_bytes()),
+            },
+        )
+        .await;
+        write_frame(
+            &mut socket,
+            Frame::Data {
+                stream_id: s1,
+                end_stream: true,
+                payload: Bytes::from(p1.into_bytes()),
+            },
+        )
+        .await;
+        drain_credit(&mut socket).await;
+        drain_credit(&mut socket).await;
+        let _ = done_rx.await;
+    });
+
+    let client = client();
+    let t = target(port);
+    let (r1, r2) = tokio::join!(
+        client.request(&t, RequestHead::new(Method::GET, "/first"), None),
+        client.request(&t, RequestHead::new(Method::GET, "/second"), None),
+    );
+    let mut r1 = r1.expect("first response");
+    let mut r2 = r2.expect("second response");
+    let body1 = r1.body.read_to_end().await.expect("body 1");
+    let body2 = r2.body.read_to_end().await.expect("body 2");
+
+    assert_eq!(body1.as_ref(), b"/first");
+    assert_eq!(body2.as_ref(), b"/second");
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        1,
+        "concurrent cold H2 calls must coalesce into one TCP+TLS+H2 connection"
+    );
+    let _ = done_tx.send(());
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn client_streams_request_body_over_http2() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        handshake(&mut socket).await;
+
+        let mut decoder = HpackDecoder::new();
+        let (stream_id, _) = read_request(&mut socket, &mut decoder).await;
+        let mut received = Vec::new();
+        loop {
+            let (hdr, payload) = read_frame(&mut socket).await;
+            if hdr.frame_type == FRAME_DATA {
+                assert_eq!(hdr.stream_id, stream_id);
+                received.extend_from_slice(&payload);
+                if (hdr.flags & FLAG_END_STREAM) != 0 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(received, b"chunk-1-chunk-2");
+
+        let mut encoder = HpackEncoder::new();
+        write_response_head(&mut socket, &mut encoder, stream_id, "200", false).await;
+        write_body(&mut socket, stream_id, b"uploaded").await;
+        drain_credit(&mut socket).await;
+    });
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+    let sender_task = tokio::spawn(async move {
+        tx.send(Bytes::from_static(b"chunk-1-"))
+            .await
+            .expect("send 1");
+        tx.send(Bytes::from_static(b"chunk-2"))
+            .await
+            .expect("send 2");
+    });
+
+    let mut response = client()
+        .request_traced(
+            &target(port),
+            RequestHead::new(Method::POST, "/upload"),
+            RequestBody::stream(rx),
+            TraceConfig::default(),
+        )
+        .await
+        .expect("send");
+    assert_eq!(response.head.status.as_u16(), 200);
+    let body = response.body.read_to_end().await.expect("body");
+    assert_eq!(body.as_ref(), b"uploaded");
+    let trace = response.body.trace().expect("traced");
+    assert!(
+        trace
+            .log
+            .iter()
+            .any(|ev| ev.kind == EventKind::RequestWriteEnd && ev.a == 15),
+        "RequestWriteEnd must record streamed byte count"
+    );
+
+    sender_task.await.expect("sender");
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn dropping_http2_body_early_cancels_only_that_stream_and_keeps_connection_alive() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (cancel_done_tx, cancel_done_rx) = oneshot::channel::<()>();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        handshake(&mut socket).await;
+
+        let mut decoder = HpackDecoder::new();
+        let (s1, _) = read_request(&mut socket, &mut decoder).await;
+        let mut encoder = HpackEncoder::new();
+        write_response_head(&mut socket, &mut encoder, s1, "200", false).await;
+        write_frame(
+            &mut socket,
+            Frame::Data {
+                stream_id: s1,
+                end_stream: false,
+                payload: Bytes::from(vec![b'a'; 128]),
+            },
+        )
+        .await;
+
+        let mut saw_rst = false;
+        let mut saw_credit = false;
+        while !saw_rst || !saw_credit {
+            let (hdr, payload) = read_frame(&mut socket).await;
+            match hdr.frame_type {
+                FRAME_RST_STREAM => {
+                    assert_eq!(hdr.stream_id, s1);
+                    let code = u32::from_be_bytes(payload[..4].try_into().expect("4 bytes"));
+                    assert_eq!(code, netune_http2::error_code::CANCEL);
+                    saw_rst = true;
+                }
+                FRAME_WINDOW_UPDATE => saw_credit = true,
+                other => panic!("unexpected frame {other}"),
+            }
+        }
+        let _ = cancel_done_tx.send(());
+
+        let (s2, _) = read_request(&mut socket, &mut decoder).await;
+        assert_eq!(s2, 3, "subsequent request must reuse the live H2 session");
+        write_response_head(&mut socket, &mut encoder, s2, "200", false).await;
+        write_body(&mut socket, s2, b"ok").await;
+        drain_credit(&mut socket).await;
+    });
+
+    let pool = Pool::default();
+    let client = client_on(pool.clone());
+    let t = target(port);
+
+    let first = client
+        .request(&t, RequestHead::new(Method::GET, "/abandon"), None)
+        .await
+        .expect("first");
+    assert_eq!(first.head.status.as_u16(), 200);
+    drop(first);
+    cancel_done_rx.await.expect("server observed RST_STREAM");
+
+    let mut second = client
+        .request(&t, RequestHead::new(Method::GET, "/after-cancel"), None)
+        .await
+        .expect("second");
+    let body = second.body.read_to_end().await.expect("body");
+    assert_eq!(body.as_ref(), b"ok");
+    server.await.expect("server");
 }

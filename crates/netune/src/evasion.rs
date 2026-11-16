@@ -31,6 +31,12 @@ pub struct SegmentingIo<T> {
     sleep: Option<Pin<Box<Sleep>>>,
 }
 
+impl<T: crate::connect::Transport> crate::connect::Transport for SegmentingIo<T> {
+    fn socket_tap(&mut self) -> Option<&mut netune_trace::SocketTap> {
+        self.inner.socket_tap()
+    }
+}
+
 impl<T> SegmentingIo<T> {
     /// Wrap `inner` to chunk outgoing writes into slices of at most `chunk_size` bytes
     /// for the first `segment_limit` bytes.

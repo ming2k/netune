@@ -40,7 +40,7 @@
 //! - **No priority scheduling.** `PRIORITY` frames are accepted and ignored (§5.3.1 permits it); a
 //!   scheduler is policy and this is a transport.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 
@@ -384,18 +384,25 @@ impl SessionObserver for NoObserver {
 /// Sends a wake-up when its task ends, whether it returned, panicked or was cancelled.
 struct WakeGuard {
     tx: mpsc::UnboundedSender<Wake>,
+    stream_id: u32,
 }
 
 impl Drop for WakeGuard {
     fn drop(&mut self) {
-        let _ = self.tx.send(Wake::HandlerDone);
+        // The task has produced its response but the runtime may not have
+        // marked its `JoinHandle` finished yet. The id lets the reap pass await
+        // that specific handle instead of relying on `is_finished`, which is
+        // racy: a wake sent from this drop can arrive before the task's
+        // completion is published, and a skipped reap would have no second
+        // wake to correct it.
+        let _ = self.tx.send(Wake::HandlerDone(self.stream_id));
     }
 }
 
 /// What wakes the session loop besides the socket.
 enum Wake {
-    /// A handler finished; its response is ready to be collected by the reap pass.
-    HandlerDone,
+    /// Stream `id`'s handler returned; its response is ready to be collected.
+    HandlerDone(u32),
     /// Stream `0` produced one body chunk.
     Chunk(u32, Bytes),
     /// Stream `0` closed its body channel; the terminator is owed once the queue drains.
@@ -532,6 +539,9 @@ struct SessionState {
     wake_tx: mpsc::UnboundedSender<Wake>,
     /// The receiving half, awaited alongside the socket.
     wake_rx: mpsc::UnboundedReceiver<Wake>,
+    /// Handler tasks whose wake arrived before the runtime published their
+    /// completion to `JoinHandle::is_finished`.
+    finished_handlers: HashSet<u32>,
 }
 
 /// What one stream is doing.
@@ -568,6 +578,7 @@ impl SessionState {
             body_capacity: config.body_channel_capacity,
             wake_tx,
             wake_rx,
+            finished_handlers: HashSet::new(),
         }
     }
 
@@ -721,6 +732,7 @@ impl SessionState {
                 stream_id,
                 error_code,
             } => {
+                self.finished_handlers.remove(&stream_id);
                 if let Some(state) = self.streams.remove(&stream_id)
                     && let Some(task) = state.handler
                 {
@@ -809,8 +821,13 @@ impl SessionState {
     /// Act on a wake-up from a handler task.
     fn on_wake(&mut self, wake: Wake) {
         match wake {
-            // Nothing to do here: the reap pass reads whatever finished.
-            Wake::HandlerDone => {}
+            Wake::HandlerDone(id) => {
+                // A reset stream's task may still send its guard; there is no
+                // response to reap and keeping the id would grow the set.
+                if self.streams.contains_key(&id) {
+                    self.finished_handlers.insert(id);
+                }
+            }
             Wake::Chunk(id, chunk) => self.outbound.push_back((id, chunk)),
             Wake::BodyEnd(id) => {
                 if let Some(state) = self.streams.get_mut(&id) {
@@ -917,6 +934,7 @@ impl SessionState {
             // see the `500` the panic deserves.
             let _wake = WakeGuard {
                 tx: wake_tx.clone(),
+                stream_id,
             };
             handler.handle(request).await
         });
@@ -949,14 +967,17 @@ impl SessionState {
             let ready = self
                 .streams
                 .iter()
-                .find(|(_, state)| {
-                    state
-                        .handler
-                        .as_ref()
-                        .is_some_and(tokio::task::JoinHandle::is_finished)
+                .find(|(id, state)| {
+                    state.handler.is_some()
+                        && (self.finished_handlers.contains(id)
+                            || state
+                                .handler
+                                .as_ref()
+                                .is_some_and(tokio::task::JoinHandle::is_finished))
                 })
                 .map(|(id, _)| *id);
             let Some(id) = ready else { break };
+            self.finished_handlers.remove(&id);
             let Some(state) = self.streams.get_mut(&id) else {
                 break;
             };
@@ -1094,25 +1115,43 @@ impl SessionState {
                 .get(&id)
                 .map(|state| state.send_window)
                 .unwrap_or(0);
-            match connection.write_data(id, &bytes, last, window).await {
+            // Write only what both windows allow and return to the read loop.
+            // `write_data` can wait for a WINDOW_UPDATE, and while it waits it
+            // cannot apply credit for any other stream on the connection; a
+            // multiplexed server must not let one blocked stream hold the
+            // whole session's send path.
+            let stream_credit = usize::try_from(window.max(0)).unwrap_or(usize::MAX);
+            let connection_credit =
+                usize::try_from(connection.connection_send_credit().max(0)).unwrap_or(usize::MAX);
+            let take = bytes.len().min(stream_credit).min(connection_credit);
+            if !bytes.is_empty() && take == 0 {
+                self.outbound.insert(offset, (id, bytes));
+                break;
+            }
+            let chunk = bytes.slice(..take);
+            let rest = bytes.slice(take..);
+            let is_last = last && rest.is_empty();
+            match connection.write_data(id, &chunk, is_last, window).await {
                 Ok(window) => {
                     progress = true;
                     if let Some(state) = self.streams.get_mut(&id) {
                         state.send_window = window;
-                        if !bytes.is_empty() {
+                        if take > 0 {
                             session.mark(
                                 id,
                                 StreamEvent::ResponseBodyChunk {
-                                    payload: bytes.len() as u32,
+                                    payload: take as u32,
                                 },
                             );
                         }
-                        if last {
+                        if is_last {
                             state.finished = true;
                             session.mark(id, StreamEvent::ResponseEnd);
                         }
                     }
-                    if last {
+                    if !rest.is_empty() {
+                        self.outbound.insert(offset, (id, rest));
+                    } else if is_last {
                         self.streams.remove(&id);
                     }
                 }

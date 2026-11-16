@@ -61,7 +61,8 @@ mod huffman_table;
 pub mod server;
 
 pub use client::{
-    H2ClientConnection, H2Response, H2ResponseEvent, H2ResponseHead, H2ResponseStream,
+    H2ClientConnection, H2ClientSession, H2HeadFuture, H2RequestSender, H2Response,
+    H2ResponseEvent, H2ResponseHead, H2ResponseStream, H2StreamPermit, H2StreamReader,
 };
 pub use connection::{
     CLIENT_PREFACE, DEFAULT_MAX_FRAME_SIZE, DEFAULT_WINDOW, LocalSettings, MAX_MAX_FRAME_SIZE,

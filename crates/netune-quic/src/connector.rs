@@ -146,6 +146,27 @@ impl QuicConnector {
         self.profile.name
     }
 
+    /// Configured egress confinement policy.
+    pub const fn confinement(&self) -> EgressConfinement {
+        self.confinement
+    }
+
+    /// Return a clone configured with `profile` while preserving socket
+    /// tuning, confinement, custom TLS, factories, session cache, and resolver.
+    pub fn for_profile(&self, profile: QuicProfile) -> Self {
+        Self {
+            profile,
+            socket_config: self.socket_config.clone(),
+            confinement: self.confinement,
+            custom_tls: self.custom_tls.clone(),
+            socket_factory: Arc::clone(&self.socket_factory),
+            congestion_factory: self.congestion_factory.clone(),
+            session_cache: self.session_cache.clone(),
+            client_tls: Arc::new(std::sync::Mutex::new(None)),
+            resolver: Arc::clone(&self.resolver),
+        }
+    }
+
     /// Sets the socket configuration (applied before any packet is sent, [INV-SOCKET-01]).
     pub fn with_socket_config(mut self, config: QuicSocketConfig) -> Self {
         self.socket_config = config;

@@ -215,9 +215,17 @@ impl H3Stream {
     async fn read_head_fields(&mut self) -> Result<Vec<HeaderField>, H3Error> {
         loop {
             let max_header_block = self.shared.max_header_block();
-            let frame = frame::read_frame(&mut *self, max_header_block)
-                .await
-                .map_err(|error| self.frame_error(error))?;
+            let frame = match frame::read_frame(&mut *self, max_header_block).await {
+                Ok(frame) => frame,
+                Err(error) => {
+                    if let Some(goaway_id) = self.shared.goaway()
+                        && self.id >= goaway_id
+                    {
+                        return Err(H3Error::GoAway { id: goaway_id });
+                    }
+                    return Err(self.frame_error(error));
+                }
+            };
             match frame {
                 Some(Frame::Headers(block)) => {
                     return self.shared.decode_headers(self.id, &block).await;
@@ -246,6 +254,11 @@ impl H3Stream {
                     }
                 }
                 None => {
+                    if let Some(goaway_id) = self.shared.goaway()
+                        && self.id >= goaway_id
+                    {
+                        return Err(H3Error::GoAway { id: goaway_id });
+                    }
                     return Err(H3Error::H3(
                         "stream ended before a field section".to_string(),
                     ));

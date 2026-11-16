@@ -27,7 +27,7 @@ pub trait Tap: Send + Unpin + 'static {
     type Output: Send + 'static;
 
     /// What this tap can truthfully report in a trace envelope.
-    const FIDELITY: Fidelity;
+    fn fidelity(&self) -> Fidelity;
 
     /// Record one successful read of `bytes` from the transport.
     #[inline(always)]
@@ -50,7 +50,11 @@ pub struct NoTap;
 
 impl Tap for NoTap {
     type Output = ();
-    const FIDELITY: Fidelity = Fidelity::none();
+
+    #[inline(always)]
+    fn fidelity(&self) -> Fidelity {
+        Fidelity::none()
+    }
 
     #[inline(always)]
     fn finish(self) {}
@@ -72,7 +76,11 @@ pub struct Counters {
 
 impl Tap for Counters {
     type Output = Self;
-    const FIDELITY: Fidelity = Fidelity::l0();
+
+    #[inline(always)]
+    fn fidelity(&self) -> Fidelity {
+        Fidelity::l0()
+    }
 
     #[inline(always)]
     fn read(&mut self, bytes: usize, _source: TimeSource) {
@@ -183,7 +191,10 @@ impl Ring {
 
 impl Tap for Ring {
     type Output = TapLog;
-    const FIDELITY: Fidelity = Fidelity::l1();
+
+    fn fidelity(&self) -> Fidelity {
+        Fidelity::l1()
+    }
 
     fn read(&mut self, bytes: usize, source: TimeSource) {
         let at_ns = self.now_ns();
@@ -217,6 +228,90 @@ impl Tap for Ring {
     }
 }
 
+/// The tap a long-lived socket carries: one strategy per attempt, switched at
+/// attempt boundaries.
+///
+/// A pooled connection outlives the attempt that opened it, so its tap cannot
+/// be a type parameter fixed at connect time, and it must not be a shared
+/// handle either: a shared handle would put an `Arc` and a lock on every read.
+/// This enum is the third option. It is owned by value by the socket wrapper,
+/// costs one predictable branch per syscall, and is replaced wholesale when
+/// the next attempt takes the connection ([`SocketTap::Off`] while idle).
+///
+/// It sits *on the socket*, beneath any TLS layer, so a `Read` it records is a
+/// socket read and [`TimeSource::Syscall`] means what it says for plaintext
+/// and TLS connections alike.
+#[derive(Debug, Default)]
+pub enum SocketTap {
+    /// No observation.
+    #[default]
+    Off,
+    /// L0 counters of socket bytes and calls.
+    Counters(Counters),
+    /// The L1 event ring.
+    Ring(Ring),
+}
+
+/// What a [`SocketTap`] hands to the cold path when an attempt releases it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TapArtifact {
+    /// The tap was off, or the stream has no socket to observe.
+    None,
+    /// Socket byte and call totals for the attempt.
+    Counters(Counters),
+    /// The attempt's socket timeline.
+    Log(TapLog),
+}
+
+impl TapArtifact {
+    /// The fidelity this artifact proves the attempt was observed at.
+    pub const fn fidelity(&self) -> Fidelity {
+        match self {
+            Self::None => Fidelity::none(),
+            Self::Counters(_) => Fidelity::l0(),
+            Self::Log(_) => Fidelity::l1(),
+        }
+    }
+}
+
+impl Tap for SocketTap {
+    type Output = TapArtifact;
+
+    fn fidelity(&self) -> Fidelity {
+        match self {
+            Self::Off => Fidelity::none(),
+            Self::Counters(_) => Fidelity::l0(),
+            Self::Ring(_) => Fidelity::l1(),
+        }
+    }
+
+    #[inline]
+    fn read(&mut self, bytes: usize, source: TimeSource) {
+        match self {
+            Self::Off => {}
+            Self::Counters(counters) => counters.read(bytes, source),
+            Self::Ring(ring) => ring.read(bytes, source),
+        }
+    }
+
+    #[inline]
+    fn wrote(&mut self, bytes: usize) {
+        match self {
+            Self::Off => {}
+            Self::Counters(counters) => counters.wrote(bytes),
+            Self::Ring(ring) => ring.wrote(bytes),
+        }
+    }
+
+    fn finish(self) -> TapArtifact {
+        match self {
+            Self::Off => TapArtifact::None,
+            Self::Counters(counters) => TapArtifact::Counters(counters.finish()),
+            Self::Ring(ring) => TapArtifact::Log(ring.finish()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,7 +320,34 @@ mod tests {
     fn no_tap_is_zero_sized_and_keeps_its_fidelity_honest() {
         assert_eq!(std::mem::size_of::<NoTap>(), 0);
         assert_eq!(std::mem::size_of::<Counters>(), 32);
-        assert_eq!(NoTap::FIDELITY, Fidelity::none());
+        assert_eq!(NoTap.fidelity(), Fidelity::none());
+    }
+
+    #[test]
+    fn a_socket_tap_reports_the_fidelity_of_the_strategy_it_holds() {
+        let mut tap = SocketTap::Off;
+        tap.read(10, TimeSource::Syscall);
+        assert_eq!(tap.fidelity(), Fidelity::none());
+        assert_eq!(tap.finish(), TapArtifact::None);
+
+        let mut tap = SocketTap::Counters(Counters::default());
+        tap.read(10, TimeSource::Syscall);
+        tap.wrote(4);
+        match tap.finish() {
+            TapArtifact::Counters(counters) => {
+                assert_eq!((counters.read_bytes, counters.write_bytes), (10, 4));
+            }
+            other => panic!("expected counters, got {other:?}"),
+        }
+
+        let mut tap = SocketTap::Ring(Ring::new(Instant::now(), 8, None));
+        tap.wrote(4);
+        let artifact = tap.finish();
+        assert_eq!(artifact.fidelity(), Fidelity::l1());
+        match artifact {
+            TapArtifact::Log(log) => assert_eq!(log.len(), 1),
+            other => panic!("expected a log, got {other:?}"),
+        }
     }
 
     #[test]

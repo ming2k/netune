@@ -81,6 +81,74 @@ impl WsHandshake {
     }
 }
 
+/// The byte stream under a client WebSocket: the upgraded connection, plus
+/// the duty to hand its socket events back.
+///
+/// An upgraded connection is never pooled and is consumed by its
+/// [`WsStream`], so nothing above can collect the socket tap when the session
+/// ends. This wrapper does it on drop, merging the socket timeline into the
+/// session's recorder whether the upgrade failed or the session closed years
+/// later.
+pub struct WsIo {
+    stream: Box<dyn crate::connect::Transport>,
+    recorder: Option<TraceCollector>,
+}
+
+impl WsIo {
+    pub(crate) fn new(
+        stream: Box<dyn crate::connect::Transport>,
+        recorder: Option<TraceCollector>,
+    ) -> Self {
+        Self { stream, recorder }
+    }
+}
+
+impl Drop for WsIo {
+    fn drop(&mut self) {
+        use crate::connect::Transport as _;
+        if let Some(tap) = self.stream.swap_tap(netune_trace::SocketTap::Off)
+            && let netune_trace::TapArtifact::Log(log) = netune_trace::Tap::finish(tap)
+            && let Some(recorder) = &self.recorder
+        {
+            recorder.merge(log);
+        }
+    }
+}
+
+impl AsyncRead for WsIo {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for WsIo {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
+    }
+}
+
 /// A full-duplex client-side WebSocket stream over an asynchronous transport.
 pub struct WsStream<S> {
     stream: S,
@@ -217,11 +285,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                 // individually visible in the trace.
                 let frame_class = match frame.opcode {
                     Opcode::Text => FrameClass::Text,
-                    Opcode::Binary => FrameClass::Usage,
-                    Opcode::Ping | Opcode::Pong | Opcode::Close => FrameClass::KeepAlive,
+                    Opcode::Binary => FrameClass::Binary,
+                    Opcode::Ping | Opcode::Pong => FrameClass::KeepAlive,
+                    Opcode::Close => FrameClass::Close,
                     Opcode::Continuation => match self.assembler.pending_opcode() {
                         Some(Opcode::Text) => FrameClass::Text,
-                        Some(Opcode::Binary) => FrameClass::Usage,
+                        Some(Opcode::Binary) => FrameClass::Binary,
                         _ => FrameClass::Unknown,
                     },
                 };
@@ -286,9 +355,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                     if let Some(ref rec) = self.recorder {
                         let class = match &msg {
                             Message::Text(_) => FrameClass::Text,
-                            Message::Binary(_) => FrameClass::Usage,
+                            Message::Binary(_) => FrameClass::Binary,
                             Message::Ping(_) | Message::Pong(_) => FrameClass::KeepAlive,
-                            Message::Close(_) => FrameClass::Open,
+                            Message::Close(_) => FrameClass::Close,
                         };
                         rec.mark(EventKind::ProtocolFrame, class.code() as u32, 0);
                     }

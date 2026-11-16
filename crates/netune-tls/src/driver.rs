@@ -329,6 +329,15 @@ impl<S> OwnedTlsStream<S> {
         self.alpn.as_deref()
     }
 
+    /// The transport beneath the record layer.
+    ///
+    /// This exists so an orchestrator can reach the transport's non-byte
+    /// controls, such as an observation tap on the socket. Reading or writing
+    /// through it would desynchronise the record layer.
+    pub fn transport_mut(&mut self) -> &mut S {
+        &mut self.socket
+    }
+
     /// Which version's protectors the connection carries.
     #[must_use]
     pub const fn protectors_kind(&self) -> ProtectorsKind {

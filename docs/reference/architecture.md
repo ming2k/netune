@@ -84,13 +84,17 @@ The architectural evolution is governed by the following decisions:
 | [ADR-0036](../adr/0036-dplpmtud-probe-state-machine.md) | DPLPMTUD Probe State Machine | Validated path MTU grows only on an ACKed probe; probes carry no application frames (`INV-QUIC-24`). |
 | [ADR-0041](../adr/0041-diagnostic-spine-side-table.md) | Diagnostic Spine | Failure narration is a bounded side table on the trace; stable codes; evidence survives `Observation::Off` (`INV-DIAG-01..02`, `INV-DIAG-05..06`). |
 | [ADR-0042](../adr/0042-trace-identity-and-sink-context.md) | Trace Identity & Sink Context | One real trace id across directions; sink v2 carries the envelope; listener events share the control scope (`INV-DIAG-03..04`, `INV-DIAG-07`). |
+| [ADR-0050](../adr/0050-request-level-exchange-seam-and-mock-transport.md) | Request-Level Exchange Seam | `Client` holds `Arc<dyn RoundTrip>`; `Wire` and `mock::Mock` share `Body`, decoding, redirects, and trace derivation (`INV-EXCHANGE-01..02`). |
+| [ADR-0051](../adr/0051-attempt-evidence-is-neutral-socket-level-and-always-reachable.md) | Neutral, Socket-Level Trace Evidence | Consumer-neutral trace vocabulary; socket tap beneath TLS; `Body::trace()` preserved across every terminal state (`INV-TRACE-10..12`). |
+| [ADR-0052](../adr/0052-replay-and-exchange-bounds.md) | Replay & Exchange Bounds | Stale-socket replay gated by `Request::is_replay_safe` and peer refusals; exchange timeouts return attempt evidence (`INV-TRANSPORT-06..08`). |
+| [ADR-0053](../adr/0053-unified-multiplexed-protocols-and-pool-governance.md) | Unified Multiplexed Protocols & Pool | `HttpProtocol` unifies HTTP/1.1, HTTP/2 (`H2ClientSession`), and HTTP/3 (`H3Session`) behind `RoundTrip`; removes `H2Client`; adds pool governance and `netune-tls` fuzzing (`INV-EXCHANGE-03`, `INV-TRANSPORT-09..10`, `INV-TEST-06`). |
 
 ---
 
 ## System Invariants
 
 ### 1. Replay Safety (`[INV-TRANSPORT-01]`)
-A pooled connection that drops before any byte of a response head is parsed is transparently replaced with a fresh connection. If the connection fails after any response head byte has been parsed, it must not be re-attempted.
+A pooled connection that drops before any byte of a response head is parsed is replaced with a fresh connection only when the request is replay-safe or the peer refused the stream (`INV-TRANSPORT-06`); a socket found dead at checkout is discarded before a request byte is written. If the connection fails after any response head byte has been parsed, it must not be re-attempted.
 
 ### 2. Documentation Firewall
 Public documentation surfaces (`docs/{tutorials,how-to,reference,explanation}/`) must never author relative links into internal contributor files (`docs/dev/**`). Contributor-facing rules live under `docs/dev/standards/`, reached through `CONTRIBUTING.md`.

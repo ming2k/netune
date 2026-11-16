@@ -63,6 +63,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
+## Inject Faults at the Connector Seam
+
+To fault-inject live `Client` requests without touching raw stream wiring, wrap any `Connector` with `FaultConnector`:
+
+```rust,no_run
+use std::time::Duration;
+use netune::{Client, ClientConfig, Fault, FaultConnector, FaultScript, Pool, TcpConnector};
+
+# fn build() -> Client {
+let connector = FaultConnector::new(TcpConnector::new(), |_target| {
+    FaultScript::new([(64, Fault::Delay(Duration::from_millis(50))), (128, Fault::Reset)])
+});
+Client::new(connector, Pool::default(), ClientConfig::default())
+# }
+```
+
+---
+
 ## Clean Passthrough Verification
 
 An empty `FaultScript` introduces zero side effects: every read and write passes through without overhead or memory allocation.

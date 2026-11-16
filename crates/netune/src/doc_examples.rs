@@ -48,3 +48,6 @@ pub struct WebSocketExamples;
 
 #[doc = include_str!("../../../docs/how-to/diagnose-failures.md")]
 pub struct DiagnoseFailuresExamples;
+
+#[doc = include_str!("../../../docs/how-to/mock-requests.md")]
+pub struct MockRequestsExamples;

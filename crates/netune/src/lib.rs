@@ -11,7 +11,7 @@
 //! TLS via the owned engine with configurable profiles
 //! ([`TlsProfile`], [`Preset`], [`TlsRouterConnector`]), [`TimedIo`] recording every
 //! read/write syscall boundary, a keep-alive pool ([`Pool`]) with profile isolation
-//! and transparent stale-connection recovery (`INV-TRANSPORT-01`), `TCP_INFO` sampling
+//! and replay-safe stale-connection recovery (`INV-TRANSPORT-01..06`), `TCP_INFO` sampling
 //! for RTT and retransmits, HTTP `CONNECT` and SOCKS5 proxies ([`Proxy`], [`ProxyConnector`]),
 //! redirect following with credential rules, streaming `Content-Encoding` decoding,
 //! in-process chaos testing ([`FaultIo`]), and [`Client::send`] driving the codec end to end.
@@ -27,8 +27,11 @@
 //! `docs/adr/0009` for the evidence and for what would reopen the question.
 //!
 //! L2 frame parsing, capture, forging and optional injection are housed in the companion
-//! crate `netune-probe`; nothing there is linked by default. HTTP/2 is implemented in
-//! `netune-http2` and driven through [`H2Client`] when the `http2` feature is on.
+//! crate `netune-probe`; nothing there is linked by default. [`Client`] executes HTTP/1.1,
+//! HTTP/2 (via [`netune_http2::H2ClientSession`] when `http2` is enabled), and HTTP/3 (via
+//! [`netune_http3::H3Session`] when `http3` is enabled) uniformly behind [`RoundTrip`]
+//! ([`Wire`] for real connections and [`mock::Mock`] for scripted tests), with buffered or
+//! streaming [`RequestBody`] uploads and a shared [`Pool`].
 //!
 //! # This crate is one direction of travel
 //!
@@ -46,23 +49,27 @@
 #[cfg(doctest)]
 mod doc_examples;
 
+mod body;
 mod client;
 mod connect;
 mod decompress;
 mod dns;
 mod error;
 mod evasion;
-#[cfg(feature = "http2")]
-mod h2_client;
+mod exchange;
+mod fault;
 mod handshake;
+pub mod mock;
 mod pool;
 mod profile;
 mod proxy;
+mod redirect;
 mod socket;
 mod tcp_info;
 mod tls;
 mod tls_profile;
 mod udp;
+mod wire;
 #[cfg(feature = "ws")]
 mod ws;
 #[cfg(feature = "ws")]
@@ -71,10 +78,11 @@ mod ws_session;
 /// Capacity of the throwaway trace ring a [`Client::request`] uses.
 pub const DEFAULT_TRACE_CAPACITY: usize = 1024;
 
-pub use client::{BodyStream, Client, ClientConfig, Observation, Response, TraceConfig};
+pub use body::{Body, BodyState};
+pub use client::{Client, ClientConfig, Observation, Response, TraceConfig};
 pub use connect::{
-    ConfinementRefused, Connector, EgressConfinement, Established, Target, TcpConnector, Transport,
-    is_public_ip,
+    ConfinementRefused, Connector, EgressConfinement, Established, HttpProtocol, TappedSocket,
+    Target, TcpConnector, Transport, Untapped, is_public_ip,
 };
 pub use decompress::Decoder;
 pub use dns::{DnsResolver, StaticResolver, SystemResolver};
@@ -82,8 +90,11 @@ pub use error::{
     AttemptError, ConnectError, ConnectErrorKind, NetError, ResolveError, ResolveErrorKind,
 };
 pub use evasion::SegmentingIo;
-#[cfg(feature = "http2")]
-pub use h2_client::H2Client;
+pub use exchange::{
+    Attempt, BodySource, BoxFuture, Exchange, ObservationLevel, Released, Request, RequestBody,
+    RequestBodySource, RequestStream, RoundTrip,
+};
+pub use fault::FaultConnector;
 pub use http::{HeaderMap, Method};
 pub use netune_http1::{BodyKind, RequestHead, ResponseHead};
 #[cfg(feature = "http2")]
@@ -95,16 +106,18 @@ pub use netune_http2::{
 /// [`TimedIo`] and [`FaultIo`] without naming the leaf crate. They live in
 /// `netune-io` because ingress needs the identical tap and the two
 /// orchestrators must not depend on each other (ADR-0011).
-pub use netune_io::{Fault, FaultIo, FaultScript, RingIo, TimedIo};
+pub use netune_io::{Fault, FaultIo, FaultScript, TimedIo};
 pub use netune_tls::handshake::ServerCertVerifier;
 pub use netune_trace::{
     ConnectionIdentity, DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EvasionPolicy, Fidelity,
-    RequestTrace, TraceCollector,
+    RequestTrace, SocketTap, TapArtifact, TraceCollector,
 };
 #[cfg(feature = "ws")]
 pub use netune_ws::{CloseCode, CloseReason, Message as WsMessage, Opcode as WsOpcode};
 pub use pool::{IdleConnection, Pool, PoolConfig, PoolKey};
-pub use profile::{ConnectionPlan, H1Registry, H1WireProfile, HeaderCasing, ProfileId};
+pub use profile::{
+    ConnectionPlan, H1Registry, H1WireProfile, HeaderCasing, Http2Mode, PlannedTransport, ProfileId,
+};
 #[cfg(feature = "http2")]
 pub use profile::{H2Registry, H2RequestRegistry};
 pub use proxy::{Proxy, ProxyConnector};
@@ -116,8 +129,9 @@ pub use udp::{
     DatagramConnector, DatagramTransport, EstablishedDatagrams, Socks5DatagramConnector,
     UdpConnector,
 };
+pub use wire::Wire;
 #[cfg(feature = "ws")]
-pub use ws::{WsHandshake, WsLimits, WsStream};
+pub use ws::{WsHandshake, WsIo, WsLimits, WsStream};
 #[cfg(feature = "ws")]
 pub use ws_session::{WsSession, WsSessionConfig};
 

@@ -239,16 +239,7 @@ async fn a_two_request_connection_yields_two_exchanges_from_the_real_transport()
             netune_trace::TraceId::new("two"),
             netune_trace::Direction::Ingress,
         ),
-        attempt: netune_trace::AttemptRef {
-            round: 0,
-            turn: 0,
-            attempt: 0,
-        },
-        endpoint: netune_trace::EndpointRef {
-            provider: String::new(),
-            model: String::new(),
-            authority: address_string(),
-        },
+        authority: address_string(),
         connection: netune_trace::ConnectionInfo::default(),
         identity: netune_trace::ConnectionIdentity::default(),
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,

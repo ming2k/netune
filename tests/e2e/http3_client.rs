@@ -321,16 +321,7 @@ async fn test_http3_client_request_response_and_trace() {
             netune_trace::TraceId::new("http3-e2e"),
             netune_trace::Direction::Egress,
         ),
-        attempt: netune_trace::AttemptRef {
-            round: 1,
-            turn: 1,
-            attempt: 1,
-        },
-        endpoint: netune_trace::EndpointRef {
-            provider: "test".into(),
-            model: "test".into(),
-            authority: addr.to_string(),
-        },
+        authority: addr.to_string(),
         connection: netune_trace::ConnectionInfo::default(),
         identity: netune_trace::ConnectionIdentity::default(),
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
@@ -700,4 +691,171 @@ async fn extended_connect_requires_only_the_server_setting() {
         .connect_extended("webtransport", "https://localhost/session")
         .await
         .expect("extended connect");
+}
+
+#[cfg(feature = "http3")]
+#[tokio::test]
+async fn unified_client_executes_http3_multiplexed_streaming_and_confinement() {
+    use http::Method;
+    use netune::{
+        Client, ClientConfig, HttpProtocol, Pool, RequestBody, RequestHead, Target, TcpConnector,
+        TraceConfig, Wire,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (server, addr) = make_server_endpoint().await;
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let accepts_srv = Arc::clone(&accepts);
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let server_task = tokio::spawn(async move {
+        let conn = server.accept().await.expect("server handshake");
+        accepts_srv.fetch_add(1, Ordering::SeqCst);
+        let mut h3_conn = netune_http3::H3ServerConnection::new(
+            conn,
+            &netune_http3::H3SettingsProfile::default(),
+        )
+        .await
+        .expect("server h3 connection");
+
+        let accept_loop = async {
+            while let Some(request) = h3_conn.accept().await.expect("accept h3 request") {
+                let (req, mut stream) = request.into_parts();
+                let path = req.uri().path().to_string();
+                tokio::spawn(async move {
+                    let mut uploaded = Vec::new();
+                    while let Some(chunk) = stream.recv_data().await.expect("recv data") {
+                        uploaded.extend_from_slice(&chunk);
+                    }
+                    let _ = stream.recv_trailers().await.expect("recv trailers");
+                    let response = http::Response::builder()
+                        .status(200)
+                        .header("content-type", "text/plain")
+                        .body(())
+                        .expect("response head");
+                    stream.send_response(response).await.expect("send response");
+                    if path == "/upload" {
+                        stream
+                            .send_data(Bytes::from(uploaded))
+                            .await
+                            .expect("send upload echo");
+                    } else {
+                        stream
+                            .send_data(Bytes::from(path.into_bytes()))
+                            .await
+                            .expect("send path echo");
+                    }
+                    stream.finish().await.expect("finish");
+                });
+            }
+        };
+        tokio::select! {
+            _ = accept_loop => {}
+            _ = done_rx => {}
+        }
+    });
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let client_crypto = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("safe protocols")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    let quic = QuicConnector::new(QuicProfile::chrome_quic()).with_tls_config(client_crypto);
+
+    // StrictPublic confinement inherited from TcpConnector refuses loopback before dialing UDP.
+    let confined_client = Client::with_transport(
+        Wire::new(TcpConnector::strict_public(), Pool::default()).with_quic(quic.clone()),
+        ClientConfig::default(),
+    );
+    let target = Target::tls(addr.to_string(), "localhost")
+        .with_protocol(HttpProtocol::Http3)
+        .with_quic_profile("chrome-quic");
+    let confined_err = confined_client
+        .request(&target, RequestHead::new(Method::GET, "/blocked"), None)
+        .await
+        .expect_err("loopback must be blocked by confinement");
+    assert_eq!(confined_err.class(), "security");
+    assert_eq!(accepts.load(Ordering::SeqCst), 0);
+
+    let pool = Pool::default();
+    let client = Client::with_transport(
+        Wire::new(TcpConnector::new(), pool.clone()).with_quic(quic),
+        ClientConfig::default(),
+    );
+    let key = client.pool_key(&target).expect("plan");
+
+    // Concurrent cold H3 calls coalesce onto one QUIC/H3 session.
+    let (r1, r2) = tokio::join!(
+        client.request_traced(
+            &target,
+            RequestHead::new(Method::GET, "/one"),
+            None,
+            TraceConfig::default(),
+        ),
+        client.request(&target, RequestHead::new(Method::GET, "/two"), None),
+    );
+    let mut r1 = r1.expect("h3 one");
+    let mut r2 = r2.expect("h3 two");
+    assert_eq!(r1.head.version, http::Version::HTTP_3);
+    assert_eq!(r2.head.version, http::Version::HTTP_3);
+    assert_eq!(r1.body.read_to_end().await.expect("b1").as_ref(), b"/one");
+    assert_eq!(r2.body.read_to_end().await.expect("b2").as_ref(), b"/two");
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        1,
+        "concurrent cold H3 requests must coalesce into one QUIC connection"
+    );
+    assert_eq!(pool.idle_count(&key), 1);
+
+    let trace1 = r1.body.trace().expect("traced");
+    assert_eq!(trace1.identity.h3_profile.as_deref(), Some("chrome-quic"));
+    assert!(
+        trace1.log.iter().any(|e| e.kind == EventKind::QuicStart),
+        "cold dial must record QuicStart"
+    );
+
+    // Streaming request body over the pooled H3 session records ConnectReused & RequestWriteEnd.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+    let uploader = tokio::spawn(async move {
+        tx.send(Bytes::from_static(b"stream-"))
+            .await
+            .expect("send 1");
+        tx.send(Bytes::from_static(b"h3")).await.expect("send 2");
+    });
+    let mut r3 = client
+        .request_traced(
+            &target,
+            RequestHead::new(Method::POST, "/upload"),
+            RequestBody::stream(rx),
+            TraceConfig::default(),
+        )
+        .await
+        .expect("h3 upload");
+    assert_eq!(
+        r3.body.read_to_end().await.expect("b3").as_ref(),
+        b"stream-h3"
+    );
+    uploader.await.expect("uploader");
+
+    let trace3 = r3.body.trace().expect("trace3");
+    assert!(trace3.connection.reused, "third call must reuse H3 session");
+    assert!(
+        trace3
+            .log
+            .iter()
+            .any(|e| e.kind == EventKind::ConnectReused),
+        "reused H3 stream must mark ConnectReused"
+    );
+    assert!(
+        trace3
+            .log
+            .iter()
+            .any(|e| e.kind == EventKind::RequestWriteEnd && e.a == 9),
+        "streamed H3 upload byte count must be recorded"
+    );
+
+    let _ = done_tx.send(());
+    server_task.await.expect("server");
 }

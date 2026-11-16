@@ -31,11 +31,11 @@ This document provides a factual overview of all crates comprising the `netune` 
 ### `netune-trace`
 - **Dependencies**: `serde`, `serde_json` (dev). No runtime networking or clock dependencies.
 - **Key Types**:
-  - `RequestTrace`: Envelope storing attempt identifiers, connection identity, fidelity, and event logs.
+  - `RequestTrace`: Envelope storing the authority, connection identity, fidelity, and event logs; consumer-domain meaning (tenant, job, retry ordinal) stays outside the trace, keyed by `TraceMeta::id`.
   - `EventLog`: Ring buffer supporting delta-encoded microsecond timestamps with loss tracking.
   - `TraceCollector`: the only public cold-path handle; control/protocol marks go here, never byte events.
   - `Tap` / `NoTap` / `Counters` / `Ring`: the typed byte-path observation strategy owned by `TimedIo`/`RingIo`; `TapLog` is the only artifact that can be merged into a collector ([ADR-0017](../adr/0017-tiered-observation-and-connection-identity.md), [ADR-0018](../adr/0018-one-trace-collector-per-attempt.md)).
-  - `DerivedTimings`: Pure derived metrics (`connect_us`, `tcp_us`, `tls_us`, `ttfb_us`, `stream_us`, `e2e_us`).
+  - `DerivedTimings`: Pure derived metrics (`connect_us`, `tcp_us`, `tls_us`, `ttfb_us`, `payload_span_us`, `e2e_us`).
   - `TraceSink`: optional per-event stream, for a consumer that needs more than the bounded ring window (a long-lived relay); the ring stays the record of truth for the attempt ([ADR-0010](../adr/0010-quic-ownership-and-trace-sink.md)).
   - `DiagnosticCode` / `DiagnosticTable` / `Diagnosis`: stable failure codes, bounded side-table detail, and the pure `diagnose()` review derivation ([ADR-0041](../adr/0041-diagnostic-spine-side-table.md)).
   - `TraceDiff` / `diff`: pure comparison of two snapshots for regression review; `netune-diagnose diff` is the offline command.
@@ -103,7 +103,7 @@ This document provides a factual overview of all crates comprising the `netune` 
 - **Dependencies**: `bytes`, `http`, `tokio` (io-util, sync, time). No third-party HTTP/2 or HPACK implementation.
 - **Key Types**:
   - `H2Connection` / `Role`: the direction-agnostic connection machine — frame reading bounded by the *local* advertised maximum, SETTINGS exchange and acknowledgement, PING echo, GOAWAY bookkeeping, HPACK table, `CONTINUATION` contiguity, and both flow-control windows. `Role` is a field, not a second module ([INV-SERVER-08](../adr/0012-http2-ingress.md)).
-  - `client::H2ClientConnection`: the client role — preface, odd stream ids, fingerprinted SETTINGS and pseudo-header order; it stores the connection and request halves separately, and `start_request` reads only the request half ([ADR-0020](../adr/0020-split-multiplexed-profiles.md)).
+  - `client::H2ClientConnection` / `H2ClientSession`: the client role — preface, odd stream ids, fingerprinted SETTINGS and pseudo-header order, plus a background multiplexed connection driver answering idle `PING`/`SETTINGS`/`GOAWAY` and isolating stream cancellations (`RST_STREAM(CANCEL)`); connection and request halves remain separated ([ADR-0020](../adr/0020-split-multiplexed-profiles.md), [ADR-0053](../adr/0053-unified-multiplexed-protocols-and-pool-governance.md)).
   - `server::ServerSession` / `H2Handler` / `H2Request` / `SessionObserver`: the server role — stream table, `REFUSED_STREAM` shedding, credit replenished on handler consumption, one writer task, and a wake-up channel so a finished handler is written without waiting for the peer to speak ([INV-SERVER-11](../adr/0012-http2-ingress.md)).
   - `HpackEncoder` / `HpackDecoder`: RFC 7541 static and dynamic tables plus the 257-symbol Huffman coder.
   - `H2ConnectionProfile`: initial SETTINGS order/values, connection window, HPACK table size and priority-frame policy; this half keys the pool.
@@ -122,18 +122,19 @@ This document provides a factual overview of all crates comprising the `netune` 
 
 ### `netune`
 - **Key Types**:
-  - `Client`: Drives the request lifecycle, redirect handling, and response body streaming. `ClientConfig::h2_handshake_timeout` bounds a newly dialed HTTP/2 preface + SETTINGS exchange (10 s by default); a pooled connection is not re-bound.
-  - `H2Client`: Explicit HTTP/2 client with fingerprint impersonation; `with_handshake_timeout` applies the same preface + SETTINGS bound when the caller drives the connection directly.
+  - `Client` / `RoundTrip` / `Wire` / `mock::Mock`: `Client` is protocol-neutral over `Arc<dyn RoundTrip>`, driving request planning, redirects, response decompression, exchange timeouts, and traces uniformly across `Wire` (HTTP/1.1, HTTP/2, HTTP/3) and `Mock` ([ADR-0050](../adr/0050-request-level-exchange-seam-and-mock-transport.md), [ADR-0053](../adr/0053-unified-multiplexed-protocols-and-pool-governance.md)). `ClientConfig::h2_handshake_timeout` bounds a newly dialed HTTP/2 preface + SETTINGS exchange (10 s by default); `response_head_timeout` and `body_idle_timeout` bound post-dispatch stalls (`[INV-TRANSPORT-08]`).
+  - `Target` / `HttpProtocol` / `RequestBody`: `Target::with_protocol` selects `Auto`, `Http1`, `Http2`, or `Http3` explicitly; `RequestBody::Stream` (`RequestBodySource`) streams uploads incrementally across HTTP/1.1 (`netune_http1::RequestWriter`), HTTP/2, and HTTP/3 without buffering.
   - `Client::connect_ws` / `WsStream`: RFC 6455 client upgrade over the owned transport, with automatic pong and close-handshake completion ([ADR-0007](../adr/0007-owned-client-websocket-codec.md)); `WsHandshake::with_handshake_timeout` bounds the upgrade response (10 s by default).
   - `WsSession` / `WsSessionConfig`: Client-driven heartbeat liveness (ping interval + pong deadline) for long-lived WebSocket sessions; automatic reconnection is deliberately excluded as harness policy.
-  - `Pool` / `PoolKey`: Connection reuse keyed on `(authority, ConnectionIdentity)` with a 20 s idle timeout. The typed key makes an omitted identity axis a compile error, not a cache bug.
-  - `ConnectionPlan` / `ProfileId`: every TLS/H1/H2 name resolves through `Client::plan` before a socket is opened; unknown profiles fail loudly ([ADR-0019](../adr/0019-connection-plan-and-wire-profile-registry.md)).
+  - `Pool` / `PoolKey` / `PoolConfig`: Connection reuse and multiplexed H2/H3 session sharing keyed on `(authority, ConnectionIdentity)`, with per-key and global idle caps (`max_idle_per_authority`, `max_idle_total`), per-authority in-flight concurrency limits (`max_in_flight_per_authority`), cold-dial singleflight coalescing, synchronous `Pool::reap()`, and a lazy weak-reference background reaper (`[INV-TRANSPORT-09..10]`).
+  - `ConnectionPlan` / `PlannedTransport` / `ProfileId`: every TLS/H1/H2/QUIC/H3 name resolves through `Client::plan` before a socket is opened; unknown profiles fail loudly ([ADR-0019](../adr/0019-connection-plan-and-wire-profile-registry.md)).
+  - `Wire::with_quic`: supplies a custom `netune_quic::QuicConnector` for `HttpProtocol::Http3` targets while inheriting `Connector` egress confinement.
   - `H1WireProfile` / `H1Registry`: declarative HTTP/1 header order and casing, applied per request (not part of the pool key).
   - `H2Registry`: built-in and caller-supplied HTTP/2 fingerprints, resolved independently of the TLS-name match.
   - `TlsProfile` & `TlsRouterConnector`: Configures and lazily compiles TLS identities; the handshake has a 10 s default bound (`with_handshake_timeout`), separate from the DNS/TCP connect timeout.
   - `ProxyConnector`: HTTP `CONNECT` and SOCKS5 tunnel exchange; `with_handshake_timeout` bounds the whole exchange (10 s by default). The proxy hop is plaintext, and `https://` proxy URLs are refused rather than downgraded.
   - Establishment bounds (`[INV-TRANSPORT-05]`): DNS/TCP, proxy tunnel, TLS, HTTP/2 preface + SETTINGS, WebSocket upgrade and SOCKS5 UDP associate each complete under a configurable bound; expiry is a retryable `connect` failure naming the phase ([ADR-0040](../adr/0040-egress-handshakes-share-a-bound.md)).
-  - `FaultIo`: In-process fault injection engine.
+  - `FaultIo` & `FaultConnector`: In-process fault injection for raw streams and `Wire` connectors.
   - `DnsResolver` & `StaticResolver`: Asynchronous, mockable DNS resolution.
   - `SocketConfig`: L3/L4 transport tuning — TTL, buffer sizing, MSS, `SO_MARK`,
     `SO_BINDTODEVICE`, a bound source address, TCP keepalive, `IP_TOS`/`IPV6_TCLASS`,
@@ -202,7 +203,7 @@ This document provides a factual overview of all crates comprising the `netune` 
 - **Dependencies**: `netune-quic`, `netune-trace`, `bytes`, `http`, `thiserror`, `tokio`. Dev-only interop oracles: `h3`, `h3-quinn`, `quinn` (never linked into the shipping crate).
 - **Owned H3 extensions (ADR-0030, ADR-0032)**: SETTINGS-gated RFC 9297 datagrams routed by Quarter Stream ID, RFC 9220 extended CONNECT through `ExtendedConnectProtocol`, and the RFC 9297 Capsule Protocol in HTTP message bodies.
 - **Key Types**:
-  - `H3Client`: Dispatches RFC 9114 HTTP/3 requests over `netune-quic` connections. `open_request` returns a streaming `H3RequestBody`; `send` composes it; `execute` buffers with a configured body ceiling. `connect*` and `execute` return an `H3AttemptError` carrying the trace snapshot on failure ([ADR-0024](../adr/0024-h3-streaming-request-bodies.md)).
+  - `H3Client` & `H3Session`: `H3Session` is the shareable, pooled multiplexed HTTP/3 session over a `QuicConnection`; `H3Client` wraps it for direct session use (`open_request` returns `H3RequestBody`; `send` composes it; `execute` buffers with a configured ceiling; [ADR-0024](../adr/0024-h3-streaming-request-bodies.md), [ADR-0053](../adr/0053-unified-multiplexed-protocols-and-pool-governance.md)).
   - `H3Client::connect` / `connect_with_config`: resolves a `QuicConnector` profile, retains the `QuicConnection` (and endpoint) for the H3 driver's lifetime, and exposes `quic_profile()` as the connection identity ([ADR-0022](../adr/0022-http3-connection-identity.md)).
   - `H3ClientConfig`: request/response-head/body-chunk deadlines and `max_body_bytes`.
   - `H3SettingsProfile` / `H3SettingsRegistry`: typed, validated SETTINGS (QPACK capacity/blocked streams, max field section, grease). `H3SettingsProfile::dynamic()` opts into dynamic QPACK; the default is stateless ([ADR-0027](../adr/0027-owned-h3-qpack.md)).

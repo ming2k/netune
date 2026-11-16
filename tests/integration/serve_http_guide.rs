@@ -156,16 +156,7 @@ async fn the_guide_timing_table_describes_a_real_exchange() {
             netune_trace::TraceId::new("guide"),
             netune_trace::Direction::Ingress,
         ),
-        attempt: netune_trace::AttemptRef {
-            round: 0,
-            turn: 0,
-            attempt: 0,
-        },
-        endpoint: netune_trace::EndpointRef {
-            provider: String::new(),
-            model: String::new(),
-            authority: address.to_string(),
-        },
+        authority: address.to_string(),
         connection: netune_trace::ConnectionInfo::default(),
         identity: netune_trace::ConnectionIdentity::default(),
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,

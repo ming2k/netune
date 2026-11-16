@@ -12,8 +12,8 @@ use netune::{
     Client, ClientConfig, Connector, Pool, RequestHead, Target, TcpConnector, TlsRouterConnector,
 };
 use netune_trace::{
-    Alpn, AttemptRef, ConnectionInfo, EndpointRef, EventKind, Fidelity, FrameClass, Reason,
-    RequestTrace, TraceCollector, TraceId, Validity,
+    Alpn, ConnectionInfo, EventKind, Fidelity, FrameClass, Reason, RequestTrace, TraceCollector,
+    TraceId, Validity,
 };
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,7 +22,7 @@ use tokio_rustls::TlsAcceptor;
 
 const CHUNKS: usize = 24;
 /// Head first, then a prefill gap before the first token: the shape that makes
-/// `server_ttft_us` estimable rather than batched.
+/// `frame_to_payload_us` estimable rather than batched.
 const PREFILL_GAP: std::time::Duration = std::time::Duration::from_millis(250);
 
 async fn serve_tls(listener: TcpListener, acceptor: TlsAcceptor, responses: usize) {
@@ -64,16 +64,7 @@ fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
             TraceId::new("tls-e2e"),
             netune_trace::Direction::Egress,
         ),
-        attempt: AttemptRef {
-            round: 1,
-            turn: 1,
-            attempt: 1,
-        },
-        endpoint: EndpointRef {
-            provider: "e2e".into(),
-            model: "e2e-model".into(),
-            authority: authority.to_string(),
-        },
+        authority: authority.to_string(),
         connection: ConnectionInfo::default(),
         identity: netune_trace::ConnectionIdentity::default(),
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,
@@ -83,11 +74,7 @@ fn trace_of(log: netune_trace::EventLog, authority: &str) -> RequestTrace {
     }
 }
 
-async fn request_once<C: netune::Connector>(
-    client: &Client<C>,
-    target: &Target,
-    recorder: TraceCollector,
-) {
+async fn request_once(client: &Client, target: &Target, recorder: TraceCollector) {
     let head = RequestHead::new(Method::POST, "/v1/chat/completions")
         .with_header("content-type", "application/json");
     let mut response = client
@@ -108,7 +95,7 @@ async fn request_once<C: netune::Connector>(
     recorder.mark(EventKind::Validated, 0, 0);
 }
 
-fn tls_client(certificate: Vec<u8>) -> Client<TlsRouterConnector<TcpConnector>> {
+fn tls_client(certificate: Vec<u8>) -> Client {
     // The owned engine pins the test identity: trust is a policy on the
     // connector ([INV-TLS-08]).
     Client::new(
@@ -161,10 +148,13 @@ async fn a_tls_attempt_measures_the_handshake_and_records_negotiation() {
     assert!(derived.tcp_us.is_measured());
     assert!(derived.tls_us.is_measured(), "tls: {:?}", derived.tls_us);
     assert!(derived.ttfb_us.is_measured());
-    assert!(derived.ttft_us.is_measured());
-    assert!(derived.server_ttft_us.is_measured());
+    assert!(derived.first_payload_us.is_measured());
+    assert!(derived.frame_to_payload_us.is_measured());
     assert!(derived.e2e_us.is_measured());
-    assert!(derived.stream_us.value().is_some(), "stream span measured");
+    assert!(
+        derived.payload_span_us.value().is_some(),
+        "stream span measured"
+    );
 
     let info = trace
         .log
@@ -215,7 +205,7 @@ async fn a_pooled_tls_reuse_has_no_handshake_to_charge() {
             "a reused TLS connection has no handshake to charge"
         );
     }
-    assert!(second_derived.ttft_us.is_measured());
+    assert!(second_derived.first_payload_us.is_measured());
 
     let _ = server.await;
 }

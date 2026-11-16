@@ -26,9 +26,15 @@
 //!    Finished verification) and [`key_exchange`] (all seven groups,
 //!    hybrid combiners owned). Vectors: RFC 8448 §3 end-to-end, plus a live
 //!    differential handshake against a `rustls` server.
-//! 4. TLS 1.2 client handshake (GCM + CBC) — pending.
-//! 5. Engine seam in the `netune` orchestrator — pending.
-//! 6. rustls removal from the egress path — pending.
+//! 4. **TLS 1.2 client handshake (GCM + CBC)** — landed: [`handshake`] and
+//!    [`tls12`] cover the ten offered TLS 1.2 suites, including the CBC
+//!    EVP path, with RFC 5246/7905 rules and live differential peers.
+//! 5. **Engine seam in the `netune` orchestrator** — landed: [`driver`] is the
+//!    async `AsyncRead`/`AsyncWrite` wrapper, and `netune` selects it per
+//!    target through `TlsProfile` / `TlsRouterConnector`.
+//! 6. **rustls removal from the egress path** — landed: `netune` carries no
+//!    rustls; the only TLS engine on the TCP-TLS path is this crate
+//!    ([`INV-TLS-04`]).
 //!
 //! # Boundaries
 //!

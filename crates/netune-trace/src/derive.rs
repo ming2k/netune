@@ -8,16 +8,16 @@
 //! Anchors, all offsets from dispatch:
 //!
 //! ```text
-//! dispatch ──► head ──► first body byte ──► first frame ──► first token ──► last token ──► body end ──► validated
+//! dispatch ──► head ──► first body byte ──► first frame ──► first payload ──► last payload ──► body end ──► validated
 //!    │           │            │                  │              │
-//!    │        ttfb_us     first_byte_us    first_frame_us    ttft_us
-//!    │                          └──────── server_ttft_us ─────┘
-//!    │                                       (first frame → first token)
+//!    │        ttfb_us     first_byte_us    first_frame_us    first_payload_us
+//!    │                          └────── frame_to_payload_us ──────┘
+//!    │                                     (first frame → first payload)
 //!    └───────────────────────────── e2e_us ──────────────────────────────────────────────────┘
 //! ```
 //!
-//! `server_ttft_us` is the scope that answers "how fast does the model start
-//! once it has committed to responding". It is refused when the response head
+//! `frame_to_payload_us` is the scope that answers "how fast does the origin
+//! produce content once it has committed to responding". It is refused when the response head
 //! and the first body byte arrived in one flush, because then the frame anchor
 //! was compressed by the transport and the number would flatter the origin.
 
@@ -39,24 +39,24 @@ pub struct DerivedTimings {
     pub ttfb_us: Reading<u64>,
     /// Dispatch → first body byte.
     pub first_byte_us: Reading<u64>,
-    /// Dispatch → first origin protocol frame of any class.
+    /// Dispatch → first application frame of any class.
     pub first_frame_us: Reading<u64>,
     /// Dispatch → the request's last byte handed to the kernel.
     pub request_sent_us: Reading<u64>,
-    /// Dispatch → first output-bearing token (the total wait).
-    pub ttft_us: Reading<u64>,
-    /// Request sent → first output token.
+    /// Dispatch → first payload (the total wait).
+    pub first_payload_us: Reading<u64>,
+    /// Request sent → first payload.
     ///
-    /// This is the latency the model and the network after the request add up
+    /// This is the latency the origin and the network after the request add up
     /// to. It excludes connection setup and the upload, so it is the number to
     /// compare across networks — at the cost of being a lower bound on what the
     /// user actually waited.
-    pub first_token_after_sent_us: Reading<u64>,
-    /// First origin frame → first output token.
-    pub server_ttft_us: Reading<u64>,
-    /// First → last output token. The denominator of the streaming rate.
-    pub stream_us: Reading<u64>,
-    /// Last output token → body end.
+    pub first_payload_after_sent_us: Reading<u64>,
+    /// First application frame → first payload.
+    pub frame_to_payload_us: Reading<u64>,
+    /// First → last payload. The denominator of a streaming rate.
+    pub payload_span_us: Reading<u64>,
+    /// Last payload → body end.
     pub tail_us: Reading<u64>,
     /// Dispatch → validated response.
     pub e2e_us: Reading<u64>,
@@ -122,7 +122,7 @@ pub fn derive(trace: &RequestTrace) -> DerivedTimings {
             EventKind::BodyStart => body_start = body_start.or(Some(at)),
             EventKind::BodyEnd => body_end = body_end.or(Some(at)),
             EventKind::ProtocolFrame => first_frame = first_frame.or(Some(at)),
-            EventKind::OutputToken => output.push((at, event.a)),
+            EventKind::Payload => output.push((at, event.a)),
             EventKind::Validated => validated = validated.or(Some(at)),
             EventKind::RequestWriteEnd => request_sent = request_sent.or(Some(at)),
             EventKind::Write => last_write = Some(at),
@@ -146,10 +146,10 @@ pub fn derive(trace: &RequestTrace) -> DerivedTimings {
             first_byte_us: Reading::not_estimable(Reason::NoOrigin),
             first_frame_us: Reading::not_estimable(Reason::NoOrigin),
             request_sent_us: Reading::not_estimable(Reason::NoOrigin),
-            ttft_us: Reading::not_estimable(Reason::NoOrigin),
-            first_token_after_sent_us: Reading::not_estimable(Reason::NoOrigin),
-            server_ttft_us: Reading::not_estimable(Reason::NoOrigin),
-            stream_us: Reading::not_estimable(Reason::NoOrigin),
+            first_payload_us: Reading::not_estimable(Reason::NoOrigin),
+            first_payload_after_sent_us: Reading::not_estimable(Reason::NoOrigin),
+            frame_to_payload_us: Reading::not_estimable(Reason::NoOrigin),
+            payload_span_us: Reading::not_estimable(Reason::NoOrigin),
             tail_us: Reading::not_estimable(Reason::NoOrigin),
             e2e_us: Reading::not_estimable(Reason::NoOrigin),
             rtt_us: Reading::not_estimable(Reason::NoOrigin),
@@ -167,11 +167,11 @@ pub fn derive(trace: &RequestTrace) -> DerivedTimings {
     };
 
     let head_at = head;
-    let first_token_at = output.first().map(|(at, _)| *at);
-    let last_token_at = output.last().map(|(at, _)| *at);
+    let first_payload_at = output.first().map(|(at, _)| *at);
+    let last_payload_at = output.last().map(|(at, _)| *at);
 
-    let server_ttft_us = match (first_frame, first_token_at) {
-        (Some(frame), Some(token)) if token >= frame => {
+    let frame_to_payload_us = match (first_frame, first_payload_at) {
+        (Some(frame), Some(payload)) if payload >= frame => {
             let head_to_body = match (head_at, body_start) {
                 (Some(head), Some(body)) => body.saturating_sub(head),
                 // Without a body-start anchor the batched test cannot be run;
@@ -181,22 +181,22 @@ pub fn derive(trace: &RequestTrace) -> DerivedTimings {
             if head_to_body < crate::BATCH_GAP_NS {
                 Reading::not_estimable(Reason::TransportBatched)
             } else {
-                Reading::measured(us(token - frame))
+                Reading::measured(us(payload - frame))
             }
         }
         _ => Reading::not_applicable(Reason::PhaseAbsent),
     };
 
-    let stream_us = match (first_token_at, last_token_at) {
+    let payload_span_us = match (first_payload_at, last_payload_at) {
         (Some(first), Some(last)) if output.len() >= 2 && last >= first => {
             Reading::measured(us(last - first))
         }
-        (Some(_), Some(_)) => Reading::not_applicable(Reason::FewerThanTwoOutputEvents),
+        (Some(_), Some(_)) => Reading::not_applicable(Reason::FewerThanTwoPayloadEvents),
         _ => Reading::not_applicable(Reason::PhaseAbsent),
     };
 
-    let tail_us = match (last_token_at, body_end) {
-        (Some(token), Some(end)) if end >= token => Reading::measured(us(end - token)),
+    let tail_us = match (last_payload_at, body_end) {
+        (Some(payload), Some(end)) if end >= payload => Reading::measured(us(end - payload)),
         _ => Reading::not_applicable(Reason::PhaseAbsent),
     };
 
@@ -230,15 +230,16 @@ pub fn derive(trace: &RequestTrace) -> DerivedTimings {
             .map_or(Reading::not_applicable(Reason::PhaseAbsent), |at| {
                 Reading::measured(us(at.saturating_sub(origin)))
             }),
-        ttft_us: first_token_at.map_or(Reading::not_applicable(Reason::PhaseAbsent), |at| {
-            Reading::measured(us(at.saturating_sub(origin)))
-        }),
-        first_token_after_sent_us: match (request_sent.or(last_write), first_token_at) {
-            (Some(sent), Some(token)) if token >= sent => Reading::measured(us(token - sent)),
+        first_payload_us: first_payload_at
+            .map_or(Reading::not_applicable(Reason::PhaseAbsent), |at| {
+                Reading::measured(us(at.saturating_sub(origin)))
+            }),
+        first_payload_after_sent_us: match (request_sent.or(last_write), first_payload_at) {
+            (Some(sent), Some(payload)) if payload >= sent => Reading::measured(us(payload - sent)),
             _ => Reading::not_applicable(Reason::PhaseAbsent),
         },
-        server_ttft_us,
-        stream_us,
+        frame_to_payload_us,
+        payload_span_us,
         tail_us,
         e2e_us,
         rtt_us: match tcp_info_validity {

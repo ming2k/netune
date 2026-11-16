@@ -118,17 +118,21 @@ async fn body_of(response: &mut netune::Response) -> String {
 /// *fingerprint surfaces* (ALPN offers) are kept but the trust policy is
 /// pinned to the test CA. This is exactly the composition a real embedder
 /// would do ([`INV-TLS-08`]: trust is a policy on the connector).
-fn pinned_client(fixture: &Fixture) -> Client<TlsRouterConnector<TcpConnector>> {
+fn pinned_client(fixture: &Fixture) -> Client {
+    pinned_client_on(fixture, Pool::default())
+}
+
+fn pinned_client_on(fixture: &Fixture, pool: Pool) -> Client {
     let default_profile = Preset::NetuneDefault.profile();
     let stream_profile = Preset::AntigravityCliStream.profile();
     let connector = TlsRouterConnector::new(TcpConnector::new())
         .with_verifier(netune_tls::Verifier::Pinned(fixture.certificate.clone()))
         .with_profile_named(Preset::NetuneDefault.name(), default_profile)
         .with_profile_named(Preset::AntigravityCliStream.name(), stream_profile);
-    Client::new(connector, Pool::default(), ClientConfig::default())
+    Client::new(connector, pool, ClientConfig::default())
 }
 
-async fn get(client: &Client<TlsRouterConnector<TcpConnector>>, target: &Target) -> String {
+async fn get(client: &Client, target: &Target) -> String {
     let head = RequestHead::new(Method::GET, "/");
     let recorder = TraceCollector::start(1024);
     let mut response = client
@@ -241,7 +245,8 @@ async fn a_custom_composed_profile_is_selectable_by_name() {
 #[tokio::test]
 async fn the_pool_never_reuses_across_identities() {
     let fixture = fixture().await;
-    let client = pinned_client(&fixture);
+    let pool = Pool::default();
+    let client = pinned_client_on(&fixture, pool.clone());
 
     client
         .prewarm(&fixture.target)
@@ -259,16 +264,12 @@ async fn the_pool_never_reuses_across_identities() {
     // Each identity's slice holds exactly its own connection: the stream
     // request cannot consume the default slice and vice versa.
     assert_eq!(
-        client
-            .pool()
-            .idle_count(&client.pool_key(&fixture.target).expect("plan")),
+        pool.idle_count(&client.pool_key(&fixture.target).expect("plan")),
         1,
         "default identity slice"
     );
     assert_eq!(
-        client
-            .pool()
-            .idle_count(&client.pool_key(&stream_target).expect("plan")),
+        pool.idle_count(&client.pool_key(&stream_target).expect("plan")),
         1,
         "stream identity slice"
     );
@@ -278,4 +279,59 @@ async fn the_pool_never_reuses_across_identities() {
     assert_eq!(default_body, "alpn=http/1.1");
     let stream_body = get(&client, &stream_target).await;
     assert_eq!(stream_body, "alpn=h2");
+}
+
+/// `[INV-TRACE-10]`: the tap sits on the socket, beneath TLS.
+///
+/// A traced HTTPS attempt must show socket writes and reads *during* the
+/// handshake (the ClientHello leaving, the server's flight arriving), and its
+/// read total must be the ciphertext that crossed the socket: strictly more
+/// than the plaintext response the codec was handed.
+#[tokio::test]
+async fn inv_trace_10_a_traced_tls_attempt_records_socket_events_under_the_handshake() {
+    use netune::TraceConfig;
+    use netune_trace::{EventKind, Fidelity};
+
+    let fixture = fixture().await;
+    let client = pinned_client(&fixture);
+    let mut response = client
+        .request_traced(
+            &fixture.target,
+            RequestHead::new(Method::GET, "/"),
+            None,
+            TraceConfig::default(),
+        )
+        .await
+        .expect("traced request");
+    let plaintext = response.body.read_to_end().await.expect("body").len() as u64;
+    let trace = response.body.trace().expect("trace");
+    assert_eq!(trace.fidelity, Fidelity::l1());
+    assert!(!trace.connection.reused);
+    assert!(trace.connection.local_port.is_some());
+
+    let tls_start = trace
+        .log
+        .first_of(EventKind::TlsStart)
+        .expect("TlsStart")
+        .at_ns;
+    let tls_end = trace.log.first_of(EventKind::TlsEnd).expect("TlsEnd").at_ns;
+    let during_handshake = |kind: EventKind| {
+        trace
+            .log
+            .iter()
+            .any(|event| event.kind == kind && event.at_ns >= tls_start && event.at_ns <= tls_end)
+    };
+    assert!(
+        during_handshake(EventKind::Write),
+        "the ClientHello is a socket write inside the TLS phase"
+    );
+    assert!(
+        during_handshake(EventKind::Read),
+        "the server's flight is a socket read inside the TLS phase"
+    );
+    assert!(
+        trace.log.bytes_read() > plaintext,
+        "socket reads count ciphertext and handshake bytes ({} read, {plaintext} plaintext)",
+        trace.log.bytes_read()
+    );
 }

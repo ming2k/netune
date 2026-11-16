@@ -27,6 +27,10 @@ use crate::error::H2Error;
 use crate::fingerprint::{H2ConnectionProfile, H2Fingerprint, H2RequestProfile};
 use crate::frame::Frame;
 
+pub mod session;
+
+pub use session::{H2ClientSession, H2HeadFuture, H2RequestSender, H2StreamPermit, H2StreamReader};
+
 /// A parsed HTTP/2 response.
 #[derive(Debug, Clone)]
 pub struct H2Response {
@@ -135,11 +139,11 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2ResponseStream<T
 
 /// Flow-control credit is returned to the peer once this many unacknowledged
 /// body bytes accumulate (or when the stream ends).
-const REPLENISH_THRESHOLD: u32 = 16 * 1024;
+pub(crate) const REPLENISH_THRESHOLD: u32 = 16 * 1024;
 
 /// An established HTTP/2 client connection over an arbitrary transport.
 pub struct H2ClientConnection<T> {
-    connection: H2Connection<T>,
+    pub(crate) connection: H2Connection<T>,
     /// The connection-fixed half of the fingerprint: what the peer saw in the
     /// preface and SETTINGS.
     connection_profile: H2ConnectionProfile,
@@ -149,10 +153,10 @@ pub struct H2ClientConnection<T> {
     /// ([`INV-CUSTOM-22`]); each request mixes its stream id in. Chosen by the
     /// caller for reproducibility, or drawn from process entropy by
     /// [`H2ClientConnection::handshake`].
-    header_order_seed: u64,
+    pub(crate) header_order_seed: u64,
     /// A write failed while returning advisory end-of-stream flow control. The
     /// exchange itself completed, but the socket is no longer safe to reuse.
-    unusable: bool,
+    pub(crate) unusable: bool,
 }
 
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2ClientConnection<T> {
@@ -313,32 +317,17 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2ClientConnection
             .allocate_stream_id()
             .ok_or_else(|| H2Error::Protocol("no stream id remains on this connection".into()))?;
 
-        let pseudo = [
-            (":method", method),
-            (":authority", authority),
-            (":scheme", scheme),
-            (":path", path),
-        ];
-        let ordered = request_profile.pseudo_headers_order.order(&pseudo);
-        let mut headers: Vec<(&str, &str)> = ordered;
-
-        // Regular headers follow the profile's order policy. Under the
-        // go-nethttp policy the request seed is the connection seed mixed
-        // with the stream id: every request presents a different order, and
-        // the whole sequence is reproducible from the connection seed
-        // ([INV-CUSTOM-21], [INV-CUSTOM-22]).
-        let mut regular: Vec<(&str, &str)> = extra_headers
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect();
-        crate::fingerprint::apply_regular_header_order(
-            &mut regular,
-            request_profile.regular_header_order,
-            self.header_order_seed ^ u64::from(stream_id),
+        let block = encode_request_headers(
+            &mut self.connection,
+            method,
+            authority,
+            scheme,
+            path,
+            extra_headers,
+            request_profile,
+            self.header_order_seed,
+            stream_id,
         );
-        headers.extend(regular);
-
-        let block = self.connection.encode_header_block(headers);
         let no_body = body.is_none_or(<[u8]>::is_empty);
         self.connection
             .write_header_block(stream_id, &block, no_body)
@@ -540,6 +529,14 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2ClientConnection
         self.connection.into_inner()
     }
 
+    /// Spawn a background multiplexer driving this connection concurrently.
+    pub fn into_session(self) -> H2ClientSession
+    where
+        T: Send + 'static,
+    {
+        H2ClientSession::spawn(self)
+    }
+
     /// Read one event of the response body for `stream_id`.
     async fn next_body_event(
         &mut self,
@@ -677,7 +674,45 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> H2ClientConnection
     }
 }
 
-fn split_response(fields: Vec<(String, String)>) -> (u16, Vec<(String, String)>) {
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_request_headers<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    connection: &mut H2Connection<T>,
+    method: &str,
+    authority: &str,
+    scheme: &str,
+    path: &str,
+    extra_headers: &[(String, String)],
+    request_profile: &H2RequestProfile,
+    header_order_seed: u64,
+    stream_id: u32,
+) -> Bytes {
+    let pseudo = [
+        (":method", method),
+        (":authority", authority),
+        (":scheme", scheme),
+        (":path", path),
+    ];
+    let mut headers: Vec<(&str, &str)> = request_profile.pseudo_headers_order.order(&pseudo);
+
+    // Regular headers follow the profile's order policy. Under the go-nethttp
+    // policy the request seed is the connection seed mixed with the stream id:
+    // every request presents a different order, and the whole sequence is
+    // reproducible from the connection seed ([INV-CUSTOM-21], [INV-CUSTOM-22]).
+    let mut regular: Vec<(&str, &str)> = extra_headers
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    crate::fingerprint::apply_regular_header_order(
+        &mut regular,
+        request_profile.regular_header_order,
+        header_order_seed ^ u64::from(stream_id),
+    );
+    headers.extend(regular);
+
+    connection.encode_header_block(headers)
+}
+
+pub(crate) fn split_response(fields: Vec<(String, String)>) -> (u16, Vec<(String, String)>) {
     let mut status = 0u16;
     let mut headers = Vec::with_capacity(fields.len());
     for (name, value) in fields {

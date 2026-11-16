@@ -161,16 +161,7 @@ async fn h3_ingress_serves_streaming_request_and_records_trace() {
             netune_trace::TraceId::new("h3-ingress"),
             netune_trace::Direction::Ingress,
         ),
-        attempt: netune_trace::AttemptRef {
-            round: 1,
-            turn: 1,
-            attempt: 1,
-        },
-        endpoint: netune_trace::EndpointRef {
-            provider: "test".into(),
-            model: "test".into(),
-            authority: addr.to_string(),
-        },
+        authority: addr.to_string(),
         connection: netune_trace::ConnectionInfo::default(),
         identity: netune_trace::ConnectionIdentity::default(),
         schema_version: netune_trace::TRACE_SCHEMA_VERSION,

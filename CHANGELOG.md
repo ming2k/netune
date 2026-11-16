@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `netune`: `ClientConfig::request_timeout` bounds the whole attempt, including redirects and the response body. `PoolConfig::max_in_flight_total` bounds concurrent exchanges across all authorities. `docs/reference/stability.md` defines the Stable/Preview/Experimental tiers and the gates for owned TLS, HTTP/3 and WebTransport production claims.
+- `.github/SECURITY.md`: private vulnerability reporting, supported versions, response targets, scope and security boundaries.
+
+### Changed
+
+- **Breaking:** Plain egress TLS targets now use rustls with the platform verifier. The owned `netune-tls` engine is selected by `Target::with_tls_profile` or `Target::with_tls_engine("netune-tls")`; a profile is never silently downgraded. See [ADR-0054](docs/adr/0054-audited-tls-default-and-owned-fingerprint-opt-in.md).
+- `netune`: Production defaults are now bounded: `response_head_timeout` 30 s, `body_idle_timeout` 60 s, `request_timeout` 300 s, `max_in_flight_per_authority` 64, `max_in_flight_total` 512. `None` is an explicit opt-out.
+- `netune`: `Decoder::push` / `Decoder::finish` require the remaining decoded-body budget; a compressed chunk can no longer expand past the configured limit before failing.
+
 ## [0.0.33] - 2026-11-16
 
 ### Added

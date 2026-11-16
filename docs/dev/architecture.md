@@ -127,8 +127,8 @@ and entry-point rules are [ADR-0044](../adr/0044-test-architecture-nextest-and-t
 
 ### 2.4.4 Owned Egress TLS (ADR-0045)
 
-- **Red-line**: the egress TCP-TLS production path is owned by `netune-tls`: ClientHello serialization, TLS 1.2/1.3 handshake state machine and record layer are workspace code; the offered cipher/group/signature sets equal the implemented capability set; every cryptographic primitive comes from `aws-lc`. `netune` carries no `rustls`/`tokio-rustls`; both are dev-only oracles on this path (the migration is complete). `netune-server` (ADR-0015) and `netune-quic` (ADR-0028) keep their ratification.
-- **Enforcement**: `[INV-TLS-04..07]`; `check-architecture.py` rejects `rustls`/`tokio-rustls` in any crate not whitelisted for ADR-0015/0028, and never whitelists `netune-tls`; the golden corpus in `crates/netune-tls` pins the measured hello bytes.
+- **Red-line**: plain egress TLS targets use rustls with the platform verifier (ADR-0054). The fingerprint path is owned by `netune-tls`: ClientHello serialization, TLS 1.2/1.3 handshake state machine and record layer are workspace code; the offered cipher/group/signature sets equal the implemented capability set; every cryptographic primitive comes from `aws-lc`. A `TlsProfile` or `netune-tls` selection is required for the owned path and is never downgraded to rustls. `netune-server` (ADR-0015) and `netune-quic` (ADR-0028) keep their ratification.
+- **Enforcement**: `[INV-TLS-04..07]`, `[INV-TLS-12]`; `check-architecture.py` rejects `rustls`/`tokio-rustls` in any crate not whitelisted for ADR-0015/0028/0054, and never whitelists `netune-tls`; the golden corpus in `crates/netune-tls` pins the measured hello bytes.
 
 ### 2.5 Codecs Never Open Sockets
 

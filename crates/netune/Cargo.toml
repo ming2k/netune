@@ -44,6 +44,9 @@ bytes = { workspace = true }
 flate2 = { workspace = true }
 http = { workspace = true }
 libc = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+tokio-rustls = { workspace = true }
 netune-egress = { path = "../netune-egress", version = "0.0.33" }
 netune-http1 = { path = "../netune-http1", version = "0.0.33" }
 netune-http2 = { path = "../netune-http2", version = "0.0.33", optional = true }

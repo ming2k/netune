@@ -340,6 +340,35 @@ async fn a_head_that_never_comes_trips_the_bound_and_returns_evidence() {
 }
 
 #[tokio::test]
+async fn a_trickling_body_trips_the_total_attempt_bound() {
+    let mock = Mock::new();
+    mock.on(Matcher::get("/trickle")).reply(
+        MockResponse::new(StatusCode::OK)
+            .chunks(["x"; 10])
+            .delay_chunks(Duration::from_millis(20)),
+    );
+    let client = client_with(
+        &mock,
+        ClientConfig {
+            request_timeout: Some(Duration::from_millis(70)),
+            body_idle_timeout: Some(Duration::from_secs(5)),
+            ..ClientConfig::default()
+        },
+    );
+
+    let mut response = client
+        .request(&target(), RequestHead::new(Method::GET, "/trickle"), None)
+        .await
+        .expect("head");
+    let error = response
+        .body
+        .read_to_end()
+        .await
+        .expect_err("the total attempt bound expires");
+    assert!(error.is_timeout());
+}
+
+#[tokio::test]
 async fn a_body_that_goes_quiet_trips_the_idle_bound_but_a_long_one_does_not() {
     let mock = Mock::new();
     // Ten chunks, 10 ms apart: far longer in total than the idle bound, never

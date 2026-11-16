@@ -63,8 +63,9 @@ remained in the transport and verification layers:
      immediately upon handshake registration.
 
 2. **Pool lifecycle governance.**
-   - `PoolConfig` gains `max_idle_total` (default 64) and
-     `max_in_flight_per_authority` (default `None`), and removes the legacy
+   - `PoolConfig` gains `max_idle_total` (default 64),
+     `max_in_flight_per_authority` (default 64) and
+     `max_in_flight_total` (default 512), and removes the legacy
      single-owner `Http2Idle`/`put_http2` API (`[INV-TRANSPORT-10]`).
    - Putting or registering a connection lazily spawns a `Weak<PoolInner>`
      background reaper when inside a Tokio runtime, paired with synchronous
@@ -124,5 +125,5 @@ remained in the transport and verification layers:
 | :--- | :--- | :--- |
 | `[INV-EXCHANGE-03]` | All HTTP wire protocols (`HTTP/1.1`, `HTTP/2`, `HTTP/3`) and streaming request bodies sit behind `RoundTrip` | `HttpProtocol`, `PlannedTransport`, `wire::{h1,h2,h3}`, `RequestBody::Stream` |
 | `[INV-TRANSPORT-09]` | Multiplexed H2/H3 sessions stay shared in `Pool` up to stream limits with cold-dial singleflight coalescing and isolated cancellation | `H2ClientSession`, `H3Session`, `Pool::begin_or_join_dial`, `client_h2_integration.rs`, `http3_client.rs` |
-| `[INV-TRANSPORT-10]` | Pool enforces global idle caps, per-authority in-flight bounds, and weak-referenced idle reaping | `PoolConfig::{max_idle_total,max_in_flight_per_authority}`, `Pool::reap()`, `pool/tests.rs` |
+| `[INV-TRANSPORT-10]` | Pool enforces global idle caps, per-authority and global in-flight bounds, and weak-referenced idle reaping | `PoolConfig::{max_idle_total,max_in_flight_per_authority,max_in_flight_total}`, `Pool::reap()`, `pool/tests.rs` |
 | `[INV-TEST-06]` (amended) | All wire parser crates including `netune-tls` own dual-tier PR + soak fuzz targets | `crates/netune-tls/tests/fuzz.rs`, `test-support::fuzz` |

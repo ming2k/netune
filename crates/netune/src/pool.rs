@@ -41,6 +41,12 @@ pub struct PoolConfig {
     pub max_idle_total: usize,
     /// Maximum concurrent in-flight exchanges per authority (`None` = unlimited).
     pub max_in_flight_per_authority: Option<usize>,
+    /// Global cap on concurrent in-flight exchanges across every authority.
+    ///
+    /// A per-authority limit alone lets an attacker spread work over many
+    /// authorities. The global ceiling is the actual memory/file-descriptor
+    /// bound. `None` is an explicit opt-out, not the default.
+    pub max_in_flight_total: Option<usize>,
     /// How long an idle connection may be reused.
     pub idle_timeout: Duration,
 }
@@ -50,7 +56,8 @@ impl Default for PoolConfig {
         Self {
             max_idle_per_authority: 4,
             max_idle_total: 64,
-            max_in_flight_per_authority: None,
+            max_in_flight_per_authority: Some(64),
+            max_in_flight_total: Some(512),
             // Long enough that human-paced agent turns (read, think, send) keep
             // their connection, short enough that a dead one is not reused.
             //
@@ -183,7 +190,8 @@ pub(crate) struct CheckedOutHttp3 {
 /// Concurrency slot held for the lifetime of an in-flight exchange.
 #[derive(Debug)]
 pub(crate) struct PoolInFlightPermit {
-    _permit: OwnedSemaphorePermit,
+    _per_authority: Option<OwnedSemaphorePermit>,
+    _global: Option<OwnedSemaphorePermit>,
 }
 
 struct DialFlight {
@@ -503,6 +511,9 @@ struct PoolInner {
     config: PoolConfig,
     state: Mutex<PoolState>,
     in_flight: Mutex<HashMap<String, Arc<Semaphore>>>,
+    /// Created once from `max_in_flight_total`; `None` means the caller
+    /// explicitly opted out of the global bound.
+    global_in_flight: Option<Arc<Semaphore>>,
     dial_flights: Mutex<HashMap<PoolKey, Arc<DialFlight>>>,
     reaper_started: AtomicBool,
 }
@@ -520,16 +531,26 @@ impl Drop for ReaperResetGuard {
 }
 
 /// A shared, cloneable connection pool.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Pool {
     inner: Arc<PoolInner>,
 }
 
+impl Default for Pool {
+    fn default() -> Self {
+        Self::new(PoolConfig::default())
+    }
+}
+
 impl Pool {
     pub fn new(config: PoolConfig) -> Self {
+        let global_in_flight = config
+            .max_in_flight_total
+            .map(|limit| Arc::new(Semaphore::new(limit)));
         Self {
             inner: Arc::new(PoolInner {
                 config,
+                global_in_flight,
                 ..PoolInner::default()
             }),
         }
@@ -549,30 +570,57 @@ impl Pool {
         &self,
         authority: &str,
     ) -> Result<Option<PoolInFlightPermit>, NetError> {
-        let Some(limit) = self.inner.config.max_in_flight_per_authority else {
+        let global =
+            match self.inner.config.max_in_flight_total {
+                Some(0) => {
+                    return Err(NetError::Protocol(
+                        "pool max_in_flight_total cannot be 0".into(),
+                    ));
+                }
+                Some(_) => {
+                    let Some(semaphore) = self.inner.global_in_flight.as_ref() else {
+                        return Err(NetError::Protocol(
+                            "global in-flight limiter was not initialized".into(),
+                        ));
+                    };
+                    Some(Arc::clone(semaphore).acquire_owned().await.map_err(|_| {
+                        NetError::Protocol("global in-flight limiter closed".into())
+                    })?)
+                }
+                None => None,
+            };
+        let per_authority =
+            match self.inner.config.max_in_flight_per_authority {
+                Some(0) => {
+                    return Err(NetError::Protocol(
+                        "pool max_in_flight_per_authority cannot be 0".into(),
+                    ));
+                }
+                Some(limit) => {
+                    let semaphore = {
+                        let mut map = self
+                            .inner
+                            .in_flight
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        Arc::clone(
+                            map.entry(authority.to_owned())
+                                .or_insert_with(|| Arc::new(Semaphore::new(limit))),
+                        )
+                    };
+                    Some(semaphore.acquire_owned().await.map_err(|_| {
+                        NetError::Protocol("in-flight limiter semaphore closed".into())
+                    })?)
+                }
+                None => None,
+            };
+        if global.is_none() && per_authority.is_none() {
             return Ok(None);
-        };
-        if limit == 0 {
-            return Err(NetError::Protocol(
-                "pool max_in_flight_per_authority cannot be 0".into(),
-            ));
         }
-        let semaphore = {
-            let mut map = self
-                .inner
-                .in_flight
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            Arc::clone(
-                map.entry(authority.to_owned())
-                    .or_insert_with(|| Arc::new(Semaphore::new(limit))),
-            )
-        };
-        let permit = semaphore
-            .acquire_owned()
-            .await
-            .map_err(|_| NetError::Protocol("in-flight limiter semaphore closed".into()))?;
-        Ok(Some(PoolInFlightPermit { _permit: permit }))
+        Ok(Some(PoolInFlightPermit {
+            _per_authority: per_authority,
+            _global: global,
+        }))
     }
 
     /// Coordinate concurrent cold dials on the same [`PoolKey`] so requests

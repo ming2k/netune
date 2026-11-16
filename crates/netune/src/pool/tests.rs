@@ -61,6 +61,13 @@ fn pool(max_idle: usize, idle_timeout: Duration) -> Pool {
 }
 
 #[test]
+fn production_pool_defaults_are_bounded() {
+    let config = PoolConfig::default();
+    assert_eq!(config.max_in_flight_per_authority, Some(64));
+    assert_eq!(config.max_in_flight_total, Some(512));
+}
+
+#[test]
 fn an_empty_pool_has_nothing_to_reuse() {
     let pool = pool(2, Duration::from_secs(60));
     assert!(pool.take(&key("example:443")).is_none());
@@ -206,6 +213,7 @@ fn max_idle_total_evicts_globally_oldest_across_authorities() {
         max_idle_total: 3,
         idle_timeout: Duration::from_secs(60),
         max_in_flight_per_authority: None,
+        max_in_flight_total: None,
     });
 
     for (host, port) in [
@@ -245,6 +253,7 @@ async fn background_reaper_evicts_expired_connections_and_stops_on_pool_drop() {
         max_idle_per_authority: 4,
         max_idle_total: 16,
         max_in_flight_per_authority: None,
+        max_in_flight_total: None,
         idle_timeout: Duration::from_millis(20),
     });
     let weak = Arc::downgrade(&pool.inner);
@@ -315,6 +324,33 @@ async fn max_in_flight_per_authority_bounds_concurrency() {
             .acquire_in_flight("api.example:443")
             .await
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn max_in_flight_total_bounds_all_authorities_together() {
+    let pool = Pool::new(PoolConfig {
+        max_in_flight_per_authority: Some(4),
+        max_in_flight_total: Some(1),
+        ..PoolConfig::default()
+    });
+    let held = pool
+        .acquire_in_flight("a.example:443")
+        .await
+        .expect("first authority")
+        .expect("bounded");
+    let wait = tokio::time::timeout(
+        Duration::from_millis(20),
+        pool.acquire_in_flight("b.example:443"),
+    )
+    .await;
+    assert!(wait.is_err(), "the global cap must block another authority");
+    drop(held);
+    assert!(
+        pool.acquire_in_flight("b.example:443")
+            .await
+            .expect("after release")
+            .is_some()
     );
 }
 

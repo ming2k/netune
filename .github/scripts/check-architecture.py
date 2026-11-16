@@ -20,7 +20,7 @@ Rules, each mapped to the standard that states it:
     ARCH-010  H3/QPACK is owned; no vendored protocol runtime tree
     ARCH-011  production code never emits a contentless diagnostic event
     ARCH-012  the root test harness is test-only
-    ARCH-013  no third-party TLS engine outside the ADR-0015/0028 paths (ADR-0045)
+    ARCH-013  no third-party TLS engine outside the ADR-0015/0028/0054 paths
     ARCH-014  no out-of-workspace fuzz, interop or shell-runner tree (ADR-0049)
 
 The distinction that matters is production vs. dev: an oracle (`hyper`,
@@ -128,12 +128,12 @@ FORBIDDEN_QUIC_RUNTIME = {
     "h3-quinn",
 }
 ALLOWED_RUNTIME_DEPS: dict[str, set[str]] = {}
-# ADR-0045: the egress TCP-TLS engine is owned (`netune-tls`), so no crate may
-# link a third-party TLS implementation unless another ADR ratifies that path.
-# The ratifications today are ADR-0015 (ingress TLS termination) and ADR-0028
-# (QUIC's TLS 1.3 handshake), plus the test-support leaf that builds the
-# loopback identities. ADR-0045's step 6 is complete: `netune` carries no
-# rustls and `netune-tls` is never whitelisted.
+# ADR-0045 owns the egress fingerprint engine; ADR-0054 keeps rustls as the
+# audited default for plain egress TLS targets and makes the owned engine
+# opt-in. No other crate may link a TLS implementation unless an ADR ratifies
+# that path. The ratifications today are ADR-0015 (ingress TLS termination),
+# ADR-0028 (QUIC's TLS 1.3 handshake), ADR-0054 (plain egress TLS), plus the
+# test-support leaf that builds the loopback identities.
 FORBIDDEN_TLS_RUNTIME = {
     "rustls",
     "tokio-rustls",
@@ -141,6 +141,7 @@ FORBIDDEN_TLS_RUNTIME = {
     "openssl",
 }
 ALLOWED_TLS_RUNTIME_DEPS: dict[str, set[str]] = {
+    "netune": {"rustls", "tokio-rustls"},
     "netune-server": {"rustls", "tokio-rustls"},
     "netune-quic": {"rustls", "tokio-rustls"},
     "test-support": {"rustls", "tokio-rustls"},

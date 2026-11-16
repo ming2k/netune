@@ -662,11 +662,11 @@ def test_rustls_on_the_ratified_ingress_and_quic_paths_is_allowed() -> None:
     )
 
 
-# --- ARCH-013: step 6 — the egress orchestrator carries no rustls ---------
+# --- ARCH-013: ADR-0054 — plain egress TLS uses rustls --------------------
 
 
-def test_rustls_in_the_egress_orchestrator_is_reported() -> None:
-    expect(
+def test_rustls_in_the_egress_orchestrator_is_allowed() -> None:
+    expect_clean(
         "ARCH-013",
         merged(
             **{
@@ -677,11 +677,29 @@ def test_rustls_in_the_egress_orchestrator_is_reported() -> None:
                         netune-trace = { path = "../netune-trace", version = "1.2.3" }
                         netune-io = { path = "../netune-io", version = "1.2.3" }
                         rustls = "0.23"
+                        tokio-rustls = "0.26"
                     """,
                 )
             }
         ),
-        message="ADR-0045 step 6: the egress orchestrator carries no rustls",
+        message="ADR-0054: the audited egress TLS path is rustls",
+    )
+
+
+def test_rustls_outside_a_ratified_path_is_reported() -> None:
+    expect(
+        "ARCH-013",
+        merged(
+            **{
+                "crates/netune-http1/Cargo.toml": manifest(
+                    name="netune-http1",
+                    dependencies="""
+                        rustls = "0.23"
+                    """,
+                )
+            }
+        ),
+        message="a codec leaf cannot link a third-party TLS engine",
     )
 
 

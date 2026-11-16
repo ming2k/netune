@@ -150,14 +150,22 @@ pub struct ClientConfig {
     /// trace, which an outer `tokio::time::timeout` cannot give: cancelling
     /// the future discards the evidence along with it.
     ///
-    /// Default `None`, because how long an origin may think before its first
-    /// byte is a property of the origin, not of the transport.
+    /// Default 30 s. A peer that accepts the request and never answers must
+    /// not hold the attempt forever. Set this to `None` only when an outer
+    /// deadline reports the stall with equivalent evidence.
     pub response_head_timeout: Option<Duration>,
     /// Bound on the silence between two reads of a response body.
     ///
     /// An idle bound rather than a total one: a long stream is never cut for
-    /// being long, only for going quiet. Default `None`.
+    /// being long, only for going quiet. Default 60 s.
     pub body_idle_timeout: Option<Duration>,
+    /// Total bound on one attempt, from dispatch through the terminal body
+    /// state, including redirects.
+    ///
+    /// The per-phase bounds catch a silent peer; this one also catches a
+    /// peer that trickles forever. Default 300 s. Set it to `None` only for
+    /// a caller-owned deadline that covers both the head and the body.
+    pub request_timeout: Option<Duration>,
     /// The default observation policy for [`Client::request`].
     pub observation: Observation,
 }
@@ -170,8 +178,9 @@ impl Default for ClientConfig {
             max_redirects: 5,
             enable_http2: false,
             h2_handshake_timeout: Some(crate::handshake::DEFAULT_HANDSHAKE_TIMEOUT),
-            response_head_timeout: None,
-            body_idle_timeout: None,
+            response_head_timeout: Some(Duration::from_secs(30)),
+            body_idle_timeout: Some(Duration::from_secs(60)),
+            request_timeout: Some(Duration::from_secs(300)),
             observation: Observation::Counters,
         }
     }
@@ -532,6 +541,7 @@ impl Client {
                 recorder: &recorder,
                 observation: ObservationLevel::Off,
                 config: &self.config,
+                deadline: None,
             })
             .await
     }
@@ -644,9 +654,31 @@ impl Client {
         level: ObservationLevel,
         propagation: Option<&'static str>,
     ) -> Result<Response, AttemptError> {
-        let outcome = match propagate(&mut request, propagation, &recorder) {
-            Ok(()) => self.follow(target, &recorder, request, level).await,
-            Err(error) => Err(error),
+        let deadline = self
+            .config
+            .request_timeout
+            .map(|limit| tokio::time::Instant::now() + limit);
+        let outcome = async {
+            match propagate(&mut request, propagation, &recorder) {
+                Ok(()) => {
+                    self.follow(target, &recorder, request, level, deadline)
+                        .await
+                }
+                Err(error) => Err(error),
+            }
+        };
+        let outcome = match (self.config.request_timeout, deadline) {
+            (Some(limit), Some(deadline)) => {
+                match tokio::time::timeout_at(deadline, outcome).await {
+                    Ok(result) => result,
+                    Err(_) => Err(NetError::Timeout {
+                        phase: DiagnosticPhase::Request,
+                        waiting_for: "request attempt",
+                        limit,
+                    }),
+                }
+            }
+            _ => outcome.await,
         };
         outcome.map_err(|error| AttemptError::new(error, evidence(&recorder, level)))
     }
@@ -658,6 +690,7 @@ impl Client {
         recorder: &TraceCollector,
         mut request: Request,
         level: ObservationLevel,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Response, NetError> {
         if !request.head.headers.contains_key(http::header::USER_AGENT) {
             request.head.headers.insert(
@@ -672,7 +705,7 @@ impl Client {
 
         loop {
             let plan = self.plan(&target)?;
-            let response = self.hop(&plan, recorder, &request, level).await?;
+            let response = self.hop(&plan, recorder, &request, level, deadline).await?;
             let Some(location) = redirect_location(&response.head) else {
                 // Only the final head marks completion: a redirect's head must
                 // not become the anchor time-to-first-byte is measured against.
@@ -726,6 +759,7 @@ impl Client {
         recorder: &TraceCollector,
         request: &Request,
         level: ObservationLevel,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Response, NetError> {
         let exchange = self
             .transport
@@ -735,6 +769,7 @@ impl Client {
                     recorder,
                     observation: level,
                     config: &self.config,
+                    deadline,
                 },
                 request,
             )
@@ -763,6 +798,7 @@ impl Client {
                     decoder,
                     max_decoded: self.config.limits.max_body_bytes,
                     idle_timeout: self.config.body_idle_timeout,
+                    deadline,
                 },
             ),
         })
@@ -928,6 +964,7 @@ mod upgrade {
                     recorder,
                     observation,
                     config: &self.config,
+                    deadline: None,
                 })
                 .await
             {
@@ -1247,6 +1284,14 @@ mod identity_tests {
             .plan(&target)
             .expect_err("unknown H2 profile must fail");
         assert!(error.to_string().contains("unknown HTTP/2 profile"));
+    }
+
+    #[test]
+    fn production_defaults_are_bounded() {
+        let config = ClientConfig::default();
+        assert_eq!(config.response_head_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(config.body_idle_timeout, Some(Duration::from_secs(60)));
+        assert_eq!(config.request_timeout, Some(Duration::from_secs(300)));
     }
 
     #[test]

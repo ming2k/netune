@@ -8,8 +8,8 @@
 //! # Current slice
 //!
 //! Implemented and tested: DNS + TCP establishment with per-phase trace events,
-//! TLS via the owned engine with configurable profiles
-//! ([`TlsProfile`], [`Preset`], [`TlsRouterConnector`]), [`TimedIo`] recording every
+//! TLS via rustls by default, or the owned engine when a fingerprint profile
+//! is selected ([`TlsProfile`], [`Preset`], [`TlsRouterConnector`]), [`TimedIo`] recording every
 //! read/write syscall boundary, a keep-alive pool ([`Pool`]) with profile isolation
 //! and replay-safe stale-connection recovery (`INV-TRANSPORT-01..06`), `TCP_INFO` sampling
 //! for RTT and retransmits, HTTP `CONNECT` and SOCKS5 proxies ([`Proxy`], [`ProxyConnector`]),

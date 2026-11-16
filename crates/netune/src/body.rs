@@ -57,6 +57,7 @@ pub(crate) struct BodyContext {
     pub decoder: Decoder,
     pub max_decoded: u64,
     pub idle_timeout: Option<Duration>,
+    pub deadline: Option<tokio::time::Instant>,
 }
 
 /// A streaming response body with its attempt's evidence attached.
@@ -81,6 +82,7 @@ pub struct Body {
     decoded: u64,
     max_decoded: u64,
     idle_timeout: Option<Duration>,
+    deadline: Option<tokio::time::Instant>,
 }
 
 impl Body {
@@ -103,6 +105,7 @@ impl Body {
             decoded: 0,
             max_decoded: context.max_decoded,
             idle_timeout: context.idle_timeout,
+            deadline: context.deadline,
         }
     }
 
@@ -135,19 +138,33 @@ impl Body {
             let Some(source) = self.source.as_mut() else {
                 return Ok(None);
             };
-            let raw = match self.idle_timeout {
-                Some(limit) => tokio::time::timeout(limit, source.next_chunk())
-                    .await
-                    .map_err(|_| NetError::Timeout {
-                        phase: DiagnosticPhase::Response,
-                        waiting_for: "next response body bytes",
-                        limit,
-                    })??,
+            let idle_deadline = self
+                .idle_timeout
+                .map(|limit| tokio::time::Instant::now() + limit);
+            let effective = match (idle_deadline, self.deadline) {
+                (Some(idle), Some(deadline)) => Some(idle.min(deadline)),
+                (Some(idle), None) => Some(idle),
+                (None, Some(deadline)) => Some(deadline),
+                (None, None) => None,
+            };
+            let raw = match effective {
+                Some(at) => {
+                    let limit = at.saturating_duration_since(tokio::time::Instant::now());
+                    tokio::time::timeout_at(at, source.next_chunk())
+                        .await
+                        .map_err(|_| NetError::Timeout {
+                            phase: DiagnosticPhase::Response,
+                            waiting_for: "next response body bytes",
+                            limit,
+                        })??
+                }
                 None => source.next_chunk().await?,
             };
             let Some(raw) = raw else {
                 let mut tail = Vec::new();
-                self.decoder.finish(&mut tail)?;
+                let remaining = usize::try_from(self.max_decoded.saturating_sub(self.decoded))
+                    .unwrap_or(usize::MAX);
+                self.decoder.finish(&mut tail, remaining)?;
                 self.count_decoded(tail.len())?;
                 self.recorder.mark(EventKind::BodyEnd, 0, 0);
                 self.close(BodyState::Finished, true);
@@ -159,7 +176,9 @@ impl Body {
             };
 
             let mut decoded = Vec::new();
-            self.decoder.push(&raw, &mut decoded)?;
+            let remaining = usize::try_from(self.max_decoded.saturating_sub(self.decoded))
+                .unwrap_or(usize::MAX);
+            self.decoder.push(&raw, &mut decoded, remaining)?;
             self.count_decoded(decoded.len())?;
             if !self.started {
                 self.recorder.mark(EventKind::BodyStart, 0, 0);

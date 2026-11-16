@@ -285,6 +285,12 @@ pub struct Attempt<'a> {
     pub observation: ObservationLevel,
     /// The client's policy: limits and bounds.
     pub config: &'a ClientConfig,
+    /// Absolute deadline for the whole attempt, including the response body.
+    ///
+    /// `None` only when the caller deliberately removed every bound. A
+    /// transport that performs a long-poll or a long upload must not use this
+    /// as a per-operation timeout; it is the outer ceiling.
+    pub deadline: Option<tokio::time::Instant>,
 }
 
 /// What a transport hands back when a body gives up its connection.

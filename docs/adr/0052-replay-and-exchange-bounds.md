@@ -66,9 +66,12 @@ who knows what a duplicate costs, can decide.
 
 **Bound the exchange.** `ClientConfig::response_head_timeout` bounds the wait
 from request written to head received; `ClientConfig::body_idle_timeout`
-bounds the silence between body reads. Both default to `None`. Expiry is
-`NetError::Timeout`, returned with the attempt's trace. It is retryable and is
-never classified as a stale connection.
+bounds the silence between body reads; `ClientConfig::request_timeout` bounds
+the whole attempt, including redirects and the response body. They default to
+30 s, 60 s and 300 s respectively. Expiry is `NetError::Timeout`, returned with
+the attempt's trace. It is retryable and is never classified as a stale
+connection. Setting any of them to `None` is an explicit caller opt-out, not a
+production default.
 
 ### Invariants & Behavioral Boundaries
 

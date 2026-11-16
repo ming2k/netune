@@ -13,7 +13,14 @@ superseded_by: null
 - Date: 2026-11-15
 - Deciders: Ming Li
 - Amends: [ADR-0004](0004-tls-fingerprint-profiles-pool-isolation.md)
+- Amended by: [ADR-0054](0054-audited-tls-default-and-owned-fingerprint-opt-in.md)
 - Related: [ADR-0001](0001-owned-transport-trace-model.md), [ADR-0016](0016-quic-and-http3-transport.md), [ADR-0027](0027-owned-h3-qpack.md), [ADR-0028](0028-owned-quic.md)
+
+> **Amendment (ADR-0054).** Plain egress TLS targets now use rustls with the
+> platform verifier; the owned engine remains the fingerprint identity and is
+> selected explicitly by a `TlsProfile` or `netune-tls`. The owned engine stays
+> Preview until its independent audit closes. The step-6 removal statement
+> below is historical; the current enforcement is the ADR-0054 whitelist.
 
 ---
 
@@ -194,10 +201,11 @@ that has not passed its gate is not the production path.
 5. Engine seam in `netune`: the orchestrator's TLS connector selects
    `netune-tls` for TCP-TLS egress; `netune-server` (ADR-0015) and
    `netune-quic` (ADR-0028) keep rustls under their own ADRs.
-6. Removal: rustls and `tokio-rustls` leave `netune`'s egress dependency set;
-   `check-architecture.py` rejects them for `netune` and for `netune-tls`
-   while whitelisting them only for the ADR-0015/0028 consumers
-   (`netune-server`, `netune-quic`, `test-support`).
+6. Default selection: rustls remains the audited default for plain egress TLS
+   targets; the owned engine is selected by a profile or `netune-tls`
+   (ADR-0054). `check-architecture.py` whitelists rustls for `netune`,
+   `netune-server`, `netune-quic` and `test-support`, and never for
+   `netune-tls`'s own production dependencies.
 
 ### 5. Differential tests are the acceptance criterion
 
@@ -212,13 +220,13 @@ live oracle:
 
 ## Invariants & Behavioral Boundaries
 
-- **`[INV-TLS-04]` Owned Egress TLS Production Path**: the egress TCP-TLS
-  production graph contains no third-party TLS engine; `rustls`/`tokio-rustls`
-  appear in it only as dev-only oracles of `netune-tls` until step 6 removes
-  them from `netune`. `netune-server` and `netune-quic` keep their
-  ADR-0015/0028 ratification. *Enforced by*: `check-architecture.py`
-  (`FORBIDDEN_TLS_RUNTIME` whitelist; `netune-tls` is never whitelisted) and
-  `Cargo.toml` dependency sets.
+- **`[INV-TLS-04]` Ratified Egress TLS Paths**: a plain egress TLS target uses
+  rustls with the platform verifier (ADR-0054); a target that selects a
+  `TlsProfile` or `netune-tls` uses the owned engine. No other TLS engine is
+  permitted on the egress path, and a profile is never silently downgraded to
+  rustls. `netune-server` and `netune-quic` keep their ADR-0015/0028
+  ratification. *Enforced by*: `check-architecture.py` (`FORBIDDEN_TLS_RUNTIME`
+  whitelist) and the engine dispatch tests in `netune/src/tls.rs`.
 
 - **`[INV-TLS-05]` Delegated TLS Cryptography**: every cryptographic primitive
   — AEAD, CBC+HMAC, HKDF, transcript hash, agreement (ECDH/KEM), signature and

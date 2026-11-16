@@ -6,23 +6,32 @@
 //! folded a DNS lookup, a TCP handshake, a TLS handshake, an OAuth token refresh
 //! and the request upload into one number labelled "Connect & Handshake".
 //!
-//! The handshake is the owned engine's ([ADR-0045](../../adr/0045-owned-egress-tls-engine.md)):
-//! the [`TlsProfile`] description maps onto the Go-shaped hello, the engine
-//! drives the handshake over the transport, and the connection comes back as
-//! an `AsyncRead`/`AsyncWrite` whose record protection is the engine's
-//! ([`INV-TLS-08`]). The handshake itself is bounded (10 s by default); a peer
-//! that accepts the TCP connection and then stops answering is reported as a
+//! There are two engines. A plain TLS target uses **rustls with the platform
+//! verifier**, the audited production path. A target that selects a
+//! [`TlsProfile`] or explicitly asks for `netune-tls` uses the owned engine
+//! ([ADR-0045](../../adr/0045-owned-egress-tls-engine.md)), whose blueprint
+//! reproduces the measured ClientHello wire identity. The owned engine is
+//! under the audit gate in `docs/reference/stability.md`; selecting a profile
+//! is an explicit opt-in, and the engine never silently downgrades a profile
+//! to rustls. The handshake itself is bounded (10 s by default); a peer that
+//! accepts the TCP connection and then stops answering is reported as a
 //! connection failure rather than holding the attempt open indefinitely; use
 //! [`TlsRouterConnector::with_handshake_timeout`] to change the bound.
 
 use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use netune_trace::{
     Alpn, DiagnosticCode, DiagnosticPhase, DiagnosticRecord, EventKind, TraceCollector,
 };
+use rustls::pki_types::ServerName;
+use rustls_platform_verifier::ConfigVerifierExt;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::connect::{Connector, Established, Target};
+use crate::connect::{Connector, Established, Target, Transport};
 use crate::error::{ConnectError, NetError};
 use crate::handshake::{DEFAULT_HANDSHAKE_TIMEOUT, bound};
 use crate::tls_profile::{Preset, TlsProfile};
@@ -32,9 +41,11 @@ use crate::tls_profile::{Preset, TlsProfile};
 /// verifier module (`webpki` is the validator, not a TLS engine).
 pub use netune_tls::verifier::Verifier as OwnedVerifier;
 
-/// A connector that presents a *per-request* TLS identity: the target's
-/// [`Target::tls_profile`] name selects which preset handshakes, and the
-/// owned engine handshakes the transport.
+/// A connector that presents a *per-request* TLS identity.
+///
+/// A target with no profile or engine uses rustls with the platform verifier.
+/// A target that names a [`TlsProfile`] (or `netune-tls`) uses the owned
+/// engine and its declarative ClientHello blueprint.
 ///
 /// An unknown profile or engine name is a [`NetError::Connect`] at connect
 /// time, not a silent fallback to a default: choosing a fingerprint is an
@@ -48,8 +59,14 @@ pub struct TlsRouterConnector<C: Connector> {
     /// Custom profiles registered ahead of the built-in presets; a custom
     /// name may override a preset name (drift experiments, CA-pinned tests).
     custom: HashMap<String, TlsProfile>,
-    /// The trust policy the engine verifies chains with.
+    /// The trust policy the owned engine verifies chains with.
     verifier: netune_tls::Verifier,
+    /// A caller-supplied rustls configuration. `None` uses the platform
+    /// verifier with safe defaults.
+    rustls_config: Option<Arc<rustls::ClientConfig>>,
+    /// The owned engine was selected explicitly (for example by a pinned
+    /// verifier or a profile), so the default rustls path is not used.
+    force_owned: bool,
     handshake_timeout: Option<Duration>,
     /// Per-(server, profile, alpn) TLS 1.3 resumption ticket cache.
     session_cache: netune_tls::session::SessionCache,
@@ -61,6 +78,8 @@ impl<C: Connector> TlsRouterConnector<C> {
             inner,
             custom: HashMap::new(),
             verifier: netune_tls::Verifier::WebpkiRoots,
+            rustls_config: None,
+            force_owned: false,
             handshake_timeout: Some(DEFAULT_HANDSHAKE_TIMEOUT),
             session_cache: netune_tls::session::SessionCache::new(),
         }
@@ -74,11 +93,36 @@ impl<C: Connector> TlsRouterConnector<C> {
         self
     }
 
-    /// Set the trust policy the engine verifies chains with. The default is
-    /// the Mozilla root bundle via `webpki`.
+    /// Set the trust policy the owned engine verifies chains with, and select
+    /// the owned engine.
+    ///
+    /// The owned engine is under the audit gate described in
+    /// `docs/reference/stability.md`; use it when a pinning policy or a
+    /// fingerprint identity requires it, not as the default production path.
     #[must_use]
     pub fn with_verifier(mut self, verifier: netune_tls::Verifier) -> Self {
         self.verifier = verifier;
+        self.force_owned = true;
+        self
+    }
+
+    /// Use a caller-supplied rustls configuration for the default engine.
+    ///
+    /// The configuration is used only when the target does not select a TLS
+    /// profile or explicitly request `netune-tls`; those selections are wire
+    /// identities and cannot be silently downgraded to a different engine.
+    #[must_use]
+    pub fn with_rustls_config(mut self, config: rustls::ClientConfig) -> Self {
+        self.rustls_config = Some(Arc::new(config));
+        self.force_owned = false;
+        self
+    }
+
+    /// Explicitly select the owned engine for targets that do not carry a
+    /// profile or engine name.
+    #[must_use]
+    pub fn with_owned_engine(mut self) -> Self {
+        self.force_owned = true;
         self
     }
 
@@ -229,6 +273,133 @@ impl<C: Connector> TlsRouterConnector<C> {
     }
 }
 
+impl<C: Connector> TlsRouterConnector<C> {
+    /// The audited production path: rustls with the platform verifier.
+    ///
+    /// The owned engine remains available for fingerprint identities, but it
+    /// is not selected by a plain TLS target.
+    async fn rustls_handshake(
+        &self,
+        established: Established,
+        target: &Target,
+        recorder: &TraceCollector,
+    ) -> Result<Established, NetError> {
+        let Some(server_name) = target.tls_server_name().map(str::to_owned) else {
+            return Ok(established);
+        };
+        recorder.mark(EventKind::TlsStart, 0, 0);
+
+        let config = match &self.rustls_config {
+            Some(config) => Arc::clone(config),
+            None => {
+                let mut config =
+                    rustls::ClientConfig::with_platform_verifier().map_err(|error| {
+                        NetError::Connect(ConnectError::config(
+                            DiagnosticPhase::Tls,
+                            format!("rustls platform verifier: {error}"),
+                        ))
+                    })?;
+                if config.alpn_protocols.is_empty() {
+                    // The connector cannot see ClientConfig::enable_http2, so
+                    // the default must be the conservative H1-only offer. A
+                    // caller that needs h2 supplies a rustls config (or uses
+                    // the owned profile path).
+                    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+                }
+                Arc::new(config)
+            }
+        };
+        let connector = tokio_rustls::TlsConnector::from(config);
+        let domain = ServerName::try_from(server_name.clone()).map_err(|error| {
+            NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Tls,
+                format!("invalid TLS server name {server_name:?}: {error}"),
+            ))
+        })?;
+        let connecting = connector.connect(domain, established.stream);
+        let stream = bound(
+            self.handshake_timeout,
+            DiagnosticPhase::Tls,
+            "TLS handshake",
+            &server_name,
+            recorder,
+            connecting,
+        )
+        .await?
+        .map_err(|error| {
+            let message = format!("TLS handshake with {server_name}: {error}");
+            recorder.record_error(
+                DiagnosticRecord::new(DiagnosticCode::EGRESS_TLS_FAILED)
+                    .with_phase(DiagnosticPhase::Tls)
+                    .with_message(message.clone()),
+            );
+            NetError::Connect(ConnectError::tls(server_name.clone(), message).with_source(error))
+        })?;
+
+        let (_, session) = stream.get_ref();
+        let alpn = match session.alpn_protocol() {
+            Some(b"http/1.1") => Alpn::Http11,
+            Some(b"h2") => Alpn::H2,
+            _ => Alpn::Unknown,
+        };
+        let alpn_protocol = session.alpn_protocol().map(<[u8]>::to_vec);
+        let version_code = match session.protocol_version() {
+            Some(rustls::ProtocolVersion::TLSv1_3) => 13,
+            Some(rustls::ProtocolVersion::TLSv1_2) => 12,
+            _ => 0,
+        };
+        recorder.mark(EventKind::TlsEnd, 0, 0);
+        recorder.mark(EventKind::TlsInfo, u32::from(alpn.code()), version_code);
+
+        Ok(Established {
+            stream: Box::new(RustlsTransport { inner: stream }),
+            local_port: established.local_port,
+            socket: established.socket,
+            alpn: Some(alpn),
+            alpn_protocol,
+        })
+    }
+}
+
+/// A rustls stream that still exposes the underlying socket tap.
+struct RustlsTransport<S> {
+    inner: tokio_rustls::client::TlsStream<S>,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for RustlsTransport<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RustlsTransport<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+impl<S: Transport> Transport for RustlsTransport<S> {
+    fn socket_tap(&mut self) -> Option<&mut netune_trace::SocketTap> {
+        self.inner.get_mut().0.socket_tap()
+    }
+}
+
 impl<C: Connector> Connector for TlsRouterConnector<C> {
     fn socket_shape(&self) -> Option<String> {
         self.inner.socket_shape()
@@ -252,20 +423,43 @@ impl<C: Connector> Connector for TlsRouterConnector<C> {
         }
         // The engine name is a request-visible identity surface
         // ([`INV-TLS-09`]); an unknown name is a refusal, never a fallback.
-        if let Some(engine) = target.tls_engine()
+        let engine = target.tls_engine();
+        if let Some(engine) = engine
+            && engine != "rustls"
             && engine != "netune-tls"
         {
             return Err(NetError::Connect(ConnectError::config(
                 DiagnosticPhase::Tls,
-                format!("unknown TLS engine {engine:?} (the owned engine is \"netune-tls\")"),
+                format!(
+                    "unknown TLS engine {engine:?} (known engines: \"rustls\", \"netune-tls\")"
+                ),
             )));
         }
-        let name = target.tls_profile().unwrap_or(Preset::NetuneDefault.name());
-        let profile = self
-            .resolve(name)
-            .ok_or_else(|| unknown_profile_error(name))?;
+        let has_profile = target.tls_profile().is_some();
+        if has_profile && engine == Some("rustls") {
+            return Err(NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Tls,
+                "a TLS profile is an owned-engine wire identity; it cannot be run on \"rustls\"",
+            )));
+        }
+        if engine == Some("rustls") && self.force_owned {
+            return Err(NetError::Connect(ConnectError::config(
+                DiagnosticPhase::Tls,
+                "the connector is configured with an owned-engine verifier and cannot run \
+                 \"rustls\"",
+            )));
+        }
+        let use_owned = engine == Some("netune-tls") || has_profile || self.force_owned;
         let established = self.inner.connect(target, recorder).await?;
-        self.owned_handshake(&profile, established, target, recorder)
-            .await
+        if use_owned {
+            let name = target.tls_profile().unwrap_or(Preset::NetuneDefault.name());
+            let profile = self
+                .resolve(name)
+                .ok_or_else(|| unknown_profile_error(name))?;
+            self.owned_handshake(&profile, established, target, recorder)
+                .await
+        } else {
+            self.rustls_handshake(established, target, recorder).await
+        }
     }
 }

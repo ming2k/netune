@@ -167,6 +167,34 @@ async fn a_tls_attempt_measures_the_handshake_and_records_negotiation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_plain_tls_target_uses_the_rustls_production_engine() {
+    let identity = crate::common::tls::identity(&["localhost"], &[b"http/1.1"]);
+    let acceptor = TlsAcceptor::from(identity.server);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr");
+    let server = tokio::spawn(serve_tls(listener, acceptor, 1));
+
+    // No profile and no explicit engine: production default is rustls. The
+    // test supplies its trust anchor through a normal rustls config.
+    let connector = TlsRouterConnector::new(TcpConnector::new())
+        .with_rustls_config(identity.client.as_ref().clone());
+    let client = Client::new(connector, Pool::default(), ClientConfig::default());
+    let target = Target::tls(address.to_string(), "localhost");
+    let recorder = TraceCollector::start(4096);
+    request_once(&client, &target, recorder.clone()).await;
+
+    let trace = trace_of(recorder.log(), &address.to_string());
+    let info = trace
+        .log
+        .first_of(EventKind::TlsInfo)
+        .expect("negotiation recorded");
+    assert_eq!(Alpn::from_code(info.a as u8), Some(Alpn::Http11));
+    assert_eq!(info.b, 13, "rustls negotiates TLS 1.3 with this server");
+    let _ = server.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_pooled_tls_reuse_has_no_handshake_to_charge() {
     let identity = crate::common::tls::identity(&["localhost"], &[b"http/1.1"]);
     let acceptor = TlsAcceptor::from(identity.server);

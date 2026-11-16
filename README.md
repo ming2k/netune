@@ -18,7 +18,7 @@ object you can inspect, fingerprint, and change:
 | [`netune-io`] | The byte path both directions share: `TimedIo` records every syscall boundary, `FaultIo` injects chaos. No socket, no policy. |
 | [`netune-diagnostics`] | Native diagnostic sinks and review bundles: stderr/JSONL output, redaction, manifest + trace + diagnosis artifacts. No socket, no orchestrator. |
 | [`netune-egress`] | Pure egress-address policy: `is_public_ip` and `EgressConfinement`, the one predicate every outbound transport (TCP, UDP, QUIC) checks before opening a socket. No I/O. |
-| [`netune`] | **Egress**: DNS, TCP, owned TLS engine, connection pool (`Pool`), TLS fingerprint presets and routing (`TlsProfile`, `Preset`), proxies (HTTP CONNECT & SOCKS5), egress confinement, redirects, decompression, client WebSocket upgrade (`connect_ws`), safe stale-socket recovery. |
+| [`netune`] | **Egress**: DNS, TCP, TLS (rustls by default; owned fingerprint engine opt-in), connection pool (`Pool`), TLS fingerprint presets and routing (`TlsProfile`, `Preset`), proxies (HTTP CONNECT & SOCKS5), egress confinement, redirects, decompression, client WebSocket upgrade (`connect_ws`), safe stale-socket recovery. |
 | [`netune-server`] | **Ingress**: an observable listener serving **HTTP/1.1, HTTP/2 and optional HTTP/3** behind one handler — accept loop, admission control that sheds instead of queueing, separate phase bounds, streaming responses, request validation before dispatch, per-connection ingress traces, graceful drain. HTTP/3 is a peer QUIC listener, not a mode of the TCP server. A transport, not a framework. |
 | [`netune-webtransport`] | Owned WebTransport over HTTP/3 draft-17: sessions, bidi/uni streams, datagrams, flow-control/close capsules and multi-session routing. Reliable `RESET_STREAM_AT` and browser interop remain outstanding (ADR-0033). |
 | [`netune-probe`] | The L2 probe: `AF_PACKET` capture of one TCP flow, pure Ethernet/IPv4/TCP parse **and build** (forge), plus an opt-in `inject` feature for frame transmission. |
@@ -65,8 +65,8 @@ object you can inspect, fingerprint, and change:
 **Resilience** — multiplexed pooling, safe replay, and bounded exchanges:
 
 - **One client for HTTP/1.1, HTTP/2, and HTTP/3**: `Target::with_protocol` (`HttpProtocol::{Auto, Http1, Http2, Http3}`) routes through `Client` and `Pool`, with multiplexed `H2ClientSession` and `H3Session` sharing, cold-dial singleflight coalescing, isolated stream cancellation, and streaming request uploads (`RequestBody::Stream`).
-- **Governed pooling**: `PoolConfig` caps idle sockets per authority (`max_idle_per_authority`), across the entire pool (`max_idle_total`), and concurrent in-flight exchanges (`max_in_flight_per_authority`), with a weak-referenced background reaper and synchronous `Pool::reap()`.
-- **Bounded establishment & exchanges**: DNS/TCP, proxy tunnel, TLS, HTTP/2 preface + SETTINGS, WebSocket upgrade and SOCKS5 UDP associate have explicit establishment bounds, and response head (`response_head_timeout`) and body idle silence (`body_idle_timeout`) have explicit configurable bounds. The latter two default to `None`; a production deployment should set them (`INV-TRANSPORT-05`, `INV-TRANSPORT-08`).
+- **Governed pooling**: `PoolConfig` caps idle sockets per authority (`max_idle_per_authority`), across the entire pool (`max_idle_total`), and concurrent in-flight exchanges per authority and globally (`max_in_flight_per_authority`, `max_in_flight_total`), with a weak-referenced background reaper and synchronous `Pool::reap()`.
+- **Bounded establishment & exchanges**: DNS/TCP, proxy tunnel, TLS, HTTP/2 preface + SETTINGS, WebSocket upgrade and SOCKS5 UDP associate have explicit establishment bounds; `request_timeout`, `response_head_timeout` and `body_idle_timeout` are finite by default and can be removed only explicitly (`INV-TRANSPORT-05`, `INV-TRANSPORT-08`).
 - **Safe replay**: stale pooled sockets are probed before write and re-sent only when the peer refused processing (`RetryableProtocol`) or the request is replay-safe (`Request::is_replay_safe`, `INV-TRANSPORT-06`).
 
 ## The privilege boundary is structural
@@ -154,6 +154,8 @@ stages as if they had not happened.
 - **Reference**:
   - [Crates Reference](docs/reference/crates.md)
   - [System Architecture](docs/reference/architecture.md)
+  - [Stability and Production Boundaries](docs/reference/stability.md)
+- **Security**: [Security Policy](.github/SECURITY.md)
 - **Explanation**: [all articles](docs/explanation/index.md)
   - [Structural Privilege Boundaries](docs/explanation/privilege-boundaries.md)
 - **Architecture Decisions**: [ADR Registry](docs/adr/index.md)

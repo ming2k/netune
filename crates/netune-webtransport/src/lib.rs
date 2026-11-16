@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT
 
 //! Owned WebTransport over HTTP/3, pinned to `draft-ietf-webtrans-http3-17`.
+//!
+//! # Experimental status
+//!
+//! This crate is **experimental**, not production-stable. The draft, browser
+//! support, and the public API may change between `0.0.x` releases. Reliable
+//! `RESET_STREAM_AT`, browser interoperability and draft-version negotiation
+//! are open gates; see `docs/reference/stability.md`.
 
 #![cfg_attr(test, allow(clippy::expect_used))]
 //!

@@ -88,6 +88,7 @@ The architectural evolution is governed by the following decisions:
 | [ADR-0051](../adr/0051-attempt-evidence-is-neutral-socket-level-and-always-reachable.md) | Neutral, Socket-Level Trace Evidence | Consumer-neutral trace vocabulary; socket tap beneath TLS; `Body::trace()` preserved across every terminal state (`INV-TRACE-10..12`). |
 | [ADR-0052](../adr/0052-replay-and-exchange-bounds.md) | Replay & Exchange Bounds | Stale-socket replay gated by `Request::is_replay_safe` and peer refusals; exchange timeouts return attempt evidence (`INV-TRANSPORT-06..08`). |
 | [ADR-0053](../adr/0053-unified-multiplexed-protocols-and-pool-governance.md) | Unified Multiplexed Protocols & Pool | `HttpProtocol` unifies HTTP/1.1, HTTP/2 (`H2ClientSession`), and HTTP/3 (`H3Session`) behind `RoundTrip`; removes `H2Client`; adds pool governance and `netune-tls` fuzzing (`INV-EXCHANGE-03`, `INV-TRANSPORT-09..10`, `INV-TEST-06`). |
+| [ADR-0054](../adr/0054-audited-tls-default-and-owned-fingerprint-opt-in.md) | Audited TLS Default & Owned Fingerprint Opt-In | Plain TLS targets use rustls + platform verifier; a profile or `netune-tls` selects the owned engine; no silent downgrade; engine choice remains pool identity (`INV-TLS-04`, `INV-TLS-12`). |
 
 ---
 

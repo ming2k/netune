@@ -46,24 +46,37 @@ impl Decoder {
         }
     }
 
-    /// Feed raw body bytes, appending decoded bytes to `out`.
-    pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<(), NetError> {
+    /// Feed raw body bytes, appending at most `limit` decoded bytes to `out`.
+    ///
+    /// `limit` is the remaining decoded-body budget, not the size of `out`.
+    /// The decoder checks it before every append, so a single compressed
+    /// chunk cannot expand past the caller's bound.
+    pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<(), NetError> {
         match self {
-            Self::Identity => out.extend_from_slice(input),
-            Self::Gzip(decoder) => decoder.push(input, out)?,
-            Self::Brotli(decoder) => decoder.push(input, out)?,
+            Self::Identity => {
+                if input.len() > limit {
+                    return Err(limit_exceeded());
+                }
+                out.extend_from_slice(input);
+            }
+            Self::Gzip(decoder) => decoder.push(input, out, limit)?,
+            Self::Brotli(decoder) => decoder.push(input, out, limit)?,
         }
         Ok(())
     }
 
     /// Finish the stream. A truncated stream is an error, not a short body.
-    pub fn finish(&mut self, out: &mut Vec<u8>) -> Result<(), NetError> {
+    pub fn finish(&mut self, out: &mut Vec<u8>, limit: usize) -> Result<(), NetError> {
         match self {
             Self::Identity => Ok(()),
-            Self::Gzip(decoder) => decoder.finish(out),
-            Self::Brotli(decoder) => decoder.finish(out),
+            Self::Gzip(decoder) => decoder.finish(out, limit),
+            Self::Brotli(decoder) => decoder.finish(out, limit),
         }
     }
+}
+
+fn limit_exceeded() -> NetError {
+    NetError::Decode("decoded body exceeded the configured limit".into())
 }
 
 /// Streaming gzip (RFC 1952) decoder. Constructed only by [`Decoder`].
@@ -82,7 +95,12 @@ impl Gzip {
         }
     }
 
-    fn push(&mut self, mut input: &[u8], out: &mut Vec<u8>) -> Result<(), NetError> {
+    fn push(
+        &mut self,
+        mut input: &[u8],
+        out: &mut Vec<u8>,
+        mut limit: usize,
+    ) -> Result<(), NetError> {
         while !input.is_empty() {
             let before_in = self.inner.total_in();
             let before_out = self.inner.total_out();
@@ -92,7 +110,11 @@ impl Gzip {
                 .map_err(|error| NetError::Decode(format!("gzip: {error}")))?;
             let consumed = (self.inner.total_in() - before_in) as usize;
             let produced = (self.inner.total_out() - before_out) as usize;
+            if produced > limit {
+                return Err(limit_exceeded());
+            }
             out.extend_from_slice(&self.scratch[..produced]);
+            limit -= produced;
             input = &input[consumed..];
             if consumed == 0 && produced == 0 {
                 // No forward progress: the input needs more bytes than we have.
@@ -105,7 +127,7 @@ impl Gzip {
         Ok(())
     }
 
-    fn finish(&mut self, out: &mut Vec<u8>) -> Result<(), NetError> {
+    fn finish(&mut self, out: &mut Vec<u8>, mut limit: usize) -> Result<(), NetError> {
         loop {
             let before_in = self.inner.total_in();
             let before_out = self.inner.total_out();
@@ -115,7 +137,11 @@ impl Gzip {
                 .map_err(|error| NetError::Decode(format!("gzip: {error}")))?;
             let consumed = (self.inner.total_in() - before_in) as usize;
             let produced = (self.inner.total_out() - before_out) as usize;
+            if produced > limit {
+                return Err(limit_exceeded());
+            }
             out.extend_from_slice(&self.scratch[..produced]);
+            limit -= produced;
             if status == flate2::Status::StreamEnd {
                 return Ok(());
             }
@@ -146,7 +172,7 @@ impl Brotli {
         }
     }
 
-    fn push(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<(), NetError> {
+    fn push(&mut self, input: &[u8], out: &mut Vec<u8>, mut limit: usize) -> Result<(), NetError> {
         let mut consumed = 0usize;
         loop {
             let mut available_in = input.len() - consumed;
@@ -164,7 +190,11 @@ impl Brotli {
                 &mut total_out,
                 &mut self.state,
             );
+            if output_offset > limit {
+                return Err(limit_exceeded());
+            }
             out.extend_from_slice(&self.scratch[..output_offset]);
+            limit -= output_offset;
             consumed += input_offset;
             match result {
                 BrotliResult::NeedsMoreOutput if output_offset > 0 => continue,
@@ -182,11 +212,11 @@ impl Brotli {
         Ok(())
     }
 
-    fn finish(&mut self, out: &mut Vec<u8>) -> Result<(), NetError> {
+    fn finish(&mut self, out: &mut Vec<u8>, limit: usize) -> Result<(), NetError> {
         if self.finished {
             return Ok(());
         }
-        self.push(&[], out)?;
+        self.push(&[], out, limit)?;
         if self.finished {
             Ok(())
         } else {
@@ -217,9 +247,9 @@ mod tests {
         let mut decoder = Decoder::from_encoding(encoding).expect("decoder");
         let mut out = Vec::new();
         for part in input.chunks(chunk) {
-            decoder.push(part, &mut out).expect("push");
+            decoder.push(part, &mut out, usize::MAX).expect("push");
         }
-        decoder.finish(&mut out).expect("finish");
+        decoder.finish(&mut out, usize::MAX).expect("finish");
         out
     }
 
@@ -265,9 +295,26 @@ mod tests {
             compressed.truncate(compressed.len() / 2);
             let mut decoder = Decoder::from_encoding(encoding).expect("decoder");
             let mut out = Vec::new();
-            let pushed = decoder.push(&compressed, &mut out);
-            let finished = pushed.and_then(|()| decoder.finish(&mut out));
+            let pushed = decoder.push(&compressed, &mut out, usize::MAX);
+            let finished = pushed.and_then(|()| decoder.finish(&mut out, usize::MAX));
             assert!(finished.is_err(), "{encoding:?} must not report success");
+        }
+    }
+
+    #[test]
+    fn a_compressed_chunk_cannot_expand_past_the_budget() {
+        let data = vec![b'q'; 1_000_000];
+        for (encoding, compressed) in [(Some("gzip"), gzip(&data)), (Some("br"), brotli(&data))] {
+            let mut decoder = Decoder::from_encoding(encoding).expect("decoder");
+            let mut out = Vec::new();
+            let error = decoder
+                .push(&compressed, &mut out, 1024)
+                .expect_err("the decoded budget must reject the expansion");
+            assert_eq!(error.class(), "decode");
+            assert!(
+                out.len() <= 1024,
+                "the decoder appended past the budget before failing"
+            );
         }
     }
 

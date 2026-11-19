@@ -108,6 +108,66 @@ fn unary_hello_matches_the_measured_corpus() {
     );
 }
 
+/// The arbitrated `signature_algorithms_cert` offer (live `agy` 1.5.12
+/// capture, 2026-11-19): fifteen schemes — the thirteen from
+/// `signature_algorithms` plus the legacy SHA-1 tail `rsa_pkcs1_sha1`
+/// (`0x0201`) and `ecdsa_sha1` (`0x0203`). Encoded as the raw extension
+/// payload so the wire bytes, not just the model, stay pinned.
+#[test]
+fn signature_algorithms_cert_carries_the_measured_sha1_tail() {
+    use crate::wire::EXT_SIGNATURE_ALGORITHMS_CERT;
+    let bytes = unary_identity()
+        .serialize()
+        .expect("the corpus hello encodes");
+    // Locate extension 0x0032 in the raw hello: 12 extensions follow the
+    // fixed measured order, so parse with the trace model instead of
+    // hand-rolling offsets.
+    let parsed = Parsed::parse(&bytes).expect("the corpus hello parses");
+    assert!(
+        parsed.extensions.contains(&EXT_SIGNATURE_ALGORITHMS_CERT),
+        "the offer carries extension 0x0032"
+    );
+    // Re-serialize the model's cert list and compare against the captured
+    // payload bytes decoded from the same hello. `serialize()` emits the
+    // handshake message (type byte + u24 length), not the record.
+    let hs = &bytes[..];
+    let hello_body = &hs[4..4 + u32::from_be_bytes([0, hs[1], hs[2], hs[3]]) as usize];
+    let sid_len = hello_body[34] as usize;
+    let mut cursor = 35 + sid_len;
+    let cs_len = u16::from_be_bytes([hello_body[cursor], hello_body[cursor + 1]]) as usize;
+    cursor += 2 + cs_len;
+    cursor += 1 + hello_body[cursor] as usize;
+    let ext_total = u16::from_be_bytes([hello_body[cursor], hello_body[cursor + 1]]) as usize;
+    cursor += 2;
+    let ext_end = cursor + ext_total;
+    let mut found = None;
+    while cursor + 4 <= ext_end {
+        let etype = u16::from_be_bytes([hello_body[cursor], hello_body[cursor + 1]]);
+        let elen = u16::from_be_bytes([hello_body[cursor + 2], hello_body[cursor + 3]]) as usize;
+        if etype == EXT_SIGNATURE_ALGORITHMS_CERT {
+            found = Some(hello_body[cursor + 4..cursor + 4 + elen].to_vec());
+        }
+        cursor += 4 + elen;
+    }
+    let payload = found.expect("extension 0x0032 present in the encoded hello");
+    // 2-byte list length + 15 schemes.
+    assert_eq!(payload.len(), 2 + 15 * 2);
+    let list_len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+    assert_eq!(list_len, 30);
+    let schemes: Vec<u16> = payload[2..]
+        .chunks_exact(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .collect();
+    assert_eq!(
+        schemes,
+        vec![
+            0x0904, 0x0905, 0x0906, 0x0804, 0x0403, 0x0807, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601,
+            0x0503, 0x0603, 0x0201, 0x0203,
+        ],
+        "the 1.5.12 offer ends rsa_pkcs1_sha1, ecdsa_sha1"
+    );
+}
+
 #[test]
 fn stream_offer_matches_the_h2_ja4() {
     let hello = ClientHello::go_identity(GoIdentity {

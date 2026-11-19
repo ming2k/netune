@@ -98,7 +98,8 @@ pub(super) async fn exchange_on_session(
     } else {
         "http"
     };
-    let (authority, extra_headers) = super::request_parts(&request.head, &plan.target.authority);
+    let (authority, extra_headers) =
+        super::request_parts(&request.head, super::host_field_value(&plan.target));
 
     recorder.mark(EventKind::RequestWriteStart, 0, 0);
     let request_profile = plan.h2_request().unwrap_or(*session.request_profile());

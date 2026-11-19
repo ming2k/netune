@@ -150,6 +150,12 @@ pub const SIG_RSA_PKCS1_SHA512: u16 = 0x0601;
 pub const SIG_ECDSA_SECP384R1_SHA384: u16 = 0x0503;
 /// `ecdsa_secp521r1_sha512`.
 pub const SIG_ECDSA_SECP521R1_SHA512: u16 = 0x0603;
+/// `rsa_pkcs1_sha1` — the legacy SHA-1 tail Go's `boringcrypto`
+/// `signature_algorithms_cert` offer appends (live `agy` 1.5.12 capture,
+/// 2026-11-19: extension `0x0032` payload ends `… 0503 0603 0201 0203`).
+pub const SIG_RSA_PKCS1_SHA1: u16 = 0x0201;
+/// `ecdsa_sha1` — paired with [`SIG_RSA_PKCS1_SHA1`] in the same tail.
+pub const SIG_ECDSA_SHA1: u16 = 0x0203;
 
 /// Append a big-endian `u16`.
 pub(crate) fn put_u16(out: &mut Vec<u8>, value: u16) {

@@ -75,8 +75,11 @@ pub struct WsSession<S> {
     config: WsSessionConfig,
     /// Last moment a frame of any kind arrived from the peer.
     last_inbound: Instant,
-    /// When the currently outstanding ping was sent, if one is outstanding.
-    ping_in_flight: Option<Instant>,
+    /// When the currently outstanding ping was sent and the exact probe payload
+    /// that must be echoed to discharge it (`[INV-WS-06]`, `[INV-WS-09]`).
+    ping_in_flight: Option<(Instant, Bytes)>,
+    /// Monotonic counter used to stamp unique non-empty ping probe payloads.
+    ping_seq: u64,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> WsSession<S> {
@@ -88,6 +91,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsSession<S> {
             config,
             last_inbound: Instant::now(),
             ping_in_flight: None,
+            ping_seq: 0,
         }
     }
 
@@ -102,13 +106,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsSession<S> {
     /// Receive the next message, sending heartbeat pings and enforcing the
     /// pong deadline as needed.
     ///
+    /// Cancel-safe for use inside `tokio::select!` alongside [`Self::send`]
+    /// (`[INV-WS-09]`): any partially flushed control frame remains buffered in
+    /// the underlying [`WsStream`] and finishes before the next frame is
+    /// written.
+    ///
     /// Returns `Ok(None)` only after a clean close handshake. A pong deadline
     /// violation is `NetError::Protocol` — terminal, non-retryable here, by
     /// design.
     pub async fn next(&mut self) -> Result<Option<Message>, NetError> {
         loop {
             // A dead session: the outstanding ping aged out without an answer.
-            if let Some(sent) = self.ping_in_flight
+            if let Some((sent, _)) = &self.ping_in_flight
                 && sent.elapsed() >= self.config.pong_timeout
             {
                 return Err(NetError::Protocol(format!(
@@ -120,7 +129,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsSession<S> {
             // Decide the next action's deadline: answer the outstanding ping's
             // fate, or fall due for a fresh probe.
             let idle_for = self.last_inbound.elapsed();
-            let deadline = if let Some(sent) = self.ping_in_flight {
+            let deadline = if let Some((sent, _)) = &self.ping_in_flight {
                 // Pong may still arrive; wake exactly at the deadline.
                 self.config.pong_timeout.saturating_sub(sent.elapsed())
             } else if self.config.ping_interval.is_zero() {
@@ -135,8 +144,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsSession<S> {
                 && !self.config.ping_interval.is_zero()
                 && idle_for >= self.config.ping_interval
             {
-                self.stream.send_ping(Bytes::new()).await?;
-                self.ping_in_flight = Some(Instant::now());
+                self.ping_seq = self.ping_seq.wrapping_add(1).max(1);
+                let payload = Bytes::copy_from_slice(&self.ping_seq.to_be_bytes());
+                // Arm before `.await` so a cancellation mid-flush cannot queue
+                // a duplicate ping (`[INV-WS-09]`).
+                self.ping_in_flight = Some((Instant::now(), payload.clone()));
+                if let Err(err) = self.stream.send_ping(payload).await {
+                    self.ping_in_flight = None;
+                    return Err(err);
+                }
                 continue;
             }
 
@@ -150,7 +166,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsSession<S> {
                     // may arrive as a message, but if our probe has already
                     // aged out unanswered, the session is dead and the error
                     // wins over message delivery.
-                    if let Some(sent) = self.ping_in_flight
+                    if let Some((sent, _)) = &self.ping_in_flight
                         && sent.elapsed() >= self.config.pong_timeout
                     {
                         return Err(NetError::Protocol(format!(
@@ -164,8 +180,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsSession<S> {
                     // liveness evidence but not an answer to our question.
                     if let Some(Message::Pong(payload)) = &message
                         && self
-                            .stream
-                            .outstanding_ping_matches(payload)
+                            .ping_in_flight
+                            .as_ref()
+                            .is_some_and(|(_, expected)| expected == payload)
                     {
                         self.ping_in_flight = None;
                     }

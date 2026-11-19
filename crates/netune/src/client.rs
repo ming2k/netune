@@ -182,6 +182,17 @@ pub struct ClientConfig {
     /// peer that trickles forever. Default 300 s. Set it to `None` only for
     /// a caller-owned deadline that covers both the head and the body.
     pub request_timeout: Option<Duration>,
+    /// Offer `accept-encoding: gzip` on HTTP/1.1 requests that do not carry
+    /// one, and transparently decode a `content-encoding: gzip` response —
+    /// the Go `net/http` transport's own behaviour.
+    ///
+    /// Off by default: the header is part of a client's wire identity, so
+    /// adopting another stack's identity is a deliberate choice, not a
+    /// default. The HTTP/2 path does not offer the header; a Go client's h2
+    /// lanes add it in the transport too, but h2 requests today always
+    /// carry a caller-set `accept-encoding` where it matters, and an
+    /// unconditional offer would change every existing h2 fingerprint.
+    pub accept_encoding_gzip: bool,
     /// The default observation policy for [`Client::request`].
     pub observation: Observation,
 }
@@ -197,6 +208,7 @@ impl Default for ClientConfig {
             response_head_timeout: Some(Duration::from_secs(30)),
             body_idle_timeout: Some(Duration::from_secs(60)),
             request_timeout: Some(Duration::from_secs(300)),
+            accept_encoding_gzip: false,
             observation: Observation::Counters,
         }
     }
@@ -249,6 +261,14 @@ impl ClientConfig {
     #[must_use]
     pub fn with_body_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.body_idle_timeout = timeout;
+        self
+    }
+
+    /// Offer `accept-encoding: gzip` on HTTP/1.1 requests that do not carry
+    /// one, with transparent response decoding (Go `net/http` behaviour).
+    #[must_use]
+    pub fn with_accept_encoding_gzip(mut self, enabled: bool) -> Self {
+        self.accept_encoding_gzip = enabled;
         self
     }
 
@@ -1033,6 +1053,16 @@ impl Client {
             .await
     }
 
+    /// Immediately evict every pooled HTTP/1.1, HTTP/2, and HTTP/3 connection
+    /// without disturbing already checked-out in-flight streams
+    /// (`[INV-TRANSPORT-15]`).
+    ///
+    /// Returns the number of pooled connection entries removed. Transports
+    /// without a pool (such as mocks) return `0`.
+    pub fn clear_pool(&self) -> usize {
+        self.transport.clear_pool()
+    }
+
     /// The pool key for a target: authority plus the whole connection identity.
     ///
     /// The identity carries the TLS profile, the verified server name, the
@@ -1386,15 +1416,29 @@ mod upgrade {
     impl Client {
         /// Establish an upgraded, untraced client WebSocket stream to `target`.
         ///
-        /// Call [`Client::connect_ws_traced`] with a recorder when the caller
-        /// wants control, frame and socket events.
+        /// Call [`Client::connect_ws_with`] for custom headers or timeouts, or
+        /// [`Client::connect_ws_traced`] when the caller wants control, frame
+        /// and socket events.
         pub async fn connect_ws(
             &self,
             target: &Target,
             path: &str,
         ) -> Result<WsStream<WsIo>, AttemptError> {
+            self.connect_ws_with(target, path, WsHandshake::default())
+                .await
+        }
+
+        /// Establish an upgraded, untraced client WebSocket stream to `target`
+        /// with explicit negotiation knobs (extra headers, subprotocols,
+        /// handshake timeout, and frame limits).
+        pub async fn connect_ws_with(
+            &self,
+            target: &Target,
+            path: &str,
+            handshake: WsHandshake,
+        ) -> Result<WsStream<WsIo>, AttemptError> {
             let recorder = TraceCollector::disabled();
-            self.upgrade(target, path, &recorder, None, WsHandshake::default())
+            self.upgrade(target, path, &recorder, None, handshake)
                 .await
                 .map_err(|error| {
                     AttemptError::new(error, evidence(&recorder, ObservationLevel::Off))
@@ -1599,6 +1643,18 @@ impl Client {
     /// an upgraded stream must be told the capability is absent, not handed a
     /// plain HTTP response it will misread.
     pub async fn connect_ws(&self, _target: &Target, _path: &str) -> Result<(), AttemptError> {
+        Err(AttemptError::without_evidence(NetError::Protocol(
+            "WebSocket support was not compiled in: enable the `ws` feature".into(),
+        )))
+    }
+
+    /// WebSocket support was compiled out.
+    pub async fn connect_ws_with(
+        &self,
+        _target: &Target,
+        _path: &str,
+        _handshake: (),
+    ) -> Result<(), AttemptError> {
         Err(AttemptError::without_evidence(NetError::Protocol(
             "WebSocket support was not compiled in: enable the `ws` feature".into(),
         )))

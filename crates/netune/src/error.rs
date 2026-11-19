@@ -105,6 +105,12 @@ impl ResolveError {
         !matches!(self.kind, ResolveErrorKind::InvalidAuthority)
     }
 
+    /// Whether this resolution failure indicates the target cannot be reached
+    /// from the current network (as opposed to an invalid authority configuration).
+    pub fn is_unreachable(&self) -> bool {
+        !matches!(self.kind, ResolveErrorKind::InvalidAuthority)
+    }
+
     /// Diagnostic code and retry verdict matching this resolution failure.
     pub const fn diagnostic_code(&self) -> DiagnosticCode {
         match self.kind {
@@ -269,6 +275,20 @@ impl ConnectError {
         )
     }
 
+    /// Whether this connection failure indicates local or routing-layer
+    /// unreachability (no route, network down, or host unreachable) rather than
+    /// a remote reset, refusal, or handshake timeout.
+    pub fn is_unreachable(&self) -> bool {
+        matches!(
+            self.kind,
+            ConnectErrorKind::Io(
+                std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkDown
+            )
+        )
+    }
+
     /// Diagnostic code aligned with [`netune_trace::DiagnosticCode`].
     pub const fn diagnostic_code(&self) -> DiagnosticCode {
         match self.kind {
@@ -430,6 +450,27 @@ impl NetError {
             | Self::TooManyRedirects(_)
             | Self::Security(_)
             | Self::Protocol(_) => false,
+        }
+    }
+
+    /// Whether this failure indicates the target cannot be reached from the
+    /// current network (DNS failure or OS routing unreachability) rather than a
+    /// remote peer refusal, reset, or mid-exchange stall.
+    ///
+    /// Unreachable failures remain [`Self::is_retryable`] so callers that want
+    /// to keep trying can, while callers that fast-fail offline runs can branch
+    /// on this typed predicate without parsing error text (`[INV-TRANSPORT-14]`).
+    pub fn is_unreachable(&self) -> bool {
+        match self {
+            Self::Resolve(error) => error.is_unreachable(),
+            Self::Connect(error) => error.is_unreachable(),
+            Self::Io(error) => matches!(
+                error.kind(),
+                std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkDown
+            ),
+            _ => false,
         }
     }
 
@@ -753,5 +794,64 @@ mod tests {
             resolve_timeout.diagnostic().code,
             DiagnosticCode::EGRESS_TIMEOUT
         );
+    }
+
+    #[test]
+    fn inv_transport_14_unreachability_is_a_typed_predicate() {
+        // DNS failures and OS routing unreachability are unreachable AND retryable.
+        let dns_failed = NetError::Resolve(ResolveError::io(
+            "api.example.com",
+            std::io::Error::other("Temporary failure in name resolution"),
+        ));
+        assert!(dns_failed.is_unreachable());
+        assert!(dns_failed.is_retryable());
+
+        let dns_empty = NetError::Resolve(ResolveError::empty("api.example.com"));
+        assert!(dns_empty.is_unreachable());
+
+        let dns_timeout = NetError::Resolve(ResolveError::timeout(
+            "api.example.com",
+            Duration::from_secs(5),
+        ));
+        assert!(dns_timeout.is_unreachable());
+
+        // Invalid authority is a config error, not a network reachability fault.
+        let bad_auth = NetError::Resolve(ResolveError::invalid_authority("bad:port", "bad"));
+        assert!(!bad_auth.is_unreachable());
+
+        for kind in [
+            std::io::ErrorKind::NetworkUnreachable,
+            std::io::ErrorKind::HostUnreachable,
+            std::io::ErrorKind::NetworkDown,
+        ] {
+            let err = NetError::Connect(ConnectError::io(
+                DiagnosticPhase::Tcp,
+                "198.51.100.1:443",
+                std::io::Error::from(kind),
+            ));
+            assert!(err.is_unreachable(), "{kind:?} must be unreachable");
+            assert!(err.is_retryable(), "{kind:?} remains retryable");
+        }
+
+        // Remote resets, refusals, and mid-exchange timeouts are transient, not unreachable.
+        let refused = NetError::Connect(ConnectError::io(
+            DiagnosticPhase::Tcp,
+            "127.0.0.1:8080",
+            std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+        ));
+        assert!(!refused.is_unreachable());
+        assert!(refused.is_retryable());
+
+        let reset = NetError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(!reset.is_unreachable());
+        assert!(reset.is_retryable());
+
+        let body_timeout = NetError::Timeout {
+            phase: DiagnosticPhase::Response,
+            waiting_for: "body chunk",
+            limit: Duration::from_secs(60),
+        };
+        assert!(!body_timeout.is_unreachable());
+        assert!(body_timeout.is_retryable());
     }
 }

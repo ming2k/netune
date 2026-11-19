@@ -392,6 +392,15 @@ pub trait RoundTrip: Send + Sync + 'static {
         Box::pin(async { Ok(false) })
     }
 
+    /// Evict every idle and shared pooled connection held by this transport
+    /// without disturbing in-flight streams (`[INV-TRANSPORT-15]`).
+    ///
+    /// Returns the number of pooled entries evicted. Transports without a pool
+    /// (such as mocks) return `0`.
+    fn clear_pool(&self) -> usize {
+        0
+    }
+
     /// A stable description of the socket shape this transport applies, folded
     /// into the connection identity.
     fn socket_shape(&self) -> Option<String> {
@@ -423,6 +432,10 @@ impl<T: RoundTrip + ?Sized> RoundTrip for std::sync::Arc<T> {
 
     fn prewarm<'a>(&'a self, attempt: Attempt<'a>) -> BoxFuture<'a, Result<bool, NetError>> {
         (**self).prewarm(attempt)
+    }
+
+    fn clear_pool(&self) -> usize {
+        (**self).clear_pool()
     }
 
     fn socket_shape(&self) -> Option<String> {

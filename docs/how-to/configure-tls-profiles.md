@@ -25,8 +25,8 @@ Seven presets ship in `Preset::all()`:
 | Preset | Wire identity |
 | :--- | :--- |
 | `netune-default` | Shipped identity: Go-shaped hello, `http/1.1` ALPN only. |
-| `antigravity-cli-stream` | Antigravity CLI telemetry/streaming paths: `h2, http/1.1` ALPN (Go 1.28 `boringcrypto`). |
-| `antigravity-cli-unary` | Antigravity CLI unary Cloud Code path: `http/1.1` ALPN only (Go 1.28 `boringcrypto`). |
+| `antigravity-cli-stream` | Antigravity CLI h2 telemetry paths (Clearcut `play.googleapis.com /log`, the auto-updater): `h2, http/1.1` ALPN (Go 1.28 `boringcrypto`). |
+| `antigravity-cli-unary` | Antigravity CLI HTTP/1.1 paths: every `/v1internal:*` Cloud Code call **including the streaming model lane** (`http/1.1` ALPN only, Go 1.28 `boringcrypto`). |
 | `go-standard` | Upstream Go `crypto/tls` (without `boringcrypto`). |
 | `chrome-current` | Chrome/BoringSSL: GREASE, `compress_certificate(brotli)`, ALPS, seeded extension permutation, 517-byte padding. |
 | `firefox-current` | Firefox/NSS: `record_size_limit`, `post_handshake_auth`, `compress_certificate(zlib, brotli)`, `session_ticket`. |

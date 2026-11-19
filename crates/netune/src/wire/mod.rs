@@ -447,6 +447,10 @@ impl<C: Connector + 'static> RoundTrip for Wire<C> {
         Box::pin(self.warm(attempt))
     }
 
+    fn clear_pool(&self) -> usize {
+        self.pool.clear()
+    }
+
     fn socket_shape(&self) -> Option<String> {
         self.connector.socket_shape()
     }
@@ -534,6 +538,29 @@ pub(super) fn request_parts(
         authority.unwrap_or_else(|| fallback_authority.to_string()),
         headers,
     )
+}
+
+/// The `Host` / `:authority` value a mainstream client puts on the wire: the
+/// dial authority with a **scheme-default port removed** — `:443` on a TLS
+/// target, `:80` otherwise.
+///
+/// The dial authority keeps its port (it addresses the socket and keys the
+/// pool); the *header* value does not carry one, because the URLs real
+/// clients build omit default ports and neither Go's `net/http` nor a
+/// browser adds one back. Live capture of `agy` 1.5.12 (2026-11-19):
+/// `Host: daily-cloudcode-pa.googleapis.com` — no `:443` — and the h2
+/// telemetry lane's `:authority: play.googleapis.com` — no port either.
+/// A non-default port stays: it is information the peer needs.
+pub(super) fn host_field_value(target: &crate::connect::Target) -> &str {
+    let default_port = if target.tls_server_name().is_some() {
+        ":443"
+    } else {
+        ":80"
+    };
+    target
+        .authority
+        .strip_suffix(default_port)
+        .unwrap_or(&target.authority)
 }
 
 /// Whether an idle stream has nothing to say: not closed, not failed, and no

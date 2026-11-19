@@ -15,12 +15,14 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
+use crate::ClientConfig;
 use crate::connect::{Transport, dial_tap};
 use crate::error::NetError;
 use crate::exchange::{
-    Attempt, BodySource, BoxFuture, Exchange, ObservationLevel, Released, Request,
+    Attempt, BodySource, BoxFuture, Exchange, ObservationLevel, Released, Request, RequestBody,
 };
 use crate::pool::{Pool, PoolInFlightPermit, PoolKey};
+use crate::profile::ConnectionPlan;
 use crate::tcp_info::{SAMPLE_INTERVAL, Sampler, start as start_sampler};
 
 /// One underlying transport shared by an HTTP/1.1 read half and write half.
@@ -255,7 +257,61 @@ pub(super) struct Connection {
     pub info: ConnectionInfo,
 }
 
-/// Write the request, read the head, and hand back the unread body.
+/// Materialize the transport-stamped HTTP/1.1 headers into `head` — the ones
+/// the exchange, not the caller, owns: `host`, the automatic
+/// `content-length` (or `transfer-encoding: chunked` for an unknown-length
+/// upload), and — when the client adopts the Go transport's identity —
+/// `accept-encoding: gzip`.
+///
+/// Stamping happens **before** the wire profile so the profile controls the
+/// casing and position of these headers like any other; `write_request`
+/// only auto-adds a `content-length` when the head is not raw, and a caller
+/// that supplied `raw_headers` keeps its exact bytes (the gzip offer steps
+/// aside for them too).
+pub(super) fn stamp_transport_headers(
+    head: &mut netune_http1::RequestHead,
+    plan: &ConnectionPlan,
+    config: &ClientConfig,
+    body: &RequestBody,
+) {
+    if !head.headers.contains_key(http::header::HOST)
+        && let Ok(value) = http::HeaderValue::from_str(super::host_field_value(&plan.target))
+    {
+        head.headers.insert(http::header::HOST, value);
+    }
+    let is_stream = body.known_len().is_none();
+    if is_stream {
+        if !head.headers.contains_key(http::header::CONTENT_LENGTH)
+            && !head.headers.contains_key(http::header::TRANSFER_ENCODING)
+        {
+            head.headers.insert(
+                http::header::TRANSFER_ENCODING,
+                http::HeaderValue::from_static("chunked"),
+            );
+        }
+    } else if !head.headers.contains_key(http::header::CONTENT_LENGTH)
+        && let Some(len) = body.known_len()
+        && let Ok(value) = http::HeaderValue::from_str(&len.to_string())
+    {
+        // Materialize Content-Length before the profile so the profile controls
+        // its casing and position too; `write_request` only auto-adds one when
+        // the head is not raw.
+        head.headers.insert(http::header::CONTENT_LENGTH, value);
+    }
+    // The Go `net/http` transport offers gzip when the caller did not name an
+    // encoding, and decodes what it offered. Offered before the profile so a
+    // profile pins the header's position like every transport-stamped header.
+    if config.accept_encoding_gzip
+        && !head.headers.contains_key(http::header::ACCEPT_ENCODING)
+        && head.raw_headers.is_none()
+    {
+        head.headers.insert(
+            http::header::ACCEPT_ENCODING,
+            http::HeaderValue::from_static("gzip"),
+        );
+    }
+}
+
 pub(super) async fn exchange(
     pool: &Pool,
     key: PoolKey,
@@ -275,30 +331,7 @@ pub(super) async fn exchange(
     } = connection;
 
     let mut head = request.head.clone();
-    if !head.headers.contains_key(http::header::HOST)
-        && let Ok(value) = http::HeaderValue::from_str(&plan.target.authority)
-    {
-        head.headers.insert(http::header::HOST, value);
-    }
-    let is_stream = request.body.known_len().is_none();
-    if is_stream {
-        if !head.headers.contains_key(http::header::CONTENT_LENGTH)
-            && !head.headers.contains_key(http::header::TRANSFER_ENCODING)
-        {
-            head.headers.insert(
-                http::header::TRANSFER_ENCODING,
-                http::HeaderValue::from_static("chunked"),
-            );
-        }
-    } else if !head.headers.contains_key(http::header::CONTENT_LENGTH)
-        && let Some(len) = request.body.known_len()
-        && let Ok(value) = http::HeaderValue::from_str(&len.to_string())
-    {
-        // Materialize Content-Length before the profile so the profile controls
-        // its casing and position too; `write_request` only auto-adds one when the
-        // head is not raw.
-        head.headers.insert(http::header::CONTENT_LENGTH, value);
-    }
+    stamp_transport_headers(&mut head, plan, attempt.config, &request.body);
     plan.h1.apply(&mut head);
 
     // The socket tap for this exchange. A fresh, traced connection already
@@ -603,4 +636,100 @@ fn is_reusable(head: &IncomingResponse) -> bool {
         return false;
     }
     !matches!(head.body, BodyKind::UntilClose)
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::*;
+    use crate::connect::Target;
+    use crate::profile::H1WireProfile;
+    use bytes::Bytes;
+    use http::Method;
+    use netune_http1::RequestHead;
+
+    fn antigravity_plan() -> ConnectionPlan {
+        let client = crate::Client::builder().build();
+        let target = Target::plain("daily-cloudcode-pa.googleapis.com:80")
+            .with_h1_profile("antigravity-cli");
+        client.plan(&target).expect("the pairing resolves")
+    }
+
+    /// The Go transport's gzip offer, as the shipped `agy` 1.5.12 puts it on
+    /// the wire (live capture 2026-11-19): a request with no
+    /// `accept-encoding` gains one, a request that names its own encoding
+    /// keeps it, and an exact raw head is never rewritten.
+    #[test]
+    fn gzip_offer_matches_the_go_transport() {
+        let plan = antigravity_plan();
+        let config = ClientConfig::default().with_accept_encoding_gzip(true);
+        let body = RequestBody::Full(Bytes::from_static(b"{}"));
+
+        let mut plain_head = RequestHead::new(Method::POST, "/v1internal:loadCodeAssist")
+            .with_header("authorization", "Bearer t");
+        stamp_transport_headers(&mut plain_head, &plan, &config, &body);
+        assert_eq!(
+            plain_head
+                .headers
+                .get(http::header::ACCEPT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("gzip"),
+            "the transport offers what it can decode"
+        );
+
+        let mut caller_set =
+            RequestHead::new(Method::POST, "/x").with_header("accept-encoding", "identity");
+        stamp_transport_headers(&mut caller_set, &plan, &config, &body);
+        assert_eq!(
+            caller_set
+                .headers
+                .get(http::header::ACCEPT_ENCODING)
+                .and_then(|value| value.to_str().ok()),
+            Some("identity"),
+            "a caller-named encoding is the caller's final word"
+        );
+
+        let mut raw = RequestHead::new(Method::POST, "/x").with_raw_header("X-Exact", "yes");
+        stamp_transport_headers(&mut raw, &plan, &config, &body);
+        assert!(
+            raw.headers.get(http::header::ACCEPT_ENCODING).is_none(),
+            "an exact raw head is never rewritten"
+        );
+    }
+
+    /// Stamping plus the `antigravity-cli` wire profile reproduces the
+    /// captured `agy` 1.5.12 head exactly: `Host`, `User-Agent`,
+    /// `Content-Length`, the caller's headers, `Accept-Encoding` last.
+    #[test]
+    fn stamped_antigravity_head_matches_the_captured_order() {
+        let plan = antigravity_plan();
+        let config = ClientConfig::default().with_accept_encoding_gzip(true);
+        let body = RequestBody::Full(Bytes::from_static(
+            b"{\"metadata\":{\"ideType\":\"ANTIGRAVITY\"}}",
+        ));
+
+        let mut head = RequestHead::new(Method::POST, "/v1internal:loadCodeAssist")
+            .with_header("authorization", "Bearer t")
+            .with_header("content-type", "application/json")
+            .with_header(
+                "user-agent",
+                "antigravity/cli/1.5.12 (aidev_client; os_type=linux; \
+                 arch=amd64; cl=1024904911; auth_method=consumer)",
+            );
+        stamp_transport_headers(&mut head, &plan, &config, &body);
+        H1WireProfile::antigravity_cli().apply(&mut head);
+        let raw = head.raw_headers.expect("raw head");
+        let names: Vec<&str> = raw.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Host",
+                "User-Agent",
+                "Content-Length",
+                "Authorization",
+                "Content-Type",
+                "Accept-Encoding",
+            ],
+            "the 1.5.12 captured order, gzip offer last"
+        );
+    }
 }

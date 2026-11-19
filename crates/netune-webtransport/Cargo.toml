@@ -13,15 +13,15 @@ categories = ["network-programming", "web-programming"]
 [dependencies]
 bytes = { workspace = true }
 http = { workspace = true }
-netune-http3 = { path = "../netune-http3", version = "0.1.1" }
-netune-quic = { path = "../netune-quic", version = "0.1.1" }
+netune-http3 = { path = "../netune-http3", version = "0.1.2" }
+netune-quic = { path = "../netune-quic", version = "0.1.2" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 rcgen = { workspace = true }
 rustls = { workspace = true }
-test-support = { path = "../test-support", version = "0.1.1" }
+test-support = { path = "../test-support", version = "0.1.2" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]

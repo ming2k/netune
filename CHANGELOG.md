@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-19
+
+### Added
+
+- **`H1WireProfile::antigravity_cli`**, registered in the default H1 registry: Go `net/http`'s HTTP/1.1 order and Title-Case spelling (`Host`, `User-Agent`, `Content-Length`/`Transfer-Encoding`, the caller's own headers, `Accept-Encoding` last), pinned to the captured head by a regression test.
+- **`ClientConfig::accept_encoding_gzip`** (`with_accept_encoding_gzip`): offer `accept-encoding: gzip` on HTTP/1.1 requests that do not name an encoding, with the response decoded by the transport — the Go `net/http` behaviour, off by default because the header is part of a client's wire identity. Implemented in `wire::h1::stamp_transport_headers`, the now-pure-and-tested home of every transport-stamped HTTP/1.1 header.
+- **Typed unreachability predicate (`[INV-TRANSPORT-14]` / [ADR-0056](docs/adr/0056-transport-reachability-pool-flush-and-ws-session-liveness.md))**: `ResolveError::is_unreachable()`, `ConnectError::is_unreachable()`, and `NetError::is_unreachable()` classify DNS failures (excluding `InvalidAuthority`) and OS routing unreachability (`NetworkUnreachable`, `HostUnreachable`, `NetworkDown`) as a pure boolean predicate while keeping `is_retryable() == true`.
+- **Explicit pool flush (`[INV-TRANSPORT-15]` / [ADR-0056](docs/adr/0056-transport-reachability-pool-flush-and-ws-session-liveness.md))**: `Pool::clear() -> usize` and `Client::clear_pool() -> usize` synchronously evict all pooled HTTP/1.1, HTTP/2, and HTTP/3 connection entries without disturbing checked-out in-flight streams.
+- **First-class WebSocket client ergonomics (`[INV-WS-09]` / [ADR-0056](docs/adr/0056-transport-reachability-pool-flush-and-ws-session-liveness.md))**: `Target::from_url` accepts `ws://` and `wss://` schemes directly, and `Client::connect_ws_with` establishes an untraced upgraded stream with explicit `WsHandshake` headers and bounds.
+
+### Changed
+
+- **The Antigravity identities follow the live 1.5.12 wire** (decrypted MITM capture of the shipped `agy` 1.5.12, 2026-11-19): the Cloud Code model lanes — unary *and* `v1internal:streamGenerateContent?alt=sse` — are HTTP/1.1 with the brand UA, so `antigravity-cli-unary` is the profile both lanes select; the `antigravity-cli-stream` preset remains the h2 *telemetry* lane identity (Clearcut `play.googleapis.com`, the auto-updater). `Preset` and `H2Registry::default_for_tls` documentation state the 1.5.12 facts.
+- **`signature_algorithms_cert` in the Go `boringcrypto` offer carries the legacy SHA-1 tail** (`rsa_pkcs1_sha1`, `ecdsa_sha1`), arbitrated by the same capture — the extension payload is fifteen schemes, not the thirteen of `signature_algorithms`. The "pending arbitration" note is closed; a byte-level regression test pins the payload.
+- **`Host` and `:authority` no longer carry a scheme-default port.** `host:443` on a TLS target (or `:80` in plaintext) stays in the dial authority and the pool key, but the *header* value is the bare host, which is what every mainstream client — the captured `agy` included — puts on the wire. Non-default ports are kept.
+- `H2Fingerprint::go` documentation re-verified against the 1.5.12 capture (SETTINGS, connection window, pseudo-header order all exact) and now records the fixed transport-stamped tail (`content-length`, `accept-encoding: gzip`, default `user-agent`) that follows Go's randomized caller headers.
+
+### Fixed
+
+- **Cancel-safe full-duplex `WsSession` liveness (`[INV-WS-09]` / [ADR-0056](docs/adr/0056-transport-reachability-pool-flush-and-ws-session-liveness.md))**: `WsSession` stamps each heartbeat ping with a monotonic non-empty 8-byte probe payload, arms `ping_in_flight` before awaiting flush, and discharges across unlimited ping/pong cycles; `WsStream` drains `write_buf` incrementally so `WsSession::next()` is cancel-safe inside `tokio::select!`.
+
 ## [0.1.1] - 2026-11-16
 
 SemVer-compatible stabilization, documentation, and CI hardening release on the

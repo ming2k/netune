@@ -4,7 +4,7 @@
 //! asynchronous transport, with automatic ping/pong heartbeat echoing, close
 //! handshake completion, and nanosecond trace integration via [`TimedIo`].
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use netune_trace::{
@@ -272,6 +272,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
     ///   fragmented messages stay individually visible in the trace.
     pub async fn receive(&mut self) -> Result<Option<Message>, NetError> {
         loop {
+            // Drain any frame bytes left over from a cancelled control/data write
+            // before reading so full-duplex `tokio::select!` stays frame-aligned
+            // (`[INV-WS-09]`).
+            if !self.write_buf.is_empty() {
+                self.flush_write_buf().await?;
+            }
             // First, try decoding any complete frames already in read_buf
             if let Some(frame) = FrameDecoder::decode(
                 &mut self.read_buf,
@@ -324,22 +330,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
                             );
                         }
                         let close_reply = Frame::close(Some(echo), "");
-                        let _ = self.write_frame(&close_reply).await;
+                        // Mark closed before `.await` so cancelling mid-flush under
+                        // `tokio::select!` cannot permit a subsequent data frame
+                        // (RFC 6455 §5.5.1) or misclassify EOF as premature close.
                         self.closed = true;
+                        let _ = self.write_frame(&close_reply).await;
                         Some(echo)
                     }
                     Opcode::Close => Some(CloseCode::NORMAL),
-                    Opcode::Pong => {
-                        // Discharge our outstanding probe only if the payload
-                        // matches; a peer-initiated pong is liveness evidence
-                        // but not an answer to our question.
-                        if let Some(expected) = self.outstanding_ping.as_ref()
-                            && frame.payload == *expected
-                        {
-                            self.outstanding_ping = None;
-                        }
-                        None
-                    }
+                    Opcode::Pong => None,
                     _ => None,
                 };
 
@@ -410,14 +409,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsStream<S> {
             .unwrap_or(false)
     }
 
-    /// Internal helper: write a masked frame to the stream.
+    /// Internal helper: append a masked frame and flush `write_buf`
+    /// incrementally so dropping the future mid-write never corrupts frame
+    /// framing (`[INV-WS-09]`).
     async fn write_frame(&mut self, frame: &Frame) -> Result<(), NetError> {
         let mask = Some(generate_mask());
-        self.write_buf.clear();
         FrameEncoder::encode(frame, mask, &mut self.write_buf);
-        self.stream.write_all(&self.write_buf).await.map_err(|e| {
-            NetError::Connect(ConnectError::io(DiagnosticPhase::WebSocket, "websocket", e))
-        })?;
+        self.flush_write_buf().await
+    }
+
+    async fn flush_write_buf(&mut self) -> Result<(), NetError> {
+        while !self.write_buf.is_empty() {
+            let written = self.stream.write(&self.write_buf).await.map_err(|e| {
+                NetError::Connect(ConnectError::io(DiagnosticPhase::WebSocket, "websocket", e))
+            })?;
+            if written == 0 {
+                return Err(NetError::Connect(ConnectError::io(
+                    DiagnosticPhase::WebSocket,
+                    "websocket",
+                    std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write WebSocket frame",
+                    ),
+                )));
+            }
+            self.write_buf.advance(written);
+        }
         self.stream.flush().await.map_err(|e| {
             NetError::Connect(ConnectError::io(DiagnosticPhase::WebSocket, "websocket", e))
         })?;

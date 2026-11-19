@@ -11,10 +11,12 @@
 //! Built-in presets:
 //!
 //! - `netune-default` — Go-shaped hello, HTTP/1.1 ALPN only.
-//! - `antigravity-cli-stream` — Antigravity CLI streaming/telemetry path
-//!   (`h2, http/1.1` ALPN, Go 1.28 `boringcrypto` shape).
-//! - `antigravity-cli-unary` — Antigravity CLI unary Cloud Code path
-//!   (`http/1.1` ALPN only, Go 1.28 `boringcrypto` shape).
+//! - `antigravity-cli-stream` — Antigravity CLI h2 paths (Clearcut
+//!   telemetry to `play.googleapis.com`, the auto-updater): `h2, http/1.1`
+//!   ALPN, Go 1.28 `boringcrypto` shape.
+//! - `antigravity-cli-unary` — Antigravity CLI HTTP/1.1 paths: every
+//!   `/v1internal:*` Cloud Code call **including the streaming model
+//!   lane** (`http/1.1` ALPN only, Go 1.28 `boringcrypto` shape).
 //! - `go-standard` — upstream Go `crypto/tls` (without `boringcrypto`).
 //! - `chrome-current` — Chrome/BoringSSL (GREASE, `compress_certificate`,
 //!   ALPS, seeded extension permutation, BoringSSL 517-byte padding).
@@ -36,13 +38,22 @@ pub enum Preset {
     /// netune's shipped identity: the Go-shaped hello, HTTP/1.1 ALPN only.
     NetuneDefault,
     /// The Google Antigravity CLI (`agy`) identity — a **Go `crypto/tls`**
-    /// client (Go 1.28, `boringcrypto` build tag) on its **streaming** paths:
-    /// Clearcut telemetry and the model-streaming transport, ALPN
-    /// `h2, http/1.1`, paired with the `go-nethttp` H2 fingerprint.
+    /// client (Go 1.28, `boringcrypto` build tag) on its **h2** paths.
+    /// As of the live 1.5.12 capture (2026-11-19) the h2 paths are the
+    /// Clearcut telemetry lane (`play.googleapis.com /log`) and the
+    /// auto-updater (`*.run.app`): ALPN `h2, http/1.1`, paired with the
+    /// `go-nethttp` H2 fingerprint and Go's stock default UA
+    /// (`Go-http-client/2.0`). The CLI's Cloud Code calls — unary *and*
+    /// model-streaming — are HTTP/1.1 and ride the [`AntigravityCliUnary`]
+    /// identity instead.
     AntigravityCliStream,
-    /// The Google Antigravity CLI (`agy`) identity on its **unary** Cloud
-    /// Code path: `/v1internal:*` JSON calls over `http/1.1` only
-    /// (`stripHTTP2NextProto`). ([`INV-TLS-10`])
+    /// The Google Antigravity CLI (`agy`) identity on its **HTTP/1.1** paths:
+    /// every `/v1internal:*` Cloud Code call *including the
+    /// `:streamGenerateContent?alt=sse` model lane* (live 1.5.12 capture,
+    /// 2026-11-19 — the streaming lane moved off h2 in this lineage),
+    /// `http/1.1` ALPN only (`stripHTTP2NextProto`), brand UA
+    /// `antigravity/cli/…`, chunked uploads on the streaming call.
+    /// ([`INV-TLS-10`])
     AntigravityCliUnary,
     /// Upstream Go `crypto/tls` (without `boringcrypto`).
     GoStandard,

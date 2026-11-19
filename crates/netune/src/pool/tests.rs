@@ -438,3 +438,22 @@ async fn shared_h2_session_bounds_concurrent_permits_and_evicts_on_goaway() {
     assert!(pool.checkout_http2(&k).is_none());
     assert_eq!(pool.idle_count(&k), 0);
 }
+
+#[test]
+fn inv_transport_15_clear_evicts_all_idle_entries() {
+    let p = pool(4, Duration::from_secs(60));
+    let k1 = key("a.example:443");
+    let k2 = key("b.example:443");
+    let (s1, _p1) = tokio::io::duplex(64);
+    let (s2, _p2) = tokio::io::duplex(64);
+    p.put(&k1, Box::new(s1), bytes::BytesMut::new(), None, None);
+    p.put(&k2, Box::new(s2), bytes::BytesMut::new(), None, None);
+    assert_eq!(p.total_idle_count(), 2);
+
+    let evicted = p.clear();
+    assert_eq!(evicted, 2);
+    assert_eq!(p.total_idle_count(), 0);
+    assert!(p.take(&k1).is_none());
+    assert!(p.take(&k2).is_none());
+    assert_eq!(p.clear(), 0);
+}

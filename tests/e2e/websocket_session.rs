@@ -588,3 +588,143 @@ async fn text_roundtrip_through_session() {
         .expect("some");
     assert_eq!(msg, WsMessage::Text("WORLD".to_string()));
 }
+
+#[tokio::test]
+async fn inv_ws_09_session_survives_multiple_ping_pong_cycles_and_interleaved_sends() {
+    use netune_ws::{FrameDecoder, FrameEncoder, Opcode, Role};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("port").port();
+
+    // Real RFC 6455 echo server: echoes every client ping's exact payload as a
+    // pong, and echoes text frames back in uppercase.
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut req = Vec::new();
+        let mut tmp = [0u8; 1024];
+        loop {
+            let n = socket.read(&mut tmp).await.expect("read");
+            assert!(n > 0);
+            req.extend_from_slice(&tmp[..n]);
+            if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let req_str = String::from_utf8_lossy(&req);
+        let key = req_str
+            .lines()
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                k.eq_ignore_ascii_case("sec-websocket-key")
+                    .then(|| v.trim().to_string())
+            })
+            .expect("sec-websocket-key");
+        let accept = netune_ws::compute_accept_key(&key);
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {accept}\r\n\r\n"
+        );
+        socket.write_all(response.as_bytes()).await.expect("101");
+
+        let mut read_buf = bytes::BytesMut::new();
+        let mut write_buf = bytes::BytesMut::new();
+        let mut pings_seen = 0usize;
+        let mut texts_seen = 0usize;
+        loop {
+            while let Some(frame) =
+                FrameDecoder::decode(&mut read_buf, Role::Server, 64 * 1024).expect("decode")
+            {
+                match frame.opcode {
+                    Opcode::Ping => {
+                        pings_seen += 1;
+                        assert!(
+                            !frame.payload.is_empty(),
+                            "session heartbeat pings must carry a non-empty probe payload"
+                        );
+                        write_buf.clear();
+                        FrameEncoder::encode(&Frame::pong(frame.payload), None, &mut write_buf);
+                        socket.write_all(&write_buf).await.expect("pong");
+                    }
+                    Opcode::Text => {
+                        texts_seen += 1;
+                        let reply = String::from_utf8_lossy(&frame.payload).to_uppercase();
+                        write_buf.clear();
+                        FrameEncoder::encode(
+                            &Frame::text(Bytes::from(reply)),
+                            None,
+                            &mut write_buf,
+                        );
+                        socket.write_all(&write_buf).await.expect("text reply");
+                    }
+                    Opcode::Close => return (pings_seen, texts_seen),
+                    _ => {}
+                }
+            }
+            let n = socket.read_buf(&mut read_buf).await.expect("read frame");
+            if n == 0 {
+                return (pings_seen, texts_seen);
+            }
+        }
+    });
+
+    let client = test_client();
+    let ws = client
+        .connect_ws_with(
+            &test_target(port),
+            "/ws",
+            netune::WsHandshake::default().with_extra_header("x-test", "ok"),
+        )
+        .await
+        .expect("connect");
+
+    // Tight intervals so 3 full ping/pong cycles run in ~250ms, well past
+    // `pong_timeout` (120ms) — the old bug killed the session after cycle 1.
+    let mut session = netune::WsSession::new(
+        ws,
+        netune::WsSessionConfig::default()
+            .with_ping_interval(Duration::from_millis(45))
+            .with_pong_timeout(Duration::from_millis(120)),
+    );
+
+    let (tx, mut rx) = mpsc::channel::<String>(4);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        let _ = tx.send("alpha".to_string()).await;
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        let _ = tx.send("beta".to_string()).await;
+    });
+
+    let mut pongs = 0usize;
+    let mut texts = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while pongs < 3 || texts.len() < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for cycles (pongs={pongs}, texts={texts:?})"
+        );
+        tokio::select! {
+            Some(outbound) = rx.recv() => {
+                session.send_text(outbound).await.expect("interleaved send");
+            }
+            inbound = session.next() => {
+                match inbound.expect("session must stay alive across cycles") {
+                    Some(WsMessage::Pong(_)) => pongs += 1,
+                    Some(WsMessage::Text(text)) => texts.push(text),
+                    other => panic!("unexpected frame: {other:?}"),
+                }
+            }
+        }
+    }
+
+    session
+        .close(netune_ws::CloseCode::NORMAL, "done")
+        .await
+        .expect("close");
+    let (pings_seen, texts_seen) = server.await.expect("server join");
+    assert!(pings_seen >= 3);
+    assert_eq!(texts_seen, 2);
+    assert_eq!(texts, vec!["ALPHA", "BETA"]);
+}

@@ -151,6 +151,35 @@ impl H1WireProfile {
         )
     }
 
+    /// Go `net/http`'s HTTP/1.1 order, as the shipped `agy` 1.5.12 puts it on
+    /// the wire (live capture 2026-11-19, every lane of the CLI):
+    /// `Host`, `User-Agent`, then the automatic `Content-Length` or
+    /// `Transfer-Encoding: chunked`, then the caller's own headers, then the
+    /// transport-stamped `Accept-Encoding: gzip` last.
+    ///
+    /// Go's exact rule for the caller's own headers is "sorted by canonical
+    /// key" (`Header.writeSubset`); the fixed list below reproduces the
+    /// observed sequences for the header sets the CLI's Cloud Code calls
+    /// carry (`Authorization`, `Content-Type` sort naturally in that order),
+    /// and headers not named here keep their relative order after the named
+    /// ones instead of being sorted — the one simplification this profile
+    /// makes.
+    pub fn antigravity_cli() -> Self {
+        Self::new(
+            "antigravity-cli",
+            HeaderCasing::TitleCase,
+            [
+                "host",
+                "user-agent",
+                "content-length",
+                "transfer-encoding",
+                "authorization",
+                "content-type",
+                "accept-encoding",
+            ],
+        )
+    }
+
     /// Apply this profile to `head` in place.
     ///
     /// A head that already carries `raw_headers` is left untouched: the caller
@@ -359,6 +388,7 @@ impl Default for H1Registry {
             H1WireProfile::netune(),
             H1WireProfile::browser(),
             H1WireProfile::chrome(),
+            H1WireProfile::antigravity_cli(),
         ] {
             profiles.insert(profile.id().clone(), profile);
         }
@@ -517,10 +547,12 @@ impl H2Registry {
         let id = match tls_profile {
             Some("safari-current") => "safari-18",
             Some("firefox-current") => "firefox-132",
-            // The CLI's h2 paths: telemetry and model streaming.
+            // The CLI's h2 paths as of 1.5.12: Clearcut telemetry and the
+            // auto-updater. The Cloud Code calls — unary and streaming —
+            // are HTTP/1.1 and never reach this mapping.
             Some("antigravity-cli-stream") => "go-nethttp",
-            // The CLI's unary path opens no h2 connection at all, so it pairs
-            // with none (ADR-0047, [INV-TLS-10]).
+            // The CLI's HTTP/1.1 paths open no h2 connection at all, so they
+            // pair with none (ADR-0047, [INV-TLS-10]).
             Some("antigravity-cli-unary") => return None,
             _ => "chrome-130",
         };
@@ -564,6 +596,43 @@ mod tests {
         assert_eq!(
             head.raw_headers,
             Some(vec![("X-Exact".to_string(), "yes".to_string())])
+        );
+    }
+
+    /// The `antigravity-cli` wire profile reproduces the decrypted head the
+    /// shipped `agy` 1.5.12 puts on the wire (live capture 2026-11-19):
+    /// `Host`, `User-Agent`, the automatic `Content-Length` (or
+    /// `Transfer-Encoding`), then the caller's own headers, then the
+    /// transport-stamped `Accept-Encoding: gzip` last — Title-Case
+    /// throughout. The input order here is deliberately scrambled: the
+    /// profile, not the caller, owns the order.
+    #[test]
+    fn antigravity_cli_profile_reproduces_the_captured_head_order() {
+        let mut head = RequestHead::new(Method::POST, "/v1internal:loadCodeAssist")
+            .with_header("accept-encoding", "gzip")
+            .with_header("content-type", "application/json")
+            .with_header("authorization", "Bearer x")
+            .with_header(
+                "user-agent",
+                "antigravity/cli/1.5.12 (aidev_client; os_type=linux; arch=amd64; \
+             cl=1024904911; auth_method=consumer)",
+            )
+            .with_header("content-length", "38")
+            .with_header("host", "daily-cloudcode-pa.googleapis.com");
+        H1WireProfile::antigravity_cli().apply(&mut head);
+        let raw = head.raw_headers.expect("raw head");
+        let names: Vec<&str> = raw.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Host",
+                "User-Agent",
+                "Content-Length",
+                "Authorization",
+                "Content-Type",
+                "Accept-Encoding",
+            ],
+            "the 1.5.12 captured order"
         );
     }
 

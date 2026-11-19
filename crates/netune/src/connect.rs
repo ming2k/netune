@@ -398,14 +398,18 @@ impl Target {
                 format!("url has no host: {url}"),
             )));
         }
-        let default_port = if scheme == "https" { 443 } else { 80 };
+        let default_port = if matches!(scheme, "https" | "wss") {
+            443
+        } else {
+            80
+        };
         let authority = normalize_authority(authority, default_port);
         let target = match scheme {
-            "https" => {
+            "https" | "wss" => {
                 let host = authority_host(&authority).to_string();
                 Self::tls(authority, host)
             }
-            "http" => Self::plain(authority),
+            "http" | "ws" => Self::plain(authority),
             other => {
                 return Err(NetError::Connect(ConnectError::config(
                     DiagnosticPhase::Dispatch,
@@ -1167,6 +1171,16 @@ mod tests {
         assert_eq!(normalize_authority("2001:db8::", 443), "[2001:db8::]:443");
         assert_eq!(authority_host("::1"), "::1");
         assert_eq!(authority_host("2001:db8::"), "2001:db8::");
+
+        let (ws_target, ws_path) = Target::from_url("ws://127.0.0.1:9800/").expect("ws url");
+        assert_eq!(ws_path, "/");
+        assert_eq!(ws_target.authority, "127.0.0.1:9800");
+        assert_eq!(ws_target.tls_server_name(), None);
+
+        let (wss_target, wss_path) = Target::from_url("wss://nuo.example/chat").expect("wss url");
+        assert_eq!(wss_path, "/chat");
+        assert_eq!(wss_target.authority, "nuo.example:443");
+        assert_eq!(wss_target.tls_server_name(), Some("nuo.example"));
     }
 
     #[test]

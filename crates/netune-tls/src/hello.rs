@@ -27,10 +27,11 @@ use crate::wire::{
     EXT_SUPPORTED_GROUPS, EXT_SUPPORTED_VERSIONS, GROUP_SECP256R1, GROUP_SECP256R1_ML_KEM_768,
     GROUP_SECP384R1, GROUP_SECP384R1_ML_KEM_1024, GROUP_SECP521R1, GROUP_X25519,
     GROUP_X25519_ML_KEM_768, PSK_DHE_KE, SIG_ECDSA_SECP256R1_SHA256, SIG_ECDSA_SECP384R1_SHA384,
-    SIG_ECDSA_SECP521R1_SHA512, SIG_ED25519, SIG_ML_DSA_44, SIG_ML_DSA_65, SIG_ML_DSA_87,
-    SIG_RSA_PKCS1_SHA256, SIG_RSA_PKCS1_SHA384, SIG_RSA_PKCS1_SHA512, SIG_RSA_PSS_RSAE_SHA256,
-    SIG_RSA_PSS_RSAE_SHA384, SIG_RSA_PSS_RSAE_SHA512, SUITE_ECDHE_ECDSA_AES_128_CBC,
-    SUITE_ECDHE_ECDSA_AES_128_GCM, SUITE_ECDHE_ECDSA_AES_256_CBC, SUITE_ECDHE_ECDSA_AES_256_GCM,
+    SIG_ECDSA_SECP521R1_SHA512, SIG_ECDSA_SHA1, SIG_ED25519, SIG_ML_DSA_44, SIG_ML_DSA_65,
+    SIG_ML_DSA_87, SIG_RSA_PKCS1_SHA1, SIG_RSA_PKCS1_SHA256, SIG_RSA_PKCS1_SHA384,
+    SIG_RSA_PKCS1_SHA512, SIG_RSA_PSS_RSAE_SHA256, SIG_RSA_PSS_RSAE_SHA384,
+    SIG_RSA_PSS_RSAE_SHA512, SUITE_ECDHE_ECDSA_AES_128_CBC, SUITE_ECDHE_ECDSA_AES_128_GCM,
+    SUITE_ECDHE_ECDSA_AES_256_CBC, SUITE_ECDHE_ECDSA_AES_256_GCM,
     SUITE_ECDHE_ECDSA_CHACHA20_POLY1305, SUITE_ECDHE_RSA_AES_128_CBC, SUITE_ECDHE_RSA_AES_128_GCM,
     SUITE_ECDHE_RSA_AES_256_CBC, SUITE_ECDHE_RSA_AES_256_GCM, SUITE_ECDHE_RSA_CHACHA20_POLY1305,
     SUITE_TLS13_AES_128_GCM, SUITE_TLS13_AES_256_GCM, SUITE_TLS13_CHACHA20_POLY1305, grease_at,
@@ -615,8 +616,10 @@ impl ClientHello {
     ///   `key_share`;
     /// - 7 hybrid-first key-exchange groups, key shares for the hybrid
     ///   group and `x25519`;
-    /// - 13 signature schemes, ML-DSA first, mirrored in
-    ///   `signature_algorithms_cert`;
+    /// - 13 signature schemes, ML-DSA first; `signature_algorithms_cert`
+    ///   mirrors them **plus the two-scheme legacy SHA-1 tail** (`0x0201`,
+    ///   `0x0203`) — arbitrated by the live 1.5.12 capture, closing the
+    ///   earlier "pending" note;
     /// - no session ticket, no PSK, no GREASE, no padding;
     /// - JA3 md5 `03117a8ed39ef02427ebbc39f121275c`; JA4
     ///   `t13d1312h1_f57a46bbacb6_f50d94e863eb` for the unary
@@ -626,9 +629,7 @@ impl ClientHello {
     /// measured client too; they arrive through [`GoIdentity`], not through
     /// the profile.
     ///
-    /// Two bodies are pending arbitration against the raw capture corpus and
-    /// are noted where they are encoded: the `signature_algorithms_cert`
-    /// list (encoded here as the mirror of `signature_algorithms`). The
+    /// One body remains noted rather than arbitrated by capture: the
     /// `renegotiation_info` payload was arbitrated by the RFC 8448 §3
     /// ClientHello: the one-byte empty offer.
     #[must_use]
@@ -680,7 +681,7 @@ impl ClientHello {
                 },
                 Extension {
                     body: ExtensionBody::SignatureAlgorithmsCert {
-                        schemes: GO_SIGNATURE_SCHEMES.to_vec(),
+                        schemes: GO_SIGNATURE_SCHEMES_CERT.to_vec(),
                     },
                 },
                 Extension {
@@ -790,6 +791,33 @@ const GO_SIGNATURE_SCHEMES: &[u16] = &[
     SIG_RSA_PKCS1_SHA512,
     SIG_ECDSA_SECP384R1_SHA384,
     SIG_ECDSA_SECP521R1_SHA512,
+];
+
+/// The `signature_algorithms_cert` offer: Go's 13 schemes **plus the legacy
+/// SHA-1 tail** (`rsa_pkcs1_sha1`, `ecdsa_sha1`).
+///
+/// Arbitrated by live capture of the shipped `agy` 1.5.12 (2026-11-19): on
+/// every TLS lane the extension `0x0032` payload decodes to
+/// `001e 0904 0905 0906 0804 0403 0807 0805 0806 0401 0501 0601 0503 0603
+/// 0201 0203` — fifteen schemes, the last two SHA-1. This resolves the
+/// "pending arbitration" note that previously encoded the list as the plain
+/// mirror of `signature_algorithms`.
+const GO_SIGNATURE_SCHEMES_CERT: &[u16] = &[
+    SIG_ML_DSA_44,
+    SIG_ML_DSA_65,
+    SIG_ML_DSA_87,
+    SIG_RSA_PSS_RSAE_SHA256,
+    SIG_ECDSA_SECP256R1_SHA256,
+    SIG_ED25519,
+    SIG_RSA_PSS_RSAE_SHA384,
+    SIG_RSA_PSS_RSAE_SHA512,
+    SIG_RSA_PKCS1_SHA256,
+    SIG_RSA_PKCS1_SHA384,
+    SIG_RSA_PKCS1_SHA512,
+    SIG_ECDSA_SECP384R1_SHA384,
+    SIG_ECDSA_SECP521R1_SHA512,
+    SIG_RSA_PKCS1_SHA1,
+    SIG_ECDSA_SHA1,
 ];
 
 /// One extension slot in a [`ClientHelloBlueprint`].
@@ -948,7 +976,7 @@ impl ClientHelloBlueprint {
             key_share_groups: vec![GROUP_X25519_ML_KEM_768, GROUP_X25519],
             grease_key_share: false,
             signature_algorithms: GO_SIGNATURE_SCHEMES.to_vec(),
-            signature_algorithms_cert: Some(GO_SIGNATURE_SCHEMES.to_vec()),
+            signature_algorithms_cert: Some(GO_SIGNATURE_SCHEMES_CERT.to_vec()),
             alpn: vec![b"http/1.1".to_vec()],
             supported_versions: vec![0x0304, 0x0303],
             grease_supported_version: false,

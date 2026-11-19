@@ -204,30 +204,42 @@ impl H2Fingerprint {
 
     /// The Go `net/http` client identity (`golang.org/x/net/http2`).
     ///
-    /// Live-captured from Google Antigravity CLI 1.5.3 (`agy`, Go 1.28) and
-    /// re-verified on 1.5.9 (2026-11): the CLI's unary Cloud Code API is
-    /// HTTP/1.1-only (`stripHTTP2NextProto`), so this framing is what its *h2*
-    /// connections put on the wire — Clearcut telemetry to
-    /// `play.googleapis.com`, and the model-streaming transport. It is the same
-    /// framing every Go binary that uses `net/http` over HTTP/2 emits (the
-    /// values are `golang.org/x/net/http2` defaults, not the CLI's):
+    /// Live-captured from Google Antigravity CLI 1.5.3 (`agy`, Go 1.28),
+    /// re-verified on 1.5.9 (2026-11) and **re-verified on 1.5.12
+    /// (2026-11-19, decrypted MITM)**: as of 1.5.12 this framing is what the
+    /// CLI's *h2* connections put on the wire — Clearcut telemetry to
+    /// `play.googleapis.com` and the auto-updater on `*.run.app`. The unary
+    /// Cloud Code API and the model-streaming lane
+    /// (`v1internal:streamGenerateContent?alt=sse`) are **HTTP/1.1** in this
+    /// lineage and never reach this fingerprint. The values are
+    /// `golang.org/x/net/http2` defaults, not the CLI's:
     ///
     /// - `SETTINGS`: `ENABLE_PUSH=0`, `INITIAL_WINDOW_SIZE=4194304`,
     ///   `MAX_FRAME_SIZE=1048576`, `MAX_HEADER_LIST_SIZE=10485760` — in that
-    ///   order, which is Go's `writeSettings` order.
-    /// - connection `WINDOW_UPDATE` of `1073741824` (Go's 1 GiB transport cap).
+    ///   order, which is Go's `writeSettings` order (1.5.12 capture: exact).
+    /// - connection `WINDOW_UPDATE` of `1073741824` (Go's 1 GiB transport cap;
+    ///   1.5.12 capture: exact).
     /// - no `HEADER_TABLE_SIZE` setting (HPACK decoder table stays the 4096
     ///   default) and no `MAX_CONCURRENT_STREAMS` (Go never sends it).
-    /// - no PRIORITY frames (Go never sends them).
+    /// - no PRIORITY frames (Go never sends them; 1.5.12 capture:
+    ///   `HEADERS` flags `0x4`/`0x5`, no priority bits).
     /// - pseudo-headers in Go's order: `:authority`, `:method`, `:path`,
-    ///   `:scheme`.
+    ///   `:scheme` (Go `internal/httpcommon.EncodeHeaders`; 1.5.12 capture:
+    ///   exact).
     /// - **regular headers are randomized per request** ([`RegularHeaderOrder::GoMapRandom`]):
-    ///   Go `net/http` writes them by map iteration, so every request carries
-    ///   a fresh order. The request seed is the connection's header-order seed
-    ///   mixed with the stream id, so the sequence is reproducible from a
-    ///   fixed seed and differs between requests on one connection
-    ///   ([`INV-CUSTOM-22`]). This matches Go's behaviour as a *distribution*,
-    ///   not as any single capture — the same is true of Go's own requests.
+    ///   Go iterates the caller's `http.Header` map for everything the
+    ///   application set, so every request carries a fresh order. The
+    ///   transport-stamped headers follow *after* the map in a fixed tail
+    ///   (Go's `EncodeHeaders` writes `content-length`, then
+    ///   `accept-encoding: gzip`, then the default `user-agent`) — a caller
+    ///   that passes those as ordinary headers here shuffles them too, which
+    ///   is the one place this model is coarser than the captured client.
+    ///   The request seed is the connection's header-order seed mixed with
+    ///   the stream id, so the sequence is reproducible from a fixed seed
+    ///   and differs between requests on one connection
+    ///   ([`INV-CUSTOM-22`]). This matches Go's behaviour as a
+    ///   *distribution*, not as any single capture — the same is true of
+    ///   Go's own requests.
     ///
     /// Akamai H2 Hash: `2:0,4:4194304,5:1048576,6:10485760|1073741824|0|a,m,p,s`
     pub fn go() -> Self {

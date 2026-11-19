@@ -945,6 +945,38 @@ impl Pool {
         reap_inner(&self.inner)
     }
 
+    /// Immediately evict every pooled HTTP/1.1, HTTP/2, and HTTP/3 connection
+    /// without disturbing already checked-out in-flight streams
+    /// (`[INV-TRANSPORT-15]`).
+    ///
+    /// Returns the number of pooled connection entries removed. Callers use
+    /// this on transport-level retry backoff or after a suspected network
+    /// change so the next attempt dials fresh sockets instead of inheriting
+    /// half-open pooled sessions.
+    pub fn clear(&self) -> usize {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut evicted = 0usize;
+        for entries in state.idle.values() {
+            evicted += entries.len();
+        }
+        state.idle.clear();
+        #[cfg(feature = "http2")]
+        {
+            for entries in state.shared_h2.values() {
+                evicted += entries.len();
+            }
+            state.shared_h2.clear();
+        }
+        #[cfg(feature = "http3")]
+        {
+            for entries in state.shared_h3.values() {
+                evicted += entries.len();
+            }
+            state.shared_h3.clear();
+        }
+        evicted
+    }
+
     /// Number of idle connections retained for `key` (tests, diagnostics).
     pub fn idle_count(&self, key: &PoolKey) -> usize {
         let now = Instant::now();

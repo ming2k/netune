@@ -49,17 +49,17 @@ brotli = { workspace = true }
 bytes = { workspace = true }
 flate2 = { workspace = true }
 http = { workspace = true }
-netune = { path = "crates/netune", version = "0.1.1", default-features = false }
-netune-http1 = { path = "crates/netune-http1", version = "0.1.1" }
-netune-http2 = { path = "crates/netune-http2", version = "0.1.1" }
-netune-http3 = { path = "crates/netune-http3", version = "0.1.1" }
-netune-quic = { path = "crates/netune-quic", version = "0.1.1" }
-netune-server = { path = "crates/netune-server", version = "0.1.1", default-features = false }
-netune-tls = { path = "crates/netune-tls", version = "0.1.1" }
-test-support = { path = "crates/test-support", version = "0.1.1" }
-netune-trace = { path = "crates/netune-trace", version = "0.1.1" }
-netune-webtransport = { path = "crates/netune-webtransport", version = "0.1.1" }
-netune-ws = { path = "crates/netune-ws", version = "0.1.1" }
+netune = { path = "crates/netune", version = "0.1.2", default-features = false }
+netune-http1 = { path = "crates/netune-http1", version = "0.1.2" }
+netune-http2 = { path = "crates/netune-http2", version = "0.1.2" }
+netune-http3 = { path = "crates/netune-http3", version = "0.1.2" }
+netune-quic = { path = "crates/netune-quic", version = "0.1.2" }
+netune-server = { path = "crates/netune-server", version = "0.1.2", default-features = false }
+netune-tls = { path = "crates/netune-tls", version = "0.1.2" }
+test-support = { path = "crates/test-support", version = "0.1.2" }
+netune-trace = { path = "crates/netune-trace", version = "0.1.2" }
+netune-webtransport = { path = "crates/netune-webtransport", version = "0.1.2" }
+netune-ws = { path = "crates/netune-ws", version = "0.1.2" }
 quinn = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
@@ -70,7 +70,7 @@ tokio-rustls = { workspace = true }
 workspace = true
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"

@@ -60,7 +60,7 @@ initial `0.0.z` resolver semantics. Consumers should pin exact tags or use
 Consumers depend on a tag:
 
 ```toml
-netune = { git = "https://github.com/ming2k/netune", tag = "v0.1.1" }
+netune = { git = "https://github.com/ming2k/netune", tag = "v0.1.2" }
 ```
 
 - `tag` is the readable form, `rev = "<sha>"` the most reproducible. Never recommend `branch`.

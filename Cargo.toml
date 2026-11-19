@@ -91,7 +91,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", 
 rustls-platform-verifier = "0.6"
 aws-lc-rs = "1.18"
 base64 = "0.22"
-brotli = "8"
+brotli = "9"
 flate2 = { version = "1.1", features = ["zlib-rs"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }
 socket2 = { version = "0.6", features = ["all"] }

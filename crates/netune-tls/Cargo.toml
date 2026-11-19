@@ -33,7 +33,7 @@ tokio = { workspace = true, features = ["io-util", "rt"] }
 # The TLS 1.2 CBC path needs the EVP interface (caller-supplied IV, no
 # crate-managed padding) and the MD5+SHA1 dual PRF — the two primitives the
 # `aws-lc-rs` facade does not expose ([INV-TLS-05]).
-aws-lc-sys = "0.45"
+aws-lc-sys = "0.47"
 # RFC 8879 certificate decompression (zlib + brotli) so compress_certificate
 # offers satisfy [INV-TLS-06] without advertising unsupported algorithms.
 brotli = { workspace = true }
